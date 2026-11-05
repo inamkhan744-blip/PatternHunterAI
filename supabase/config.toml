@@ -1,0 +1,4 @@
+project_id = ""
+
+[functions.explain-pattern]
+verify_jwt = false

@@ -8,7 +8,8 @@ export async function fetchCandles(
   limit = 200,
   interval: Timeframe = "1h"
 ): Promise<Candle[]> {
-  const url = `${BINANCE_API}?symbol=${symbol}&interval=${interval}&limit=${limit}`;
+  const binanceInterval = interval === "1W" ? "1w" : interval;
+  const url = `${BINANCE_API}?symbol=${symbol}&interval=${binanceInterval}&limit=${limit}`;
   const res = await fetch(url);
   if (!res.ok) {
     throw new Error(`Failed to fetch data for ${symbol} (${res.status})`);

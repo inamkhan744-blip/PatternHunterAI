@@ -1,5 +1,5 @@
 import { TrendingUp, TrendingDown, Star, Loader2, RefreshCw, Zap } from "lucide-react";
-import { COINS } from "../constants";
+import { COINS, PRO_COINS } from "../constants";
 import { fetchCandles } from "../lib/binance";
 import { detectPattern, formatPrice } from "../lib/patterns";
 import type { Coin, DetectedPattern, Timeframe, WatchlistItem } from "../types";
@@ -20,7 +20,7 @@ interface Props {
 }
 
 function coinFromSymbol(binanceSymbol: string): Coin | null {
-  return [...COINS].find((c) => c.binanceSymbol === binanceSymbol) ?? null;
+  return [...COINS, ...PRO_COINS].find((c) => c.binanceSymbol === binanceSymbol) ?? null;
 }
 
 export default function Watchlist({ timeframe, watchlist, onSelectCoin, onRemove }: Props) {

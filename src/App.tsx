@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useMemo } from "react";
 import {
   Activity,
   Crown,
@@ -13,6 +13,13 @@ import {
   List,
   Star,
   History as HistoryIcon,
+  Bell,
+  Search,
+  ArrowUpRight,
+  ArrowDownRight,
+  BarChart3,
+  TrendingUp,
+  TrendingDown,
 } from "lucide-react";
 import CandlestickChart from "./components/CandlestickChart";
 import PatternPanel from "./components/PatternPanel";
@@ -21,9 +28,10 @@ import ScanPanel from "./components/ScanPanel";
 import MarketScanner from "./components/MarketScanner";
 import Watchlist from "./components/Watchlist";
 import SignalHistory from "./components/SignalHistory";
+import PriceAlerts from "./components/PriceAlerts";
 import { COINS, PRO_COINS } from "./constants";
-import { fetchCandles } from "./lib/binance";
-import { detectPattern, formatPrice } from "./lib/patterns";
+import { fetchCandles, fetchMarketStats } from "./lib/binance";
+import { detectPattern, detectAllPatterns, formatPrice } from "./lib/patterns";
 import {
   generateFallbackAnalysis,
   parseAnalysisPrices,
@@ -31,13 +39,15 @@ import {
 } from "./lib/fallback";
 import { supabase } from "./lib/supabase";
 import { canScan, incrementScanCount, getRemainingScans, FREE_LIMIT } from "./lib/scanLimit";
-import type { Candle, Coin, DetectedPattern, ScanResult, Timeframe, WatchlistItem, AppTab } from "./types";
+import type { Candle, Coin, DetectedPattern, ScanResult, Timeframe, WatchlistItem, AppTab, MarketStats, PatternWithConfidence } from "./types";
 
 const TIMEFRAMES: { value: Timeframe; label: string }[] = [
+  { value: "5m", label: "5m" },
   { value: "15m", label: "15m" },
   { value: "1h", label: "1H" },
   { value: "4h", label: "4H" },
   { value: "1d", label: "1D" },
+  { value: "1W", label: "1W" },
 ];
 
 const TABS: { key: AppTab; label: string; icon: typeof ChartIcon }[] = [
@@ -45,7 +55,17 @@ const TABS: { key: AppTab; label: string; icon: typeof ChartIcon }[] = [
   { key: "scanner", label: "Scanner", icon: List },
   { key: "watchlist", label: "Watchlist", icon: Star },
   { key: "history", label: "History", icon: HistoryIcon },
+  { key: "alerts", label: "Alerts", icon: Bell },
 ];
+
+const ALL_COINS = [...COINS, ...PRO_COINS];
+
+function formatVolume(vol: number): string {
+  if (vol >= 1e9) return `$${(vol / 1e9).toFixed(2)}B`;
+  if (vol >= 1e6) return `$${(vol / 1e6).toFixed(2)}M`;
+  if (vol >= 1e3) return `$${(vol / 1e3).toFixed(1)}K`;
+  return `$${vol.toFixed(0)}`;
+}
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<AppTab>("chart");
@@ -53,16 +73,21 @@ export default function App() {
   const [timeframe, setTimeframe] = useState<Timeframe>("1h");
   const [candles, setCandles] = useState<Candle[]>([]);
   const [pattern, setPattern] = useState<DetectedPattern | null>(null);
+  const [allPatterns, setAllPatterns] = useState<PatternWithConfidence[]>([]);
   const [loading, setLoading] = useState(true);
   const [coinDropdownOpen, setCoinDropdownOpen] = useState(false);
   const [tfDropdownOpen, setTfDropdownOpen] = useState(false);
   const [priceChange, setPriceChange] = useState<number | null>(null);
   const [lastPrice, setLastPrice] = useState<number | null>(null);
+  const [marketStats, setMarketStats] = useState<MarketStats | null>(null);
+  const [coinSearch, setCoinSearch] = useState("");
 
   const [explanation, setExplanation] = useState<string | null>(null);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
   const [entryPrice, setEntryPrice] = useState<number | null>(null);
+  const [slPrice, setSlPrice] = useState<number | null>(null);
+  const [tpPrice, setTpPrice] = useState<number | null>(null);
 
   const [proModalOpen, setProModalOpen] = useState(false);
   const [scanPanelOpen, setScanPanelOpen] = useState(false);
@@ -76,12 +101,19 @@ export default function App() {
   const [watchSymbols, setWatchSymbols] = useState<Set<string>>(new Set());
   const [historyRefresh, setHistoryRefresh] = useState(0);
 
-  // ---- Pro state: ?pro=true for testing ----
+  // Filtered coin list for dropdown search
+  const filteredCoins = useMemo(() => {
+    if (!coinSearch.trim()) return ALL_COINS;
+    const q = coinSearch.toLowerCase();
+    return ALL_COINS.filter(
+      (c) => c.symbol.toLowerCase().includes(q) || c.label.toLowerCase().includes(q)
+    );
+  }, [coinSearch]);
+
+  // ---- Pro state ----
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    if (params.get("pro") === "true") {
-      setIsPro(true);
-    }
+    if (params.get("pro") === "true") setIsPro(true);
     setRemainingScans(getRemainingScans());
   }, []);
 
@@ -129,19 +161,25 @@ export default function App() {
     setExplanation(null);
     setAiError(null);
     setEntryPrice(null);
+    setSlPrice(null);
+    setTpPrice(null);
     try {
       const data = await fetchCandles(binanceSymbol, 200, tf);
       setCandles(data);
       setPattern(detectPattern(data));
+      setAllPatterns(detectAllPatterns(data));
       if (data.length >= 2) {
         const first = data[data.length - 25]?.close ?? data[0].close;
         const last = data[data.length - 1].close;
         setLastPrice(last);
         setPriceChange(((last - first) / first) * 100);
       }
+      const stats = await fetchMarketStats(binanceSymbol);
+      setMarketStats(stats);
     } catch {
       setCandles([]);
       setPattern(null);
+      setAllPatterns([]);
     } finally {
       setLoading(false);
     }
@@ -150,6 +188,67 @@ export default function App() {
   useEffect(() => {
     loadData(selectedCoin.binanceSymbol, timeframe);
   }, [selectedCoin, timeframe, loadData]);
+
+  // ---- Live price auto-refresh (every 15s) ----
+  useEffect(() => {
+    if (activeTab !== "chart") return;
+    const interval = setInterval(async () => {
+      try {
+        const data = await fetchCandles(selectedCoin.binanceSymbol, 5, timeframe);
+        if (data.length > 0) {
+          const latest = data[data.length - 1];
+          setLastPrice(latest.close);
+          setPriceChange(((latest.close - data[0].close) / data[0].close) * 100);
+          const stats = await fetchMarketStats(selectedCoin.binanceSymbol);
+          if (stats) setMarketStats(stats);
+        }
+      } catch {
+        // silent — auto-refresh failures shouldn't disrupt UX
+      }
+    }, 15000);
+    return () => clearInterval(interval);
+  }, [selectedCoin, timeframe, activeTab]);
+
+  // ---- Auto-resolve pending signal outcomes ----
+  const autoResolveSignals = useCallback(async () => {
+    const { data: pending } = await supabase
+      .from("signal_history")
+      .select("*")
+      .eq("outcome", "pending");
+    if (!pending || pending.length === 0) return;
+
+    for (const sig of pending) {
+      try {
+        const data = await fetchCandles(sig.binance_symbol, 10, "1h");
+        if (data.length === 0) continue;
+        const currentPrice = data[data.length - 1].close;
+        const tp = Number(sig.tp_price);
+        const sl = Number(sig.sl_price);
+
+        let outcome: "pending" | "hit_tp" | "hit_sl" = "pending";
+        if (sig.direction === "bullish") {
+          if (currentPrice >= tp) outcome = "hit_tp";
+          else if (currentPrice <= sl) outcome = "hit_sl";
+        } else {
+          if (currentPrice <= tp) outcome = "hit_tp";
+          else if (currentPrice >= sl) outcome = "hit_sl";
+        }
+
+        if (outcome !== "pending") {
+          await supabase.from("signal_history").update({ outcome }).eq("id", sig.id);
+        }
+      } catch {
+        // skip
+      }
+    }
+    setHistoryRefresh((k) => k + 1);
+  }, []);
+
+  useEffect(() => {
+    autoResolveSignals();
+    const interval = setInterval(autoResolveSignals, 60000);
+    return () => clearInterval(interval);
+  }, [autoResolveSignals]);
 
   // ---- AI Analysis ----
   const handleExplain = useCallback(async () => {
@@ -184,6 +283,8 @@ export default function App() {
         setAiError("AI analysis is currently unavailable — showing an automated estimate instead.");
         const prices = getFallbackPrices(pattern, lastPrice);
         setEntryPrice(prices.entry);
+        setSlPrice(prices.sl);
+        setTpPrice(prices.tp);
         return;
       }
       const text = data.explanation ?? "No analysis available.";
@@ -191,9 +292,13 @@ export default function App() {
       const parsed = parseAnalysisPrices(text);
       if (parsed) {
         setEntryPrice(parsed.entry);
+        setSlPrice(parsed.sl);
+        setTpPrice(parsed.tp);
       } else {
         const prices = getFallbackPrices(pattern, lastPrice);
         setEntryPrice(prices.entry);
+        setSlPrice(prices.sl);
+        setTpPrice(prices.tp);
       }
     } catch {
       clearTimeout(timeoutId);
@@ -202,6 +307,8 @@ export default function App() {
       setAiError("AI analysis is currently unavailable — showing an automated estimate instead.");
       const prices = getFallbackPrices(pattern, lastPrice);
       setEntryPrice(prices.entry);
+      setSlPrice(prices.sl);
+      setTpPrice(prices.tp);
     } finally {
       setAiLoading(false);
     }
@@ -270,20 +377,16 @@ export default function App() {
   const handleScanClick = useCallback(() => {
     setScanPanelOpen(true);
     if (scanResults.length === 0 && !scanning) {
-      if (isPro) {
-        runScan();
-      }
+      if (isPro) runScan();
     }
   }, [isPro, scanResults.length, scanning, runScan]);
 
   const handleFreeScan = useCallback(() => {
-    if (canScan()) {
-      runScan();
-    }
+    if (canScan()) runScan();
   }, [runScan]);
 
   const selectCoinFromScan = useCallback((binanceSymbol: string) => {
-    const coin = [...COINS, ...PRO_COINS].find((c) => c.binanceSymbol === binanceSymbol);
+    const coin = ALL_COINS.find((c) => c.binanceSymbol === binanceSymbol);
     if (coin) {
       setSelectedCoin(coin);
       setScanPanelOpen(false);
@@ -297,6 +400,7 @@ export default function App() {
   }, []);
 
   const changePercent = priceChange ?? 0;
+  const statsChange = marketStats?.priceChangePercent24h ?? changePercent;
   const tfLabel = TIMEFRAMES.find((t) => t.value === timeframe)?.label ?? "1H";
   const inWatch = watchSymbols.has(selectedCoin.binanceSymbol);
 
@@ -344,10 +448,10 @@ export default function App() {
         <div className="border-b border-slate-800 bg-slate-900/50">
           <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between gap-4 flex-wrap">
             <div className="flex items-center gap-3">
-              {/* Coin selector */}
+              {/* Coin selector with search */}
               <div className="relative">
                 <button
-                  onClick={() => setCoinDropdownOpen((v) => !v)}
+                  onClick={() => { setCoinDropdownOpen((v) => !v); setCoinSearch(""); }}
                   className="flex items-center gap-3 px-4 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors"
                 >
                   <div className="w-7 h-7 rounded-full bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center text-xs font-bold shrink-0">
@@ -364,28 +468,50 @@ export default function App() {
                 {coinDropdownOpen && (
                   <>
                     <div className="fixed inset-0 z-10" onClick={() => setCoinDropdownOpen(false)} />
-                    <div className="absolute top-full mt-2 left-0 z-20 w-56 rounded-xl bg-slate-800 border border-slate-700 shadow-2xl overflow-hidden">
-                      <div className="p-1 max-h-80 overflow-y-auto">
-                        {COINS.map((coin) => (
-                          <button
-                            key={coin.symbol}
-                            onClick={() => {
-                              setSelectedCoin(coin);
-                              setCoinDropdownOpen(false);
-                            }}
-                            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors ${
-                              coin.symbol === selectedCoin.symbol
-                                ? "bg-slate-700 text-white"
-                                : "text-slate-300 hover:bg-slate-700/50"
-                            }`}
-                          >
-                            <div className="w-6 h-6 rounded-full bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center text-[10px] font-bold shrink-0">
-                              {coin.symbol.slice(0, 3)}
-                            </div>
-                            <span className="font-medium">{coin.symbol}</span>
-                            <span className="text-slate-500 text-xs ml-auto">{coin.label}</span>
-                          </button>
-                        ))}
+                    <div className="absolute top-full mt-2 left-0 z-20 w-72 rounded-xl bg-slate-800 border border-slate-700 shadow-2xl overflow-hidden">
+                      {/* Search input */}
+                      <div className="p-2 border-b border-slate-700">
+                        <div className="relative">
+                          <Search className="w-4 h-4 text-slate-500 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                          <input
+                            type="text"
+                            value={coinSearch}
+                            onChange={(e) => setCoinSearch(e.target.value)}
+                            placeholder="Search coins..."
+                            autoFocus
+                            className="w-full bg-slate-900 border border-slate-700 rounded-lg pl-8 pr-3 py-2 text-sm text-white placeholder:text-slate-500 outline-none focus:border-cyan-500"
+                          />
+                        </div>
+                      </div>
+                      <div className="p-1 max-h-72 overflow-y-auto">
+                        {filteredCoins.length === 0 ? (
+                          <p className="text-sm text-slate-500 text-center py-4">No coins found</p>
+                        ) : (
+                          filteredCoins.map((coin) => {
+                            const isProCoin = PRO_COINS.some((c) => c.symbol === coin.symbol);
+                            return (
+                              <button
+                                key={coin.symbol}
+                                onClick={() => {
+                                  setSelectedCoin(coin);
+                                  setCoinDropdownOpen(false);
+                                }}
+                                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors ${
+                                  coin.symbol === selectedCoin.symbol
+                                    ? "bg-slate-700 text-white"
+                                    : "text-slate-300 hover:bg-slate-700/50"
+                                }`}
+                              >
+                                <div className="w-6 h-6 rounded-full bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center text-[10px] font-bold shrink-0">
+                                  {coin.symbol.slice(0, 3)}
+                                </div>
+                                <span className="font-medium">{coin.symbol}</span>
+                                <span className="text-slate-500 text-xs ml-auto">{coin.label}</span>
+                                {isProCoin && <Crown className="w-3 h-3 text-amber-400/50" />}
+                              </button>
+                            );
+                          })
+                        )}
                       </div>
                     </div>
                   </>
@@ -452,10 +578,9 @@ export default function App() {
               {lastPrice && (
                 <div className="flex items-baseline gap-2">
                   <span className="text-lg font-bold tracking-tight">{formatPrice(lastPrice)}</span>
-                  <span
-                    className={`text-sm font-medium ${changePercent >= 0 ? "text-green-400" : "text-red-400"}`}
-                  >
-                    {changePercent >= 0 ? "+" : ""}{changePercent.toFixed(2)}%
+                  <span className={`text-sm font-medium flex items-center ${statsChange >= 0 ? "text-green-400" : "text-red-400"}`}>
+                    {statsChange >= 0 ? <ArrowUpRight className="w-3.5 h-3.5" /> : <ArrowDownRight className="w-3.5 h-3.5" />}
+                    {statsChange >= 0 ? "+" : ""}{statsChange.toFixed(2)}%
                   </span>
                 </div>
               )}
@@ -469,6 +594,29 @@ export default function App() {
               </button>
             </div>
           </div>
+
+          {/* 24h market stats bar */}
+          {marketStats && (
+            <div className="max-w-7xl mx-auto px-4 sm:px-6 pb-3">
+              <div className="flex items-center gap-4 sm:gap-6 flex-wrap text-xs">
+                <div className="flex items-center gap-1.5">
+                  <BarChart3 className="w-3.5 h-3.5 text-slate-500" />
+                  <span className="text-slate-500">24h Vol:</span>
+                  <span className="text-slate-300 font-medium">{formatVolume(marketStats.volume24h)}</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <TrendingUp className="w-3.5 h-3.5 text-green-500" />
+                  <span className="text-slate-500">24h High:</span>
+                  <span className="text-green-400 font-medium">{formatPrice(marketStats.high24h)}</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <TrendingDown className="w-3.5 h-3.5 text-red-500" />
+                  <span className="text-slate-500">24h Low:</span>
+                  <span className="text-red-400 font-medium">{formatPrice(marketStats.low24h)}</span>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -476,7 +624,7 @@ export default function App() {
       <main className="flex-1 max-w-7xl mx-auto w-full">
         {activeTab === "chart" && (
           <div className="px-4 sm:px-6 py-4">
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 lg:h-[calc(100vh-220px)] min-h-[500px]">
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 lg:h-[calc(100vh-240px)] min-h-[500px]">
               {/* Chart */}
               <div className="lg:col-span-2 rounded-2xl bg-slate-900 border border-slate-800 overflow-hidden flex flex-col min-h-[400px]">
                 <div className="px-5 py-3 border-b border-slate-800 flex items-center justify-between">
@@ -508,9 +656,10 @@ export default function App() {
               </div>
 
               {/* Pattern panel */}
-              <div className="rounded-2xl bg-slate-900 border border-slate-800 overflow-hidden flex flex-col min-h-[500px] lg:max-h-[calc(100vh-220px)]">
+              <div className="rounded-2xl bg-slate-900 border border-slate-800 overflow-hidden flex flex-col min-h-[500px] lg:max-h-[calc(100vh-240px)]">
                 <PatternPanel
                   pattern={pattern}
+                  allPatterns={allPatterns}
                   price={lastPrice}
                   explanation={explanation}
                   loading={aiLoading}
@@ -520,6 +669,8 @@ export default function App() {
                   timeframe={timeframe}
                   onSaveSignal={handleSaveSignal}
                   entryPrice={entryPrice}
+                  slPrice={slPrice}
+                  tpPrice={tpPrice}
                 />
               </div>
             </div>
@@ -549,6 +700,10 @@ export default function App() {
             refreshKey={historyRefresh}
             onOutcomeChange={() => setHistoryRefresh((k) => k + 1)}
           />
+        )}
+
+        {activeTab === "alerts" && (
+          <PriceAlerts onSelectCoin={selectCoinFromTab} />
         )}
       </main>
 
@@ -582,7 +737,7 @@ export default function App() {
               <button
                 key={tab.key}
                 onClick={() => setActiveTab(tab.key)}
-                className={`flex flex-col items-center gap-1 px-3 py-1.5 rounded-lg transition-colors ${
+                className={`flex flex-col items-center gap-1 px-2 sm:px-3 py-1.5 rounded-lg transition-colors ${
                   active ? "text-cyan-400" : "text-slate-500 hover:text-slate-300"
                 }`}
               >

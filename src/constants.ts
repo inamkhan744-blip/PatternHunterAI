@@ -1,6 +1,6 @@
 import type { Coin } from "./types";
 
-export const COINS: Coin[] = [
+export const ALL_COINS: Coin[] = [
   { symbol: "BTC", label: "Bitcoin", binanceSymbol: "BTCUSDT" },
   { symbol: "ETH", label: "Ethereum", binanceSymbol: "ETHUSDT" },
   { symbol: "SOL", label: "Solana", binanceSymbol: "SOLUSDT" },
@@ -12,6 +12,8 @@ export const COINS: Coin[] = [
   { symbol: "DOT", label: "Polkadot", binanceSymbol: "DOTUSDT" },
   { symbol: "LINK", label: "Chainlink", binanceSymbol: "LINKUSDT" },
 ];
+
+export const COINS = ALL_COINS;
 
 export const PRO_COINS: Coin[] = [
   { symbol: "LTC", label: "Litecoin", binanceSymbol: "LTCUSDT" },

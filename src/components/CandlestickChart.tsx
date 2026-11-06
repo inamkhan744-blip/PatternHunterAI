@@ -12,7 +12,7 @@ import {
 } from "lightweight-charts";
 import type { Candle, DetectedPattern } from "../types";
 import { getPatternColor } from "../lib/patterns";
-import { sma, findSupportResistance } from "../lib/indicators";
+import { sma, rsi, findSupportResistance } from "../lib/indicators";
 
 interface Props {
   candles: Candle[];
@@ -23,16 +23,19 @@ interface Props {
 
 export default function CandlestickChart({ candles, pattern, showIndicators = true, loading = false }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const rsiContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
+  const rsiChartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const lineSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const extraLineSeriesRef = useRef<ISeriesApi<"Line">[]>([]);
   const volumeSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const ma7SeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const ma25SeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const ma99SeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const srSeriesRef = useRef<ISeriesApi<"Line">[]>([]);
+  const rsiSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
 
-  // Chart creation — runs once
   useEffect(() => {
     if (!containerRef.current) return;
 
@@ -91,6 +94,14 @@ export default function CandlestickChart({ candles, pattern, showIndicators = tr
     });
     ma25SeriesRef.current = ma25Series;
 
+    const ma99Series = chart.addLineSeries({
+      color: "#c084fc",
+      lineWidth: 1,
+      priceLineVisible: false,
+      lastValueVisible: false,
+    });
+    ma99SeriesRef.current = ma99Series;
+
     const lineSeries = chart.addLineSeries({
       color: "#f59e0b",
       lineWidth: 2,
@@ -100,37 +111,69 @@ export default function CandlestickChart({ candles, pattern, showIndicators = tr
     });
     lineSeriesRef.current = lineSeries;
 
+    // RSI subchart
+    if (rsiContainerRef.current) {
+      const rsiChart = createChart(rsiContainerRef.current, {
+        layout: {
+          background: { type: ColorType.Solid, color: "transparent" },
+          textColor: "#94a3b8",
+          fontSize: 10,
+        },
+        grid: {
+          vertLines: { visible: false },
+          horzLines: { color: "rgba(148, 163, 184, 0.06)" },
+        },
+        rightPriceScale: { borderColor: "rgba(148, 163, 184, 0.2)" },
+        timeScale: { borderColor: "rgba(148, 163, 184, 0.2)", visible: false },
+        autoSize: true,
+      });
+      rsiChartRef.current = rsiChart;
+
+      const rsiSeries = rsiChart.addLineSeries({
+        color: "#a78bfa",
+        lineWidth: 1,
+        priceLineVisible: false,
+        lastValueVisible: true,
+      });
+      rsiSeries.createPriceLine({ price: 70, color: "rgba(239,68,68,0.3)", lineWidth: 1, lineStyle: LineStyle.Dashed });
+      rsiSeries.createPriceLine({ price: 30, color: "rgba(34,197,94,0.3)", lineWidth: 1, lineStyle: LineStyle.Dashed });
+      rsiSeriesRef.current = rsiSeries;
+    }
+
     return () => {
       chart.remove();
+      rsiChartRef.current?.remove();
       chartRef.current = null;
+      rsiChartRef.current = null;
       candleSeriesRef.current = null;
       lineSeriesRef.current = null;
       extraLineSeriesRef.current = [];
       volumeSeriesRef.current = null;
       ma7SeriesRef.current = null;
       ma25SeriesRef.current = null;
+      ma99SeriesRef.current = null;
       srSeriesRef.current = [];
+      rsiSeriesRef.current = null;
     };
   }, []);
 
-  // Chart data update — runs whenever candles/pattern/indicators change
   const updateChart = useCallback(() => {
     const chart = chartRef.current;
     const candleSeries = candleSeriesRef.current;
     if (!chart || !candleSeries) return;
 
-    // If no data, clear everything
     if (!candles.length) {
       try { candleSeries.setData([]); } catch { /* */ }
       try { volumeSeriesRef.current?.setData([]); } catch { /* */ }
       try { ma7SeriesRef.current?.setData([]); } catch { /* */ }
       try { ma25SeriesRef.current?.setData([]); } catch { /* */ }
+      try { ma99SeriesRef.current?.setData([]); } catch { /* */ }
       try { lineSeriesRef.current?.setData([]); } catch { /* */ }
       try { candleSeries.setMarkers([]); } catch { /* */ }
+      try { rsiSeriesRef.current?.setData([]); } catch { /* */ }
       return;
     }
 
-    // 1. Set candlestick data (most important — do this first and independently)
     try {
       candleSeries.setData(
         candles.map((c) => ({
@@ -145,7 +188,6 @@ export default function CandlestickChart({ candles, pattern, showIndicators = tr
       console.error("Chart: failed to set candle data", e);
     }
 
-    // 2. Set volume data
     try {
       volumeSeriesRef.current?.setData(
         candles.map((c) => ({
@@ -158,12 +200,12 @@ export default function CandlestickChart({ candles, pattern, showIndicators = tr
       console.error("Chart: failed to set volume data", e);
     }
 
-    // 3. Set moving averages
     try {
       if (showIndicators) {
         const closes = candles.map((c) => c.close);
         const ma7Data = sma(closes, 7);
         const ma25Data = sma(closes, 25);
+        const ma99Data = sma(closes, 99);
 
         if (ma7SeriesRef.current) {
           ma7SeriesRef.current.setData(
@@ -179,17 +221,36 @@ export default function CandlestickChart({ candles, pattern, showIndicators = tr
               .filter((d) => d.value !== null && d.value !== undefined)
           );
         }
+        if (ma99SeriesRef.current) {
+          ma99SeriesRef.current.setData(
+            candles
+              .map((c, i) => ({ time: c.time as Time, value: ma99Data[i] as number }))
+              .filter((d) => d.value !== null && d.value !== undefined)
+          );
+        }
+
+        // RSI
+        const rsiData = rsi(closes, 14);
+        if (rsiSeriesRef.current) {
+          rsiSeriesRef.current.setData(
+            candles
+              .map((c, i) => ({ time: c.time as Time, value: rsiData[i] as number }))
+              .filter((d) => d.value !== null && d.value !== undefined)
+          );
+        }
       } else {
         ma7SeriesRef.current?.setData([]);
         ma25SeriesRef.current?.setData([]);
+        ma99SeriesRef.current?.setData([]);
+        rsiSeriesRef.current?.setData([]);
       }
     } catch (e) {
-      console.error("Chart: failed to set MA data", e);
+      console.error("Chart: failed to set indicator data", e);
       try { ma7SeriesRef.current?.setData([]); } catch { /* */ }
       try { ma25SeriesRef.current?.setData([]); } catch { /* */ }
+      try { ma99SeriesRef.current?.setData([]); } catch { /* */ }
     }
 
-    // 4. Update S/R levels (remove old, add new)
     try {
       if (chartRef.current) {
         for (const s of srSeriesRef.current) {
@@ -221,7 +282,6 @@ export default function CandlestickChart({ candles, pattern, showIndicators = tr
       console.error("Chart: failed to set S/R levels", e);
     }
 
-    // 5. Update pattern overlay lines
     try {
       if (chartRef.current) {
         for (const s of extraLineSeriesRef.current) {
@@ -283,11 +343,9 @@ export default function CandlestickChart({ candles, pattern, showIndicators = tr
       try { candleSeries.setMarkers([]); } catch { /* */ }
     }
 
-    // 6. Fit content — use requestAnimationFrame so the chart processes data first
     requestAnimationFrame(() => {
-      try {
-        chart.timeScale().fitContent();
-      } catch { /* */ }
+      try { chart.timeScale().fitContent(); } catch { /* */ }
+      try { rsiChartRef.current?.timeScale().fitContent(); } catch { /* */ }
     });
   }, [candles, pattern, showIndicators]);
 
@@ -296,8 +354,15 @@ export default function CandlestickChart({ candles, pattern, showIndicators = tr
   }, [updateChart]);
 
   return (
-    <div className="relative w-full h-full">
-      <div ref={containerRef} className="w-full h-full" />
+    <div className="relative w-full h-full flex flex-col">
+      <div ref={containerRef} className="flex-1 min-h-0" />
+      <div ref={rsiContainerRef} className="h-20 border-t border-slate-800 shrink-0" />
+      <div className="px-2 py-0.5 text-[9px] text-slate-600 text-right shrink-0 bg-slate-900/50">
+        RSI(14) <span className="text-purple-400 inline-flex items-center gap-1 ml-1">●</span>
+        <span className="text-yellow-400 ml-2">MA7</span>
+        <span className="text-blue-400 ml-2">MA25</span>
+        <span className="text-purple-400 ml-2">MA99</span>
+      </div>
       {loading && (
         <div className="absolute inset-0 flex items-center justify-center bg-slate-900/60 z-10">
           <div className="flex flex-col items-center gap-2">

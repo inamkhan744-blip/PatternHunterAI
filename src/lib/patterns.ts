@@ -1,4 +1,5 @@
-import type { Candle, DetectedPattern, PatternType } from "../types";
+import type { Candle, DetectedPattern, PatternType, PatternWithConfidence } from "../types";
+import { calculateConfidence } from "./indicators";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -529,6 +530,19 @@ export function detectPattern(candles: Candle[]): DetectedPattern | null {
     if (result) return result;
   }
   return null;
+}
+
+export function detectAllPatterns(candles: Candle[]): PatternWithConfidence[] {
+  if (candles.length < 25) return [];
+  const found: PatternWithConfidence[] = [];
+  for (const det of DETECTORS) {
+    const result = det(candles);
+    if (result) {
+      const confidence = calculateConfidence(result.type, candles, result.points);
+      found.push({ pattern: result, confidence });
+    }
+  }
+  return found.sort((a, b) => b.confidence - a.confidence);
 }
 
 export function getPatternColor(type: PatternType): string {

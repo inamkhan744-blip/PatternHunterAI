@@ -80,4 +80,33 @@ export interface WatchlistItem {
   binance_symbol: string;
 }
 
-export type AppTab = "chart" | "scanner" | "watchlist" | "history";
+export type AppTab = "chart" | "scanner" | "watchlist" | "history" | "alerts";
+
+export interface MarketStats {
+  high24h: number;
+  low24h: number;
+  volume24h: number;
+  priceChangePercent24h: number;
+}
+
+export interface PriceAlert {
+  id: string;
+  coin_symbol: string;
+  binance_symbol: string;
+  target_price: number;
+  direction: "above" | "below";
+  current_price: number;
+  triggered: boolean;
+  created_at: string;
+}
+
+export interface SRLevel {
+  price: number;
+  type: "support" | "resistance";
+  touches: number;
+}
+
+export interface PatternWithConfidence {
+  pattern: DetectedPattern;
+  confidence: number;
+}

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { History, Loader2, TrendingUp, TrendingDown, Trash2 } from "lucide-react";
+import { History, Loader2, TrendingUp, TrendingDown, Trash2, Download } from "lucide-react";
 import { supabase } from "../lib/supabase";
 import { formatPrice } from "../lib/patterns";
 import type { SignalHistory } from "../types";
@@ -52,6 +52,31 @@ export default function SignalHistory({ refreshKey, onOutcomeChange }: Props) {
       setSignals((prev) => prev.filter((s) => s.id !== id));
     }
   }, []);
+
+  const exportCSV = useCallback(() => {
+    const headers = ["Date", "Coin", "Pattern", "Direction", "Timeframe", "Entry", "TP", "SL", "Outcome"];
+    const rows = signals.map((s) => [
+      new Date(s.created_at).toLocaleString(),
+      s.coin_symbol,
+      s.pattern_name,
+      s.direction,
+      s.timeframe,
+      s.entry_price,
+      s.tp_price,
+      s.sl_price,
+      s.outcome,
+    ]);
+    const csv = [headers, ...rows]
+      .map((row) => row.map((cell) => `"${String(cell)}"`).join(","))
+      .join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `signal_history_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [signals]);
 
   const tpHits = signals.filter((s) => s.outcome === "hit_tp").length;
   const slHits = signals.filter((s) => s.outcome === "hit_sl").length;

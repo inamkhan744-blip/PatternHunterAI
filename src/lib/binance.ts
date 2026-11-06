@@ -1,6 +1,7 @@
-import type { Candle, Timeframe } from "../types";
+import type { Candle, MarketStats, Timeframe } from "../types";
 
 const BINANCE_API = "https://api.binance.com/api/v3/klines";
+const TICKER_API = "https://api.binance.com/api/v3/ticker/24hr";
 
 export async function fetchCandles(
   symbol: string,
@@ -21,4 +22,25 @@ export async function fetchCandles(
     close: parseFloat(row[4] as string),
     volume: parseFloat(row[5] as string),
   }));
+}
+
+export async function fetchMarketStats(symbol: string): Promise<MarketStats | null> {
+  try {
+    const res = await fetch(`${TICKER_API}?symbol=${symbol}`);
+    if (!res.ok) return null;
+    const data = await res.json() as {
+      highPrice: string;
+      lowPrice: string;
+      quoteVolume: string;
+      priceChangePercent: string;
+    };
+    return {
+      high24h: parseFloat(data.highPrice),
+      low24h: parseFloat(data.lowPrice),
+      volume24h: parseFloat(data.quoteVolume),
+      priceChangePercent24h: parseFloat(data.priceChangePercent),
+    };
+  } catch {
+    return null;
+  }
 }

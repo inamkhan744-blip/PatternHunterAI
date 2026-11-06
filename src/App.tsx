@@ -503,20 +503,7 @@ export default function App() {
                   </div>
                 </div>
                 <div className="flex-1 relative">
-                  {loading && (
-                    <div className="absolute inset-0 flex items-center justify-center bg-slate-900/80 z-10">
-                      <Loader2 className="w-6 h-6 text-cyan-400 animate-spin" />
-                    </div>
-                  )}
-                  {candles.length > 0 ? (
-                    <CandlestickChart candles={candles} pattern={pattern} />
-                  ) : (
-                    !loading && (
-                      <div className="flex items-center justify-center h-full text-slate-500 text-sm">
-                        No data available
-                      </div>
-                    )
-                  )}
+                  <CandlestickChart candles={candles} pattern={pattern} loading={loading} />
                 </div>
               </div>
 

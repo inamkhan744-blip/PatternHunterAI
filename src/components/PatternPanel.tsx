@@ -13,6 +13,7 @@ import {
 import { useState } from "react";
 import type { Coin, DetectedPattern, Timeframe } from "../types";
 import { formatPrice } from "../lib/patterns";
+import { openBinanceApp } from "../lib/binanceLink";
 import RiskCalculator from "./RiskCalculator";
 
 interface Props {
@@ -172,15 +173,13 @@ export default function PatternPanel({
                   </>
                 )}
               </button>
-              <a
-                href="https://www.binance.com"
-                target="_blank"
-                rel="noopener noreferrer"
+              <button
+                onClick={openBinanceApp}
                 className="flex-1 flex items-center justify-center gap-2 py-2.5 px-3 rounded-lg bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-900 text-sm font-bold transition-all"
               >
                 <ExternalLink className="w-4 h-4" />
                 Trade on Binance
-              </a>
+              </button>
             </div>
           </div>
         )}

@@ -47,7 +47,7 @@ export interface Coin {
   binanceSymbol: string;
 }
 
-export type Timeframe = "15m" | "1h" | "4h" | "1d";
+export type Timeframe = "1m" | "15m" | "1h" | "4h" | "1d";
 
 export interface ScanResult {
   symbol: string;

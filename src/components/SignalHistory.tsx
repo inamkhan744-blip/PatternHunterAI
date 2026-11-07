@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
-import { History, Loader2, TrendingUp, TrendingDown, Trash2, Download } from "lucide-react";
+import { useCallback, useEffect, useState, useMemo } from "react";
+import { History, Loader2, TrendingUp, TrendingDown, Trash2, Download, Award } from "lucide-react";
 import { supabase } from "../lib/supabase";
 import { formatPrice } from "../lib/patterns";
 import type { SignalHistory } from "../types";
@@ -83,6 +83,21 @@ export default function SignalHistory({ refreshKey, onOutcomeChange }: Props) {
   const resolved = tpHits + slHits;
   const winRate = resolved > 0 ? (tpHits / resolved) * 100 : 0;
 
+  const patternStats = useMemo(() => {
+    const map = new Map<string, { total: number; wins: number; losses: number }>();
+    for (const sig of signals) {
+      if (sig.outcome === "pending") continue;
+      const entry = map.get(sig.pattern_name) ?? { total: 0, wins: 0, losses: 0 };
+      entry.total++;
+      if (sig.outcome === "hit_tp") entry.wins++;
+      else entry.losses++;
+      map.set(sig.pattern_name, entry);
+    }
+    return Array.from(map.entries())
+      .map(([name, stats]) => ({ name, ...stats, winRate: stats.total > 0 ? (stats.wins / stats.total) * 100 : 0 }))
+      .sort((a, b) => b.winRate - a.winRate);
+  }, [signals]);
+
   const filtered = filter === "all" ? signals : signals.filter((s) => s.outcome === filter);
 
   if (loading && signals.length === 0) {
@@ -103,6 +118,15 @@ export default function SignalHistory({ refreshKey, onOutcomeChange }: Props) {
           <h2 className="text-lg font-bold text-white">Signal History</h2>
           <p className="text-xs text-slate-500 mt-0.5">Track past signals and win rate</p>
         </div>
+        {signals.length > 0 && (
+          <button
+            onClick={exportCSV}
+            className="flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-sm font-medium transition-colors"
+          >
+            <Download className="w-4 h-4 text-cyan-400" />
+            <span className="hidden sm:inline">Export CSV</span>
+          </button>
+        )}
       </div>
 
       {/* Win rate stats */}
@@ -125,6 +149,33 @@ export default function SignalHistory({ refreshKey, onOutcomeChange }: Props) {
             <p className={`text-2xl font-bold ${winRate >= 50 ? "text-green-400" : "text-amber-400"}`}>
               {resolved > 0 ? `${winRate.toFixed(1)}%` : "—"}
             </p>
+          </div>
+        </div>
+      )}
+
+      {/* Pattern success rate breakdown */}
+      {patternStats.length > 0 && (
+        <div className="rounded-xl bg-slate-900 border border-slate-800 p-4 mb-4">
+          <div className="flex items-center gap-2 mb-3">
+            <Award className="w-4 h-4 text-cyan-400" />
+            <span className="text-xs font-semibold text-cyan-400 uppercase tracking-wider">Pattern Performance</span>
+          </div>
+          <div className="space-y-2">
+            {patternStats.map((stat) => (
+              <div key={stat.name} className="flex items-center gap-3 text-xs">
+                <span className="text-slate-300 flex-1 truncate">{stat.name}</span>
+                <span className="text-slate-500 shrink-0">{stat.wins}W / {stat.losses}L</span>
+                <div className="w-20 h-1.5 rounded-full bg-slate-700 overflow-hidden shrink-0">
+                  <div
+                    className={`h-full rounded-full ${stat.winRate >= 50 ? "bg-green-400" : "bg-amber-400"}`}
+                    style={{ width: `${stat.winRate}%` }}
+                  />
+                </div>
+                <span className={`w-10 text-right font-medium shrink-0 ${stat.winRate >= 50 ? "text-green-400" : "text-amber-400"}`}>
+                  {stat.winRate.toFixed(0)}%
+                </span>
+              </div>
+            ))}
           </div>
         </div>
       )}

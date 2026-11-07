@@ -21,8 +21,6 @@ import {
   BarChart3,
   TrendingUp,
   TrendingDown,
-  Sun,
-  Moon,
 } from "lucide-react";
 import CandlestickChart from "./components/CandlestickChart";
 import PatternPanel from "./components/PatternPanel";
@@ -33,6 +31,8 @@ import MarketTicker from "./components/MarketTicker";
 import Watchlist from "./components/Watchlist";
 import SignalHistory from "./components/SignalHistory";
 import PriceAlerts from "./components/PriceAlerts";
+import FearGreedIndex from "./components/FearGreedIndex";
+import TrendIndicator from "./components/TrendIndicator";
 import { COINS, PRO_COINS } from "./constants";
 import { fetchCandles, fetchMarketStats } from "./lib/binance";
 import { detectPattern, detectAllPatterns, formatPrice } from "./lib/patterns";
@@ -105,6 +105,22 @@ export default function App() {
   const [watchlist, setWatchlist] = useState<WatchlistItem[]>([]);
   const [watchSymbols, setWatchSymbols] = useState<Set<string>>(new Set());
   const [historyRefresh, setHistoryRefresh] = useState(0);
+
+  // ---- Keyboard shortcuts ----
+  useEffect(() => {
+    function handleKey(e: KeyboardEvent) {
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if (e.key >= "1" && e.key <= "5") {
+        const idx = parseInt(e.key, 10) - 1;
+        if (idx < TABS.length) setActiveTab(TABS[idx].key);
+      } else if (e.key.toLowerCase() === "r" && activeTab === "chart") {
+        loadData(selectedCoin.binanceSymbol, timeframe);
+      }
+    }
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [activeTab, selectedCoin, timeframe, loadData]);
 
   const filteredCoins = useMemo(() => {
     if (!coinSearch.trim()) return ALL_COINS;
@@ -710,10 +726,16 @@ export default function App() {
                           {pattern.name}
                         </span>
                       )}
+                      {candles.length > 0 && <TrendIndicator candles={candles} />}
                     </div>
-                    <div className="flex items-center gap-1.5">
-                      <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-                      <span className="text-xs text-slate-500 hidden sm:inline">Live · Binance</span>
+                    <div className="flex items-center gap-2">
+                      <div className="hidden sm:block">
+                        <FearGreedIndex />
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+                        <span className="text-xs text-slate-500 hidden sm:inline">Live · Binance</span>
+                      </div>
                     </div>
                   </div>
                   <div className="flex-1 relative">

@@ -1,5 +1,22 @@
 import type { Candle, SRLevel } from "../types";
 
+export interface BollingerBands {
+  upper: (number | null)[];
+  middle: (number | null)[];
+  lower: (number | null)[];
+}
+
+export interface MACDResult {
+  macd: (number | null)[];
+  signal: (number | null)[];
+  histogram: (number | null)[];
+}
+
+export interface StochasticResult {
+  k: (number | null)[];
+  d: (number | null)[];
+}
+
 export function sma(values: number[], period: number): (number | null)[] {
   const result: (number | null)[] = [];
   for (let i = 0; i < values.length; i++) {
@@ -129,4 +146,202 @@ export function calculateConfidence(
   if (strongPatterns.includes(patternType)) score += 8;
 
   return Math.max(30, Math.min(95, Math.round(score)));
+}
+
+export function bollingerBands(closes: number[], period = 20, stdDev = 2): BollingerBands {
+  const middle = sma(closes, period);
+  const upper: (number | null)[] = [];
+  const lower: (number | null)[] = [];
+
+  for (let i = 0; i < closes.length; i++) {
+    if (i < period - 1 || middle[i] === null) {
+      upper.push(null);
+      lower.push(null);
+      continue;
+    }
+    let sumSq = 0;
+    const mid = middle[i] as number;
+    for (let j = i - period + 1; j <= i; j++) {
+      sumSq += Math.pow(closes[j] - mid, 2);
+    }
+    const sd = Math.sqrt(sumSq / period);
+    upper.push(mid + stdDev * sd);
+    lower.push(mid - stdDev * sd);
+  }
+
+  return { upper, middle, lower };
+}
+
+export function macd(closes: number[], fast = 12, slow = 26, signalPeriod = 9): MACDResult {
+  const fastEma = ema(closes, fast);
+  const slowEma = ema(closes, slow);
+  const macdLine: (number | null)[] = [];
+
+  for (let i = 0; i < closes.length; i++) {
+    if (fastEma[i] !== null && slowEma[i] !== null) {
+      macdLine.push((fastEma[i] as number) - (slowEma[i] as number));
+    } else {
+      macdLine.push(null);
+    }
+  }
+
+  const validMacd = macdLine.map((v) => (v === null ? 0 : v));
+  const signalEma = ema(validMacd, signalPeriod);
+  const signal: (number | null)[] = [];
+  const histogram: (number | null)[] = [];
+
+  let firstValidIdx = -1;
+  for (let i = 0; i < macdLine.length; i++) {
+    if (macdLine[i] !== null) {
+      firstValidIdx = i;
+      break;
+    }
+  }
+
+  for (let i = 0; i < closes.length; i++) {
+    if (i < firstValidIdx + signalPeriod - 1 || macdLine[i] === null) {
+      signal.push(null);
+      histogram.push(null);
+    } else {
+      signal.push(signalEma[i]);
+      histogram.push((macdLine[i] as number) - (signalEma[i] as number));
+    }
+  }
+
+  return { macd: macdLine, signal, histogram };
+}
+
+export function stochastic(candles: Candle[], kPeriod = 14, dPeriod = 3): StochasticResult {
+  const k: (number | null)[] = [];
+  for (let i = 0; i < candles.length; i++) {
+    if (i < kPeriod - 1) {
+      k.push(null);
+      continue;
+    }
+    let highestHigh = -Infinity;
+    let lowestLow = Infinity;
+    for (let j = i - kPeriod + 1; j <= i; j++) {
+      if (candles[j].high > highestHigh) highestHigh = candles[j].high;
+      if (candles[j].low < lowestLow) lowestLow = candles[j].low;
+    }
+    const range = highestHigh - lowestLow;
+    const val = range === 0 ? 50 : ((candles[i].close - lowestLow) / range) * 100;
+    k.push(val);
+  }
+
+  const d: (number | null)[] = [];
+  for (let i = 0; i < k.length; i++) {
+    if (i < dPeriod - 1 || k[i] === null) {
+      d.push(null);
+      continue;
+    }
+    let sum = 0;
+    let count = 0;
+    for (let j = i - dPeriod + 1; j <= i; j++) {
+      if (k[j] !== null) {
+        sum += k[j] as number;
+        count++;
+      }
+    }
+    d.push(count > 0 ? sum / count : null);
+  }
+
+  return { k, d };
+}
+
+export function atr(candles: Candle[], period = 14): (number | null)[] {
+  const tr: number[] = [];
+  for (let i = 0; i < candles.length; i++) {
+    if (i === 0) {
+      tr.push(candles[i].high - candles[i].low);
+      continue;
+    }
+    const hl = candles[i].high - candles[i].low;
+    const hc = Math.abs(candles[i].high - candles[i - 1].close);
+    const lc = Math.abs(candles[i].low - candles[i - 1].close);
+    tr.push(Math.max(hl, hc, lc));
+  }
+
+  const result: (number | null)[] = [];
+  let prev: number | null = null;
+  for (let i = 0; i < tr.length; i++) {
+    if (i < period - 1) {
+      result.push(null);
+    } else if (i === period - 1) {
+      let sum = 0;
+      for (let j = 0; j < period; j++) sum += tr[j];
+      prev = sum / period;
+      result.push(prev);
+    } else {
+      prev = ((prev as number) * (period - 1) + tr[i]) / period;
+      result.push(prev);
+    }
+  }
+  return result;
+}
+
+export function fibonacciRetracement(candles: Candle[]): { level: number; ratio: number; type: "support" | "resistance" | "midpoint" }[] {
+  if (candles.length < 20) return [];
+  const recent = candles.slice(-100);
+  let highest = -Infinity;
+  let lowest = Infinity;
+  for (const c of recent) {
+    if (c.high > highest) highest = c.high;
+    if (c.low < lowest) lowest = c.low;
+  }
+  if (highest === lowest) return [];
+  const diff = highest - lowest;
+  const ratios = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1];
+  const direction = recent[recent.length - 1].close >= recent[0].close ? "up" : "down";
+
+  return ratios.map((r) => {
+    const level = direction === "up" ? lowest + diff * r : highest - diff * r;
+    let type: "support" | "resistance" | "midpoint" = "midpoint";
+    if (r === 0 || r === 0.236) type = direction === "up" ? "support" : "resistance";
+    else if (r === 1 || r === 0.786) type = direction === "up" ? "resistance" : "support";
+    return { level, ratio: r, type };
+  });
+}
+
+export function detectDivergence(candles: Candle[], rsiValues: (number | null)[]): "bullish" | "bearish" | null {
+  if (candles.length < 30) return null;
+  const lookback = 30;
+  const recentCandles = candles.slice(-lookback);
+  const recentRsi = rsiValues.slice(-lookback);
+
+  let priceLowIdx = 0;
+  let rsiLowIdx = 0;
+  let priceHighIdx = 0;
+  let rsiHighIdx = 0;
+
+  for (let i = 1; i < recentCandles.length; i++) {
+    if (recentCandles[i].low < recentCandles[priceLowIdx].low) priceLowIdx = i;
+    if (recentCandles[i].high > recentCandles[priceHighIdx].high) priceHighIdx = i;
+  }
+
+  for (let i = 1; i < recentRsi.length; i++) {
+    if (recentRsi[i] === null) continue;
+    if (recentRsi[i]! < (recentRsi[rsiLowIdx] ?? Infinity)) rsiLowIdx = i;
+    if (recentRsi[i]! > (recentRsi[rsiHighIdx] ?? -Infinity)) rsiHighIdx = i;
+  }
+
+  const lastIdx = recentCandles.length - 1;
+  const lastRsi = recentRsi[lastIdx];
+  if (lastRsi === null) return null;
+
+  const prevLow = recentCandles[priceLowIdx].low;
+  const lastLow = recentCandles[lastIdx].low;
+  const prevRsiLow = recentRsi[rsiLowIdx];
+  if (prevRsiLow !== null && lastLow < prevLow && lastRsi > prevRsiLow) {
+    return "bullish";
+  }
+
+  const prevHigh = recentCandles[priceHighIdx].high;
+  const lastHigh = recentCandles[lastIdx].high;
+  const prevRsiHigh = recentRsi[rsiHighIdx];
+  if (prevRsiHigh !== null && lastHigh > prevHigh && lastRsi < prevRsiHigh) {
+    return "bearish";
+  }
+
+  return null;
 }

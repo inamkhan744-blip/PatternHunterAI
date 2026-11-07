@@ -80,7 +80,7 @@ export interface WatchlistItem {
   binance_symbol: string;
 }
 
-export type AppTab = "chart" | "scanner" | "watchlist" | "history" | "alerts";
+export type AppTab = "chart" | "scanner" | "watchlist" | "history" | "alerts" | "depth" | "trades" | "heatmap" | "confluence" | "backtest";
 
 export interface MarketStats {
   high24h: number;
@@ -109,4 +109,72 @@ export interface SRLevel {
 export interface PatternWithConfidence {
   pattern: DetectedPattern;
   confidence: number;
+}
+
+export interface OrderBookEntry {
+  price: number;
+  quantity: number;
+  total: number;
+}
+
+export interface OrderBookData {
+  bids: OrderBookEntry[];
+  asks: OrderBookEntry[];
+  spread: number;
+}
+
+export interface RecentTrade {
+  id: number;
+  price: number;
+  quantity: number;
+  time: number;
+  isBuyerMaker: boolean;
+}
+
+export interface HeatmapItem {
+  symbol: string;
+  label: string;
+  change: number;
+  price: number;
+  volume: number;
+}
+
+export interface BacktestResult {
+  patternName: string;
+  direction: "bullish" | "bearish";
+  entryPrice: number;
+  exitPrice: number;
+  outcome: "win" | "loss";
+  pnl: number;
+  pnlPercent: number;
+  candlesHeld: number;
+  date: string;
+}
+
+export interface BacktestSummary {
+  totalTrades: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  totalPnl: number;
+  avgPnlPercent: number;
+  bestTrade: number;
+  worstTrade: number;
+  results: BacktestResult[];
+}
+
+export interface ConfluenceSignal {
+  timeframe: Timeframe;
+  direction: "bullish" | "bearish" | "neutral";
+  patternName: string | null;
+  rsi: number;
+  trend: "uptrend" | "downtrend" | "sideways";
+  confidence: number;
+}
+
+export interface ConfluenceResult {
+  signals: ConfluenceSignal[];
+  overallDirection: "bullish" | "bearish" | "neutral";
+  score: number;
+  agreement: number;
 }

@@ -10,6 +10,7 @@ import {
   Zap,
   Clock,
   CandlestickChart as ChartIcon,
+  LineChart as LineIcon,
   List,
   Star,
   History as HistoryIcon,
@@ -20,12 +21,15 @@ import {
   BarChart3,
   TrendingUp,
   TrendingDown,
+  Sun,
+  Moon,
 } from "lucide-react";
 import CandlestickChart from "./components/CandlestickChart";
 import PatternPanel from "./components/PatternPanel";
 import ProModal from "./components/ProModal";
 import ScanPanel from "./components/ScanPanel";
 import MarketScanner from "./components/MarketScanner";
+import MarketTicker from "./components/MarketTicker";
 import Watchlist from "./components/Watchlist";
 import SignalHistory from "./components/SignalHistory";
 import PriceAlerts from "./components/PriceAlerts";
@@ -81,6 +85,7 @@ export default function App() {
   const [lastPrice, setLastPrice] = useState<number | null>(null);
   const [marketStats, setMarketStats] = useState<MarketStats | null>(null);
   const [coinSearch, setCoinSearch] = useState("");
+  const [chartType, setChartType] = useState<"candles" | "line">("candles");
 
   const [explanation, setExplanation] = useState<string | null>(null);
   const [aiLoading, setAiLoading] = useState(false);
@@ -101,7 +106,6 @@ export default function App() {
   const [watchSymbols, setWatchSymbols] = useState<Set<string>>(new Set());
   const [historyRefresh, setHistoryRefresh] = useState(0);
 
-  // Filtered coin list for dropdown search
   const filteredCoins = useMemo(() => {
     if (!coinSearch.trim()) return ALL_COINS;
     const q = coinSearch.toLowerCase();
@@ -110,14 +114,12 @@ export default function App() {
     );
   }, [coinSearch]);
 
-  // ---- Pro state ----
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     if (params.get("pro") === "true") setIsPro(true);
     setRemainingScans(getRemainingScans());
   }, []);
 
-  // ---- Watchlist ----
   const loadWatchlist = useCallback(async () => {
     const { data } = await supabase.from("watchlist").select("*").order("created_at", { ascending: false });
     if (data) {
@@ -155,7 +157,6 @@ export default function App() {
     [loadWatchlist]
   );
 
-  // ---- Data loading ----
   const loadData = useCallback(async (binanceSymbol: string, tf: Timeframe) => {
     setLoading(true);
     setExplanation(null);
@@ -189,7 +190,6 @@ export default function App() {
     loadData(selectedCoin.binanceSymbol, timeframe);
   }, [selectedCoin, timeframe, loadData]);
 
-  // ---- Live price auto-refresh (every 15s) ----
   useEffect(() => {
     if (activeTab !== "chart") return;
     const interval = setInterval(async () => {
@@ -203,13 +203,12 @@ export default function App() {
           if (stats) setMarketStats(stats);
         }
       } catch {
-        // silent — auto-refresh failures shouldn't disrupt UX
+        // silent
       }
     }, 15000);
     return () => clearInterval(interval);
   }, [selectedCoin, timeframe, activeTab]);
 
-  // ---- Auto-resolve pending signal outcomes ----
   const autoResolveSignals = useCallback(async () => {
     const { data: pending } = await supabase
       .from("signal_history")
@@ -250,7 +249,6 @@ export default function App() {
     return () => clearInterval(interval);
   }, [autoResolveSignals]);
 
-  // ---- AI Analysis ----
   const handleExplain = useCallback(async () => {
     if (!pattern || !lastPrice) return;
     setAiLoading(true);
@@ -314,7 +312,6 @@ export default function App() {
     }
   }, [pattern, lastPrice, selectedCoin, candles]);
 
-  // ---- Save signal to history ----
   const handleSaveSignal = useCallback(async () => {
     if (!pattern || !lastPrice || !selectedCoin) return;
     let prices = parseAnalysisPrices(explanation ?? "");
@@ -405,326 +402,396 @@ export default function App() {
   const inWatch = watchSymbols.has(selectedCoin.binanceSymbol);
 
   return (
-    <div className="min-h-screen bg-slate-950 text-white flex flex-col pb-16 lg:pb-0">
-      {/* Header */}
-      <header className="border-b border-slate-800 bg-slate-950/80 backdrop-blur-xl sticky top-0 z-40">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-500 to-cyan-400 flex items-center justify-center shrink-0">
-              <Activity className="w-5 h-5 text-white" />
-            </div>
-            <div className="flex flex-col">
-              <h1 className="text-base font-bold tracking-tight leading-none">
-                PatternHunter <span className="text-cyan-400">AI</span>
-              </h1>
-              <span className="text-[10px] text-slate-500 leading-none mt-0.5 hidden sm:block">
-                Crypto Pattern Detection
-              </span>
-            </div>
+    <div className="min-h-screen bg-slate-950 text-white flex flex-col lg:flex-row pb-16 lg:pb-0">
+      {/* Desktop sidebar */}
+      <aside className="hidden lg:flex flex-col w-56 border-r border-slate-800 bg-slate-950/80 shrink-0 sticky top-0 h-screen">
+        <div className="flex items-center gap-3 px-5 py-4 border-b border-slate-800">
+          <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-500 to-cyan-400 flex items-center justify-center shrink-0">
+            <Activity className="w-5 h-5 text-white" />
           </div>
-
-          <div className="flex items-center gap-2">
-            <button
-              onClick={handleScanClick}
-              className="flex items-center gap-2 px-3 sm:px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-sm font-medium transition-colors"
-            >
-              <Radar className="w-4 h-4 text-cyan-400" />
-              <span className="hidden sm:inline">Scan Top 50</span>
-              {!isPro && <Crown className="w-3.5 h-3.5 text-amber-400" />}
-            </button>
-            <button
-              onClick={() => setProModalOpen(true)}
-              className="flex items-center gap-2 px-3 sm:px-4 py-2 rounded-lg bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-900 text-sm font-bold transition-all"
-            >
-              <Crown className="w-4 h-4" />
-              <span>{isPro ? "Pro Active" : "Go Pro"}</span>
-            </button>
+          <div className="flex flex-col">
+            <h1 className="text-sm font-bold tracking-tight leading-none">
+              PatternHunter <span className="text-cyan-400">AI</span>
+            </h1>
+            <span className="text-[10px] text-slate-500 leading-none mt-1">Crypto Patterns</span>
           </div>
         </div>
-      </header>
 
-      {/* Coin + timeframe selector bar (only on chart tab) */}
-      {activeTab === "chart" && (
-        <div className="border-b border-slate-800 bg-slate-900/50">
-          <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between gap-4 flex-wrap">
-            <div className="flex items-center gap-3">
-              {/* Coin selector with search */}
-              <div className="relative">
-                <button
-                  onClick={() => { setCoinDropdownOpen((v) => !v); setCoinSearch(""); }}
-                  className="flex items-center gap-3 px-4 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors"
-                >
-                  <div className="w-7 h-7 rounded-full bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center text-xs font-bold shrink-0">
-                    {selectedCoin.symbol.slice(0, 3)}
-                  </div>
-                  <div className="text-left">
-                    <span className="text-sm font-semibold">
-                      {selectedCoin.symbol}<span className="text-slate-500">/USDT</span>
-                    </span>
-                  </div>
-                  <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform ${coinDropdownOpen ? "rotate-180" : ""}`} />
-                </button>
-
-                {coinDropdownOpen && (
-                  <>
-                    <div className="fixed inset-0 z-10" onClick={() => setCoinDropdownOpen(false)} />
-                    <div className="absolute top-full mt-2 left-0 z-20 w-72 rounded-xl bg-slate-800 border border-slate-700 shadow-2xl overflow-hidden">
-                      {/* Search input */}
-                      <div className="p-2 border-b border-slate-700">
-                        <div className="relative">
-                          <Search className="w-4 h-4 text-slate-500 absolute left-2.5 top-1/2 -translate-y-1/2" />
-                          <input
-                            type="text"
-                            value={coinSearch}
-                            onChange={(e) => setCoinSearch(e.target.value)}
-                            placeholder="Search coins..."
-                            autoFocus
-                            className="w-full bg-slate-900 border border-slate-700 rounded-lg pl-8 pr-3 py-2 text-sm text-white placeholder:text-slate-500 outline-none focus:border-cyan-500"
-                          />
-                        </div>
-                      </div>
-                      <div className="p-1 max-h-72 overflow-y-auto">
-                        {filteredCoins.length === 0 ? (
-                          <p className="text-sm text-slate-500 text-center py-4">No coins found</p>
-                        ) : (
-                          filteredCoins.map((coin) => {
-                            const isProCoin = PRO_COINS.some((c) => c.symbol === coin.symbol);
-                            return (
-                              <button
-                                key={coin.symbol}
-                                onClick={() => {
-                                  setSelectedCoin(coin);
-                                  setCoinDropdownOpen(false);
-                                }}
-                                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors ${
-                                  coin.symbol === selectedCoin.symbol
-                                    ? "bg-slate-700 text-white"
-                                    : "text-slate-300 hover:bg-slate-700/50"
-                                }`}
-                              >
-                                <div className="w-6 h-6 rounded-full bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center text-[10px] font-bold shrink-0">
-                                  {coin.symbol.slice(0, 3)}
-                                </div>
-                                <span className="font-medium">{coin.symbol}</span>
-                                <span className="text-slate-500 text-xs ml-auto">{coin.label}</span>
-                                {isProCoin && <Crown className="w-3 h-3 text-amber-400/50" />}
-                              </button>
-                            );
-                          })
-                        )}
-                      </div>
-                    </div>
-                  </>
-                )}
-              </div>
-
-              {/* Star toggle */}
+        <nav className="flex-1 p-3 space-y-1">
+          {TABS.map((tab) => {
+            const Icon = tab.icon;
+            const active = activeTab === tab.key;
+            return (
               <button
-                onClick={() => toggleWatch(selectedCoin)}
-                className="p-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors"
-                title={inWatch ? "Remove from watchlist" : "Add to watchlist"}
+                key={tab.key}
+                onClick={() => setActiveTab(tab.key)}
+                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
+                  active
+                    ? "bg-slate-800 text-white"
+                    : "text-slate-400 hover:text-white hover:bg-slate-800/50"
+                }`}
               >
-                <svg
-                  className={`w-4 h-4 ${inWatch ? "text-amber-400 fill-amber-400" : "text-slate-400"}`}
-                  fill={inWatch ? "currentColor" : "none"}
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                  strokeWidth={2}
-                >
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M11.48 3.499a.562.562 0 011.04 0l2.125 5.111a.563.563 0 00.475.345l5.518.442c.499.04.701.663.321.988l-4.204 3.602a.563.563 0 00-.182.557l1.285 5.385a.562.562 0 01-.84.61l-4.725-2.885a.563.563 0 00-.586 0L6.982 20.54a.562.562 0 01-.84-.61l1.285-5.386a.562.562 0 00-.182-.557l-4.204-3.602a.563.563 0 01.321-.988l5.518-.442a.563.563 0 00.475-.345L11.48 3.5z" />
-                </svg>
+                <Icon className={`w-4 h-4 ${active ? "text-cyan-400" : ""}`} />
+                {tab.label}
               </button>
+            );
+          })}
+        </nav>
 
-              {/* Timeframe selector */}
-              <div className="relative">
-                <button
-                  onClick={() => setTfDropdownOpen((v) => !v)}
-                  className="flex items-center gap-2 px-3 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors"
-                >
-                  <Clock className="w-4 h-4 text-cyan-400" />
-                  <span className="text-sm font-semibold">{tfLabel}</span>
-                  <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform ${tfDropdownOpen ? "rotate-180" : ""}`} />
-                </button>
+        <div className="p-3 border-t border-slate-800 space-y-2">
+          <button
+            onClick={handleScanClick}
+            className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-sm font-medium transition-colors"
+          >
+            <Radar className="w-4 h-4 text-cyan-400" />
+            Scan Top 50
+            {!isPro && <Crown className="w-3.5 h-3.5 text-amber-400 ml-auto" />}
+          </button>
+          <button
+            onClick={() => setProModalOpen(true)}
+            className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-900 text-sm font-bold transition-all"
+          >
+            <Crown className="w-4 h-4" />
+            {isPro ? "Pro Active" : "Go Pro"}
+          </button>
+        </div>
+      </aside>
 
-                {tfDropdownOpen && (
-                  <>
-                    <div className="fixed inset-0 z-10" onClick={() => setTfDropdownOpen(false)} />
-                    <div className="absolute top-full mt-2 left-0 z-20 w-32 rounded-xl bg-slate-800 border border-slate-700 shadow-2xl overflow-hidden">
-                      <div className="p-1">
-                        {TIMEFRAMES.map((tf) => (
-                          <button
-                            key={tf.value}
-                            onClick={() => {
-                              setTimeframe(tf.value);
-                              setTfDropdownOpen(false);
-                            }}
-                            className={`w-full flex items-center px-3 py-2.5 rounded-lg text-sm transition-colors ${
-                              tf.value === timeframe
-                                ? "bg-slate-700 text-white font-semibold"
-                                : "text-slate-300 hover:bg-slate-700/50"
-                            }`}
-                          >
-                            {tf.label}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  </>
-                )}
+      {/* Main area */}
+      <div className="flex-1 flex flex-col min-w-0">
+        {/* Mobile header */}
+        <header className="lg:hidden border-b border-slate-800 bg-slate-950/80 backdrop-blur-xl sticky top-0 z-40">
+          <div className="px-4 py-3 flex items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-500 to-cyan-400 flex items-center justify-center shrink-0">
+                <Activity className="w-5 h-5 text-white" />
               </div>
+              <h1 className="text-base font-bold tracking-tight">
+                PatternHunter <span className="text-cyan-400">AI</span>
+              </h1>
             </div>
-
-            <div className="flex items-center gap-3 ml-auto">
-              {lastPrice && (
-                <div className="flex items-baseline gap-2">
-                  <span className="text-lg font-bold tracking-tight">{formatPrice(lastPrice)}</span>
-                  <span className={`text-sm font-medium flex items-center ${statsChange >= 0 ? "text-green-400" : "text-red-400"}`}>
-                    {statsChange >= 0 ? <ArrowUpRight className="w-3.5 h-3.5" /> : <ArrowDownRight className="w-3.5 h-3.5" />}
-                    {statsChange >= 0 ? "+" : ""}{statsChange.toFixed(2)}%
-                  </span>
-                </div>
-              )}
+            <div className="flex items-center gap-2">
               <button
-                onClick={() => loadData(selectedCoin.binanceSymbol, timeframe)}
-                disabled={loading}
-                className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors disabled:opacity-50"
-                title="Refresh data"
+                onClick={handleScanClick}
+                className="flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-sm font-medium transition-colors"
               >
-                <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
+                <Radar className="w-4 h-4 text-cyan-400" />
+                {!isPro && <Crown className="w-3.5 h-3.5 text-amber-400" />}
+              </button>
+              <button
+                onClick={() => setProModalOpen(true)}
+                className="flex items-center gap-2 px-3 py-2 rounded-lg bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-900 text-sm font-bold transition-all"
+              >
+                <Crown className="w-4 h-4" />
+                <span>{isPro ? "Pro" : "Go Pro"}</span>
               </button>
             </div>
           </div>
+        </header>
 
-          {/* 24h market stats bar */}
-          {marketStats && (
-            <div className="max-w-7xl mx-auto px-4 sm:px-6 pb-3">
-              <div className="flex items-center gap-4 sm:gap-6 flex-wrap text-xs">
-                <div className="flex items-center gap-1.5">
-                  <BarChart3 className="w-3.5 h-3.5 text-slate-500" />
-                  <span className="text-slate-500">24h Vol:</span>
-                  <span className="text-slate-300 font-medium">{formatVolume(marketStats.volume24h)}</span>
+        {/* Market ticker */}
+        <MarketTicker />
+
+        {/* Coin + timeframe selector bar (only on chart tab) */}
+        {activeTab === "chart" && (
+          <div className="border-b border-slate-800 bg-slate-900/50">
+            <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between gap-4 flex-wrap">
+              <div className="flex items-center gap-3">
+                {/* Coin selector with search */}
+                <div className="relative">
+                  <button
+                    onClick={() => { setCoinDropdownOpen((v) => !v); setCoinSearch(""); }}
+                    className="flex items-center gap-3 px-4 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors"
+                  >
+                    <div className="w-7 h-7 rounded-full bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center text-xs font-bold shrink-0">
+                      {selectedCoin.symbol.slice(0, 3)}
+                    </div>
+                    <div className="text-left">
+                      <span className="text-sm font-semibold">
+                        {selectedCoin.symbol}<span className="text-slate-500">/USDT</span>
+                      </span>
+                    </div>
+                    <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform ${coinDropdownOpen ? "rotate-180" : ""}`} />
+                  </button>
+
+                  {coinDropdownOpen && (
+                    <>
+                      <div className="fixed inset-0 z-10" onClick={() => setCoinDropdownOpen(false)} />
+                      <div className="absolute top-full mt-2 left-0 z-20 w-72 rounded-xl bg-slate-800 border border-slate-700 shadow-2xl overflow-hidden">
+                        <div className="p-2 border-b border-slate-700">
+                          <div className="relative">
+                            <Search className="w-4 h-4 text-slate-500 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                            <input
+                              type="text"
+                              value={coinSearch}
+                              onChange={(e) => setCoinSearch(e.target.value)}
+                              placeholder="Search coins..."
+                              autoFocus
+                              className="w-full bg-slate-900 border border-slate-700 rounded-lg pl-8 pr-3 py-2 text-sm text-white placeholder:text-slate-500 outline-none focus:border-cyan-500"
+                            />
+                          </div>
+                        </div>
+                        <div className="p-1 max-h-72 overflow-y-auto">
+                          {filteredCoins.length === 0 ? (
+                            <p className="text-sm text-slate-500 text-center py-4">No coins found</p>
+                          ) : (
+                            filteredCoins.map((coin) => {
+                              const isProCoin = PRO_COINS.some((c) => c.symbol === coin.symbol);
+                              return (
+                                <button
+                                  key={coin.symbol}
+                                  onClick={() => {
+                                    setSelectedCoin(coin);
+                                    setCoinDropdownOpen(false);
+                                  }}
+                                  className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors ${
+                                    coin.symbol === selectedCoin.symbol
+                                      ? "bg-slate-700 text-white"
+                                      : "text-slate-300 hover:bg-slate-700/50"
+                                  }`}
+                                >
+                                  <div className="w-6 h-6 rounded-full bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center text-[10px] font-bold shrink-0">
+                                    {coin.symbol.slice(0, 3)}
+                                  </div>
+                                  <span className="font-medium">{coin.symbol}</span>
+                                  <span className="text-slate-500 text-xs ml-auto">{coin.label}</span>
+                                  {isProCoin && <Crown className="w-3 h-3 text-amber-400/50" />}
+                                </button>
+                              );
+                            })
+                          )}
+                        </div>
+                      </div>
+                    </>
+                  )}
                 </div>
-                <div className="flex items-center gap-1.5">
-                  <TrendingUp className="w-3.5 h-3.5 text-green-500" />
-                  <span className="text-slate-500">24h High:</span>
-                  <span className="text-green-400 font-medium">{formatPrice(marketStats.high24h)}</span>
+
+                {/* Star toggle */}
+                <button
+                  onClick={() => toggleWatch(selectedCoin)}
+                  className="p-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors"
+                  title={inWatch ? "Remove from watchlist" : "Add to watchlist"}
+                >
+                  <svg
+                    className={`w-4 h-4 ${inWatch ? "text-amber-400 fill-amber-400" : "text-slate-400"}`}
+                    fill={inWatch ? "currentColor" : "none"}
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                    strokeWidth={2}
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M11.48 3.499a.562.562 0 011.04 0l2.125 5.111a.563.563 0 00.475.345l5.518.442c.499.04.701.663.321.988l-4.204 3.602a.563.563 0 00-.182.557l1.285 5.385a.562.562 0 01-.84.61l-4.725-2.885a.563.563 0 00-.586 0L6.982 20.54a.562.562 0 01-.84-.61l1.285-5.386a.562.562 0 00-.182-.557l-4.204-3.602a.563.563 0 01.321-.988l5.518-.442a.563.563 0 00.475-.345L11.48 3.5z" />
+                  </svg>
+                </button>
+
+                {/* Timeframe selector */}
+                <div className="relative">
+                  <button
+                    onClick={() => setTfDropdownOpen((v) => !v)}
+                    className="flex items-center gap-2 px-3 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors"
+                  >
+                    <Clock className="w-4 h-4 text-cyan-400" />
+                    <span className="text-sm font-semibold">{tfLabel}</span>
+                    <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform ${tfDropdownOpen ? "rotate-180" : ""}`} />
+                  </button>
+
+                  {tfDropdownOpen && (
+                    <>
+                      <div className="fixed inset-0 z-10" onClick={() => setTfDropdownOpen(false)} />
+                      <div className="absolute top-full mt-2 left-0 z-20 w-32 rounded-xl bg-slate-800 border border-slate-700 shadow-2xl overflow-hidden">
+                        <div className="p-1">
+                          {TIMEFRAMES.map((tf) => (
+                            <button
+                              key={tf.value}
+                              onClick={() => {
+                                setTimeframe(tf.value);
+                                setTfDropdownOpen(false);
+                              }}
+                              className={`w-full flex items-center px-3 py-2.5 rounded-lg text-sm transition-colors ${
+                                tf.value === timeframe
+                                  ? "bg-slate-700 text-white font-semibold"
+                                  : "text-slate-300 hover:bg-slate-700/50"
+                              }`}
+                            >
+                              {tf.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </>
+                  )}
                 </div>
-                <div className="flex items-center gap-1.5">
-                  <TrendingDown className="w-3.5 h-3.5 text-red-500" />
-                  <span className="text-slate-500">24h Low:</span>
-                  <span className="text-red-400 font-medium">{formatPrice(marketStats.low24h)}</span>
+
+                {/* Chart type toggle */}
+                <div className="flex items-center bg-slate-800 border border-slate-700 rounded-lg p-0.5">
+                  <button
+                    onClick={() => setChartType("candles")}
+                    className={`p-2 rounded-md transition-colors ${chartType === "candles" ? "bg-slate-700 text-cyan-400" : "text-slate-500 hover:text-slate-300"}`}
+                    title="Candlestick view"
+                  >
+                    <ChartIcon className="w-4 h-4" />
+                  </button>
+                  <button
+                    onClick={() => setChartType("line")}
+                    className={`p-2 rounded-md transition-colors ${chartType === "line" ? "bg-slate-700 text-cyan-400" : "text-slate-500 hover:text-slate-300"}`}
+                    title="Line view"
+                  >
+                    <LineIcon className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-3 ml-auto">
+                {lastPrice && (
+                  <div className="flex items-baseline gap-2">
+                    <span className="text-lg font-bold tracking-tight">{formatPrice(lastPrice)}</span>
+                    <span className={`text-sm font-medium flex items-center ${statsChange >= 0 ? "text-green-400" : "text-red-400"}`}>
+                      {statsChange >= 0 ? <ArrowUpRight className="w-3.5 h-3.5" /> : <ArrowDownRight className="w-3.5 h-3.5" />}
+                      {statsChange >= 0 ? "+" : ""}{statsChange.toFixed(2)}%
+                    </span>
+                  </div>
+                )}
+                <button
+                  onClick={() => loadData(selectedCoin.binanceSymbol, timeframe)}
+                  disabled={loading}
+                  className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors disabled:opacity-50"
+                  title="Refresh data"
+                >
+                  <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
+                </button>
+              </div>
+            </div>
+
+            {/* 24h market stats bar */}
+            {marketStats && (
+              <div className="max-w-7xl mx-auto px-4 sm:px-6 pb-3">
+                <div className="flex items-center gap-4 sm:gap-6 flex-wrap text-xs">
+                  <div className="flex items-center gap-1.5">
+                    <BarChart3 className="w-3.5 h-3.5 text-slate-500" />
+                    <span className="text-slate-500">24h Vol:</span>
+                    <span className="text-slate-300 font-medium">{formatVolume(marketStats.volume24h)}</span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <TrendingUp className="w-3.5 h-3.5 text-green-500" />
+                    <span className="text-slate-500">24h High:</span>
+                    <span className="text-green-400 font-medium">{formatPrice(marketStats.high24h)}</span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <TrendingDown className="w-3.5 h-3.5 text-red-500" />
+                    <span className="text-slate-500">24h Low:</span>
+                    <span className="text-red-400 font-medium">{formatPrice(marketStats.low24h)}</span>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Main content */}
+        <main className="flex-1 max-w-7xl mx-auto w-full">
+          {activeTab === "chart" && (
+            <div className="px-4 sm:px-6 py-4">
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 lg:h-[calc(100vh-280px)] min-h-[500px]">
+                {/* Chart */}
+                <div className="lg:col-span-2 rounded-2xl bg-slate-900 border border-slate-800 overflow-hidden flex flex-col min-h-[400px]">
+                  <div className="px-5 py-3 border-b border-slate-800 flex items-center justify-between">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-sm font-semibold text-white">
+                        {selectedCoin.symbol}/USDT
+                      </span>
+                      <span className="text-xs text-slate-500">{tfLabel}</span>
+                      {pattern && (
+                        <span className="ml-1 flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full"
+                          style={{
+                            backgroundColor: pattern.direction === "bullish" ? "rgba(34,197,94,0.1)" : "rgba(239,68,68,0.1)",
+                            color: pattern.direction === "bullish" ? "#4ade80" : "#f87171",
+                          }}
+                        >
+                          <Zap className="w-3 h-3" />
+                          {pattern.name}
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+                      <span className="text-xs text-slate-500 hidden sm:inline">Live · Binance</span>
+                    </div>
+                  </div>
+                  <div className="flex-1 relative">
+                    <CandlestickChart candles={candles} pattern={pattern} loading={loading} chartType={chartType} />
+                  </div>
+                </div>
+
+                {/* Pattern panel */}
+                <div className="rounded-2xl bg-slate-900 border border-slate-800 overflow-hidden flex flex-col min-h-[500px] lg:max-h-[calc(100vh-280px)]">
+                  <PatternPanel
+                    pattern={pattern}
+                    allPatterns={allPatterns}
+                    price={lastPrice}
+                    explanation={explanation}
+                    loading={aiLoading}
+                    error={aiError}
+                    onExplain={handleExplain}
+                    coin={selectedCoin}
+                    timeframe={timeframe}
+                    onSaveSignal={handleSaveSignal}
+                    entryPrice={entryPrice}
+                    slPrice={slPrice}
+                    tpPrice={tpPrice}
+                  />
                 </div>
               </div>
             </div>
           )}
-        </div>
-      )}
 
-      {/* Main content */}
-      <main className="flex-1 max-w-7xl mx-auto w-full">
-        {activeTab === "chart" && (
-          <div className="px-4 sm:px-6 py-4">
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 lg:h-[calc(100vh-240px)] min-h-[500px]">
-              {/* Chart */}
-              <div className="lg:col-span-2 rounded-2xl bg-slate-900 border border-slate-800 overflow-hidden flex flex-col min-h-[400px]">
-                <div className="px-5 py-3 border-b border-slate-800 flex items-center justify-between">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-sm font-semibold text-white">
-                      {selectedCoin.symbol}/USDT
-                    </span>
-                    <span className="text-xs text-slate-500">{tfLabel}</span>
-                    {pattern && (
-                      <span className="ml-1 flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full"
-                        style={{
-                          backgroundColor: pattern.direction === "bullish" ? "rgba(34,197,94,0.1)" : "rgba(239,68,68,0.1)",
-                          color: pattern.direction === "bullish" ? "#4ade80" : "#f87171",
-                        }}
-                      >
-                        <Zap className="w-3 h-3" />
-                        {pattern.name}
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-                    <span className="text-xs text-slate-500 hidden sm:inline">Live · Binance</span>
-                  </div>
-                </div>
-                <div className="flex-1 relative">
-                  <CandlestickChart candles={candles} pattern={pattern} loading={loading} />
-                </div>
-              </div>
+          {activeTab === "scanner" && (
+            <MarketScanner
+              timeframe={timeframe}
+              onSelectCoin={selectCoinFromTab}
+              watchlistSymbols={watchSymbols}
+              onToggleWatch={toggleWatch}
+            />
+          )}
 
-              {/* Pattern panel */}
-              <div className="rounded-2xl bg-slate-900 border border-slate-800 overflow-hidden flex flex-col min-h-[500px] lg:max-h-[calc(100vh-240px)]">
-                <PatternPanel
-                  pattern={pattern}
-                  allPatterns={allPatterns}
-                  price={lastPrice}
-                  explanation={explanation}
-                  loading={aiLoading}
-                  error={aiError}
-                  onExplain={handleExplain}
-                  coin={selectedCoin}
-                  timeframe={timeframe}
-                  onSaveSignal={handleSaveSignal}
-                  entryPrice={entryPrice}
-                  slPrice={slPrice}
-                  tpPrice={tpPrice}
-                />
-              </div>
+          {activeTab === "watchlist" && (
+            <Watchlist
+              timeframe={timeframe}
+              watchlist={watchlist}
+              onSelectCoin={selectCoinFromTab}
+              onRemove={removeWatch}
+            />
+          )}
+
+          {activeTab === "history" && (
+            <SignalHistory
+              refreshKey={historyRefresh}
+              onOutcomeChange={() => setHistoryRefresh((k) => k + 1)}
+            />
+          )}
+
+          {activeTab === "alerts" && (
+            <PriceAlerts onSelectCoin={selectCoinFromTab} />
+          )}
+        </main>
+
+        {/* Footer (desktop) */}
+        <footer className="hidden lg:block border-t border-slate-800 py-3 mt-auto">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6">
+            <div className="flex items-center justify-between text-xs text-slate-500 mb-1">
+              <span>PatternHunter AI · For educational purposes — not financial advice</span>
+              <Github className="w-4 h-4" />
             </div>
+            <p className="text-[11px] text-slate-600 leading-relaxed max-w-4xl">
+              Disclaimer: PatternHunter AI is for educational purposes only. We are not financial advisors. Trading involves high risk. Always do your own research.
+            </p>
           </div>
-        )}
+        </footer>
 
-        {activeTab === "scanner" && (
-          <MarketScanner
-            timeframe={timeframe}
-            onSelectCoin={selectCoinFromTab}
-            watchlistSymbols={watchSymbols}
-            onToggleWatch={toggleWatch}
-          />
-        )}
-
-        {activeTab === "watchlist" && (
-          <Watchlist
-            timeframe={timeframe}
-            watchlist={watchlist}
-            onSelectCoin={selectCoinFromTab}
-            onRemove={removeWatch}
-          />
-        )}
-
-        {activeTab === "history" && (
-          <SignalHistory
-            refreshKey={historyRefresh}
-            onOutcomeChange={() => setHistoryRefresh((k) => k + 1)}
-          />
-        )}
-
-        {activeTab === "alerts" && (
-          <PriceAlerts onSelectCoin={selectCoinFromTab} />
-        )}
-      </main>
-
-      {/* Footer (desktop) */}
-      <footer className="hidden lg:block border-t border-slate-800 py-4">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6">
-          <div className="flex items-center justify-between text-xs text-slate-500 mb-2">
-            <span>PatternHunter AI · For educational purposes — not financial advice</span>
-            <Github className="w-4 h-4" />
-          </div>
-          <p className="text-[11px] text-slate-600 leading-relaxed max-w-4xl">
-            Disclaimer: PatternHunter AI is for educational purposes only. We are not financial advisors. Trading involves high risk. Always do your own research.
+        {/* Mobile disclaimer */}
+        <div className="lg:hidden px-4 py-3 border-t border-slate-800 mt-auto">
+          <p className="text-[11px] text-slate-600 leading-relaxed text-center">
+            Disclaimer: For educational purposes only. Not financial advice. Trading involves high risk.
           </p>
         </div>
-      </footer>
-
-      {/* Mobile disclaimer */}
-      <div className="lg:hidden px-4 py-3 border-t border-slate-800 mt-auto">
-        <p className="text-[11px] text-slate-600 leading-relaxed text-center">
-          Disclaimer: PatternHunter AI is for educational purposes only. We are not financial advisors. Trading involves high risk. Always do your own research.
-        </p>
       </div>
 
       {/* Bottom navigation (mobile) */}

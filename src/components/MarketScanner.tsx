@@ -1,6 +1,6 @@
-import { useEffect, useState, useCallback } from "react";
-import { TrendingUp, TrendingDown, Loader2, RefreshCw, Zap } from "lucide-react";
-import { COINS } from "../constants";
+import { useEffect, useState, useCallback, useMemo } from "react";
+import { TrendingUp, TrendingDown, Loader2, RefreshCw, Zap, ArrowUpDown, Crown } from "lucide-react";
+import { COINS, PRO_COINS } from "../constants";
 import { fetchCandles } from "../lib/binance";
 import { detectPattern, formatPrice } from "../lib/patterns";
 import type { Coin, DetectedPattern, Timeframe } from "../types";
@@ -10,7 +10,11 @@ interface MarketRow {
   price: number;
   change: number;
   pattern: DetectedPattern | null;
+  isPro: boolean;
 }
+
+type SortKey = "price" | "change" | "symbol";
+type SortDir = "asc" | "desc";
 
 interface Props {
   timeframe: Timeframe;
@@ -22,12 +26,24 @@ interface Props {
 export default function MarketScanner({ timeframe, onSelectCoin, watchlistSymbols, onToggleWatch }: Props) {
   const [rows, setRows] = useState<MarketRow[]>([]);
   const [scanning, setScanning] = useState(true);
+  const [sortKey, setSortKey] = useState<SortKey>("change");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
+  const [filterPattern, setFilterPattern] = useState<"all" | "bullish" | "bearish" | "none">("all");
+  const [showAll, setShowAll] = useState(false);
+
+  const allCoins = useMemo(() => {
+    return [
+      ...COINS.map((c) => ({ coin: c, isPro: false })),
+      ...PRO_COINS.map((c) => ({ coin: c, isPro: true })),
+    ];
+  }, []);
+
+  const coinsToScan = showAll ? allCoins : allCoins.slice(0, 10);
 
   const scan = useCallback(async () => {
     setScanning(true);
-    const top10 = COINS.slice(0, 10);
     const settled = await Promise.allSettled(
-      top10.map(async (coin): Promise<MarketRow | null> => {
+      coinsToScan.map(async ({ coin, isPro }): Promise<MarketRow | null> => {
         const data = await fetchCandles(coin.binanceSymbol, 200, timeframe);
         if (data.length < 2) return null;
         const first = data[data.length - 25]?.close ?? data[0].close;
@@ -37,6 +53,7 @@ export default function MarketScanner({ timeframe, onSelectCoin, watchlistSymbol
           price: last,
           change: ((last - first) / first) * 100,
           pattern: detectPattern(data),
+          isPro,
         };
       })
     );
@@ -45,18 +62,67 @@ export default function MarketScanner({ timeframe, onSelectCoin, watchlistSymbol
       .filter((v): v is MarketRow => v !== null);
     setRows(results);
     setScanning(false);
-  }, [timeframe]);
+  }, [timeframe, coinsToScan]);
 
   useEffect(() => {
     scan();
   }, [scan]);
+
+  const sortedRows = useMemo(() => {
+    const filtered = rows.filter((row) => {
+      if (filterPattern === "all") return true;
+      if (filterPattern === "none") return row.pattern === null;
+      if (filterPattern === "bullish") return row.pattern?.direction === "bullish";
+      if (filterPattern === "bearish") return row.pattern?.direction === "bearish";
+      return true;
+    });
+
+    return [...filtered].sort((a, b) => {
+      let cmp = 0;
+      if (sortKey === "price") cmp = a.price - b.price;
+      else if (sortKey === "change") cmp = a.change - b.change;
+      else if (sortKey === "symbol") cmp = a.coin.symbol.localeCompare(b.coin.symbol);
+      return sortDir === "desc" ? -cmp : cmp;
+    });
+  }, [rows, sortKey, sortDir, filterPattern]);
+
+  const toggleSort = (key: SortKey) => {
+    if (sortKey === key) {
+      setSortDir(sortDir === "asc" ? "desc" : "asc");
+    } else {
+      setSortKey(key);
+      setSortDir("desc");
+    }
+  };
+
+  const bullishCount = rows.filter((r) => r.pattern?.direction === "bullish").length;
+  const bearishCount = rows.filter((r) => r.pattern?.direction === "bearish").length;
+  const noPatternCount = rows.filter((r) => r.pattern === null).length;
 
   return (
     <div className="max-w-7xl mx-auto w-full px-4 sm:px-6 py-4">
       <div className="flex items-center justify-between mb-4">
         <div>
           <h2 className="text-lg font-bold text-white">Market Scanner</h2>
-          <p className="text-xs text-slate-500 mt-0.5">Top 10 coins — live pattern detection</p>
+          <p className="text-xs text-slate-500 mt-0.5">
+            {showAll ? "All 58 coins" : "Top 10 coins"} — live pattern detection
+            {!showAll && (
+              <button
+                onClick={() => setShowAll(true)}
+                className="text-cyan-400 hover:text-cyan-300 ml-1 font-medium"
+              >
+                Show all →
+              </button>
+            )}
+            {showAll && (
+              <button
+                onClick={() => setShowAll(false)}
+                className="text-cyan-400 hover:text-cyan-300 ml-1 font-medium"
+              >
+                Show top 10 →
+              </button>
+            )}
+          </p>
         </div>
         <button
           onClick={scan}
@@ -68,14 +134,81 @@ export default function MarketScanner({ timeframe, onSelectCoin, watchlistSymbol
         </button>
       </div>
 
+      {/* Summary stats */}
+      {rows.length > 0 && (
+        <div className="grid grid-cols-4 gap-2 mb-3">
+          <div className="rounded-lg bg-slate-900 border border-slate-800 px-3 py-2 text-center">
+            <p className="text-lg font-bold text-white">{rows.length}</p>
+            <p className="text-[10px] text-slate-500 uppercase">Scanned</p>
+          </div>
+          <div className="rounded-lg bg-green-500/5 border border-green-500/20 px-3 py-2 text-center">
+            <p className="text-lg font-bold text-green-400">{bullishCount}</p>
+            <p className="text-[10px] text-slate-500 uppercase">Bullish</p>
+          </div>
+          <div className="rounded-lg bg-red-500/5 border border-red-500/20 px-3 py-2 text-center">
+            <p className="text-lg font-bold text-red-400">{bearishCount}</p>
+            <p className="text-[10px] text-slate-500 uppercase">Bearish</p>
+          </div>
+          <div className="rounded-lg bg-slate-900 border border-slate-800 px-3 py-2 text-center">
+            <p className="text-lg font-bold text-slate-400">{noPatternCount}</p>
+            <p className="text-[10px] text-slate-500 uppercase">No Signal</p>
+          </div>
+        </div>
+      )}
+
+      {/* Filter pills */}
+      <div className="flex items-center gap-2 mb-3 overflow-x-auto">
+        {([
+          { key: "all", label: "All" },
+          { key: "bullish", label: "Bullish" },
+          { key: "bearish", label: "Bearish" },
+          { key: "none", label: "No Pattern" },
+        ] as { key: typeof filterPattern; label: string }[]).map((f) => (
+          <button
+            key={f.key}
+            onClick={() => setFilterPattern(f.key)}
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-colors ${
+              filterPattern === f.key
+                ? "bg-slate-700 text-white"
+                : "bg-slate-800 text-slate-400 hover:bg-slate-700/50"
+            }`}
+          >
+            {f.label}
+          </button>
+        ))}
+        {/* Sort buttons */}
+        <div className="flex items-center gap-1 ml-auto shrink-0">
+          <span className="text-xs text-slate-500">Sort:</span>
+          {(["change", "price", "symbol"] as SortKey[]).map((key) => (
+            <button
+              key={key}
+              onClick={() => toggleSort(key)}
+              className={`flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium transition-colors ${
+                sortKey === key
+                  ? "text-cyan-400 bg-slate-800"
+                  : "text-slate-500 hover:text-slate-300"
+              }`}
+            >
+              {key === "change" ? "% Change" : key === "price" ? "Price" : "Name"}
+              {sortKey === key && <ArrowUpDown className="w-3 h-3" />}
+            </button>
+          ))}
+        </div>
+      </div>
+
       {scanning && rows.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-20">
           <Loader2 className="w-8 h-8 text-cyan-400 animate-spin mb-3" />
-          <p className="text-slate-400 text-sm">Scanning top 10 coins…</p>
+          <p className="text-slate-400 text-sm">Scanning {coinsToScan.length} coins…</p>
+        </div>
+      ) : sortedRows.length === 0 ? (
+        <div className="flex flex-col items-center justify-center py-12 text-center">
+          <Zap className="w-8 h-8 text-slate-600 mb-2" />
+          <p className="text-slate-400 text-sm">No coins match this filter</p>
         </div>
       ) : (
         <div className="space-y-2">
-          {rows.map((row, idx) => {
+          {sortedRows.map((row, idx) => {
             const isBullish = row.pattern?.direction === "bullish";
             const hasPattern = row.pattern !== null;
             const inWatch = watchlistSymbols.has(row.coin.binanceSymbol);
@@ -108,8 +241,9 @@ export default function MarketScanner({ timeframe, onSelectCoin, watchlistSymbol
                     {row.coin.symbol.slice(0, 3)}
                   </div>
                   <div className="min-w-0 flex-1">
-                    <p className="text-sm font-semibold text-white truncate">
+                    <p className="text-sm font-semibold text-white truncate flex items-center gap-1">
                       {row.coin.symbol}<span className="text-slate-500 font-normal">/USDT</span>
+                      {row.isPro && <Crown className="w-3 h-3 text-amber-400/50" />}
                     </p>
                     <p className="text-xs text-slate-500 truncate">{row.coin.label}</p>
                   </div>

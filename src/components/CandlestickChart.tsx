@@ -19,14 +19,16 @@ interface Props {
   pattern: DetectedPattern | null;
   showIndicators?: boolean;
   loading?: boolean;
+  chartType?: "candles" | "line";
 }
 
-export default function CandlestickChart({ candles, pattern, showIndicators = true, loading = false }: Props) {
+export default function CandlestickChart({ candles, pattern, showIndicators = true, loading = false, chartType = "candles" }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const rsiContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const rsiChartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const lineChartSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const lineSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const extraLineSeriesRef = useRef<ISeriesApi<"Line">[]>([]);
   const volumeSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
@@ -68,6 +70,14 @@ export default function CandlestickChart({ candles, pattern, showIndicators = tr
       borderVisible: false,
     });
     candleSeriesRef.current = candleSeries;
+
+    const lineChartSeries = chart.addLineSeries({
+      color: "#38bdf8",
+      lineWidth: 2,
+      priceLineVisible: true,
+      lastValueVisible: true,
+    });
+    lineChartSeriesRef.current = lineChartSeries;
 
     const volumeSeries = chart.addHistogramSeries({
       priceFormat: { type: "volume" },
@@ -146,6 +156,7 @@ export default function CandlestickChart({ candles, pattern, showIndicators = tr
       chartRef.current = null;
       rsiChartRef.current = null;
       candleSeriesRef.current = null;
+      lineChartSeriesRef.current = null;
       lineSeriesRef.current = null;
       extraLineSeriesRef.current = [];
       volumeSeriesRef.current = null;
@@ -164,6 +175,7 @@ export default function CandlestickChart({ candles, pattern, showIndicators = tr
 
     if (!candles.length) {
       try { candleSeries.setData([]); } catch { /* */ }
+      try { lineChartSeriesRef.current?.setData([]); } catch { /* */ }
       try { volumeSeriesRef.current?.setData([]); } catch { /* */ }
       try { ma7SeriesRef.current?.setData([]); } catch { /* */ }
       try { ma25SeriesRef.current?.setData([]); } catch { /* */ }
@@ -175,15 +187,25 @@ export default function CandlestickChart({ candles, pattern, showIndicators = tr
     }
 
     try {
-      candleSeries.setData(
-        candles.map((c) => ({
-          time: c.time as Time,
-          open: c.open,
-          high: c.high,
-          low: c.low,
-          close: c.close,
-        }))
-      );
+      if (chartType === "line") {
+        candleSeries.applyOptions({ visible: false });
+        lineChartSeriesRef.current?.applyOptions({ visible: true });
+        lineChartSeriesRef.current?.setData(
+          candles.map((c) => ({ time: c.time as Time, value: c.close }))
+        );
+      } else {
+        candleSeries.applyOptions({ visible: true });
+        lineChartSeriesRef.current?.applyOptions({ visible: false });
+        candleSeries.setData(
+          candles.map((c) => ({
+            time: c.time as Time,
+            open: c.open,
+            high: c.high,
+            low: c.low,
+            close: c.close,
+          }))
+        );
+      }
     } catch (e) {
       console.error("Chart: failed to set candle data", e);
     }
@@ -347,7 +369,7 @@ export default function CandlestickChart({ candles, pattern, showIndicators = tr
       try { chart.timeScale().fitContent(); } catch { /* */ }
       try { rsiChartRef.current?.timeScale().fitContent(); } catch { /* */ }
     });
-  }, [candles, pattern, showIndicators]);
+  }, [candles, pattern, showIndicators, chartType]);
 
   useEffect(() => {
     updateChart();

@@ -106,22 +106,6 @@ export default function App() {
   const [watchSymbols, setWatchSymbols] = useState<Set<string>>(new Set());
   const [historyRefresh, setHistoryRefresh] = useState(0);
 
-  // ---- Keyboard shortcuts ----
-  useEffect(() => {
-    function handleKey(e: KeyboardEvent) {
-      const tag = (e.target as HTMLElement)?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
-      if (e.key >= "1" && e.key <= "5") {
-        const idx = parseInt(e.key, 10) - 1;
-        if (idx < TABS.length) setActiveTab(TABS[idx].key);
-      } else if (e.key.toLowerCase() === "r" && activeTab === "chart") {
-        loadData(selectedCoin.binanceSymbol, timeframe);
-      }
-    }
-    window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
-  }, [activeTab, selectedCoin, timeframe, loadData]);
-
   const filteredCoins = useMemo(() => {
     if (!coinSearch.trim()) return ALL_COINS;
     const q = coinSearch.toLowerCase();
@@ -206,8 +190,23 @@ export default function App() {
     loadData(selectedCoin.binanceSymbol, timeframe);
   }, [selectedCoin, timeframe, loadData]);
 
+  // ---- Keyboard shortcuts ----
   useEffect(() => {
-    if (activeTab !== "chart") return;
+    function handleKey(e: KeyboardEvent) {
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if (e.key >= "1" && e.key <= "5") {
+        const idx = parseInt(e.key, 10) - 1;
+        if (idx < TABS.length) setActiveTab(TABS[idx].key);
+      } else if (e.key.toLowerCase() === "r" && activeTab === "chart") {
+        loadData(selectedCoin.binanceSymbol, timeframe);
+      }
+    }
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [activeTab, selectedCoin, timeframe, loadData]);
+
+  useEffect(() => {
     const interval = setInterval(async () => {
       try {
         const data = await fetchCandles(selectedCoin.binanceSymbol, 5, timeframe);

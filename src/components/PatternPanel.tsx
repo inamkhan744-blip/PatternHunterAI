@@ -11,6 +11,7 @@ import {
   Check,
   Target,
   Shield,
+  Zap,
 } from "lucide-react";
 import { useState } from "react";
 import type { Coin, DetectedPattern, Timeframe, PatternWithConfidence } from "../types";
@@ -35,6 +36,7 @@ interface Props {
   tpPrice: number | null;
   fomoLocked?: boolean;
   fomoRemainingSeconds?: number;
+  onOpenAutoTrade?: () => void;
 }
 
 function confidenceColor(conf: number): string {
@@ -65,6 +67,7 @@ export default function PatternPanel({
   tpPrice,
   fomoLocked = false,
   fomoRemainingSeconds = 0,
+  onOpenAutoTrade,
 }: Props) {
   const [saved, setSaved] = useState(false);
 
@@ -228,41 +231,65 @@ export default function PatternPanel({
               </pre>
             </div>
 
-            <div className="flex items-center gap-2 mt-3">
-              <button
-                onClick={handleSave}
-                className="flex-1 flex items-center justify-center gap-2 py-2.5 px-3 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-sm font-medium transition-colors"
-              >
-                {saved ? (
-                  <>
-                    <Check className="w-4 h-4 text-green-400" />
-                    Saved
-                  </>
-                ) : (
-                  <>
-                    <Save className="w-4 h-4" />
-                    Save to History
-                  </>
-                )}
-              </button>
+            <div className="space-y-2 mt-3">
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handleSave}
+                  className="flex-1 flex items-center justify-center gap-2 py-2 px-3 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-medium transition-colors"
+                >
+                  {saved ? (
+                    <>
+                      <Check className="w-3.5 h-3.5 text-green-400" />
+                      Saved
+                    </>
+                  ) : (
+                    <>
+                      <Save className="w-3.5 h-3.5" />
+                      Save History
+                    </>
+                  )}
+                </button>
+                <button
+                  onClick={() => {
+                    if (fomoLocked) {
+                      alert("🚨 Trade execution disabled: Anti-FOMO Lock active. Please wait for cooldown.");
+                      return;
+                    }
+                    openBinanceApp();
+                  }}
+                  disabled={fomoLocked}
+                  className={`flex-1 flex items-center justify-center gap-2 py-2 px-3 rounded-lg text-xs font-semibold transition-all ${
+                    fomoLocked
+                      ? "bg-red-500/20 text-red-400 border border-red-500/40 cursor-not-allowed opacity-60"
+                      : "bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200"
+                  }`}
+                  title={fomoLocked ? `Trade locked: Anti-FOMO active (${Math.ceil(fomoRemainingSeconds / 60)}m left)` : "Trade on Binance"}
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  Binance Link
+                </button>
+              </div>
+
+              {/* Fortress Auto-Trade Execution Entry Button */}
               <button
                 onClick={() => {
                   if (fomoLocked) {
-                    alert("🚨 Trade execution disabled: Anti-FOMO Lock active. Please wait for cooldown.");
+                    alert("🚨 Auto-Trade execution disabled: Anti-FOMO Lock active.");
                     return;
                   }
-                  openBinanceApp();
+                  if (onOpenAutoTrade) {
+                    onOpenAutoTrade();
+                  }
                 }}
                 disabled={fomoLocked}
-                className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-3 rounded-lg text-sm font-bold transition-all ${
+                className={`w-full flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl text-xs font-bold transition-all shadow-lg ${
                   fomoLocked
-                    ? "bg-red-500/20 text-red-400 border border-red-500/40 cursor-not-allowed opacity-60"
-                    : "bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-900"
+                    ? "bg-red-500/20 text-red-400 border border-red-500/40 cursor-not-allowed"
+                    : "bg-gradient-to-r from-cyan-500 via-blue-600 to-indigo-600 hover:from-cyan-400 hover:to-blue-500 text-slate-950 font-black tracking-wide shadow-cyan-950/50"
                 }`}
-                title={fomoLocked ? `Trade locked: Anti-FOMO active (${Math.ceil(fomoRemainingSeconds / 60)}m left)` : "Trade on Binance"}
               >
-                <ExternalLink className="w-4 h-4" />
-                {fomoLocked ? `Locked (${Math.ceil(fomoRemainingSeconds / 60)}m)` : "Trade on Binance"}
+                <Zap className="w-4 h-4 fill-slate-950" />
+                Fortress Auto-Trade (Spot & Futures)
               </button>
             </div>
           </div>

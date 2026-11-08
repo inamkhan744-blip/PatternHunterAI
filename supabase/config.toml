@@ -2,3 +2,6 @@ project_id = ""
 
 [functions.explain-pattern]
 verify_jwt = false
+
+[functions.ai-chat]
+verify_jwt = false

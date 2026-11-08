@@ -80,7 +80,7 @@ export interface WatchlistItem {
   binance_symbol: string;
 }
 
-export type AppTab = "chart" | "scanner" | "watchlist" | "history" | "alerts" | "depth" | "trades" | "heatmap" | "confluence" | "backtest";
+export type AppTab = "chart" | "scanner" | "watchlist" | "history" | "alerts" | "depth" | "trades" | "heatmap" | "confluence" | "backtest" | "chat" | "portfolio" | "journal";
 
 export interface MarketStats {
   high24h: number;
@@ -177,4 +177,56 @@ export interface ConfluenceResult {
   overallDirection: "bullish" | "bearish" | "neutral";
   score: number;
   agreement: number;
+}
+
+export interface PortfolioHolding {
+  id: string;
+  coin_symbol: string;
+  binance_symbol: string;
+  coin_label: string;
+  quantity: number;
+  buy_price: number;
+  created_at: string;
+}
+
+export interface JournalEntry {
+  id: string;
+  coin_symbol: string;
+  binance_symbol: string;
+  pattern_name: string | null;
+  direction: string | null;
+  timeframe: string | null;
+  emotion: string;
+  entry_price: number;
+  sl_price: number;
+  tp_price: number;
+  outcome: string;
+  ai_analysis: string | null;
+  notes: string | null;
+  followed_rules: boolean;
+  created_at: string;
+}
+
+export interface UserStats {
+  discipline_streak: number;
+  best_streak: number;
+  total_journal_entries: number;
+  rules_followed_count: number;
+  rules_broken_count: number;
+}
+
+export interface CloudAlert {
+  id: string;
+  coin_symbol: string;
+  binance_symbol: string;
+  target_price: number;
+  direction: "above" | "below";
+  triggered: boolean;
+  created_at: string;
+}
+
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+  timestamp: number;
 }

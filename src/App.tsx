@@ -43,7 +43,8 @@ import AntiFOMOModal from "./components/AntiFOMOModal";
 import { COINS, PRO_COINS } from "./constants";
 import { fetchCandles, fetchMarketStats } from "./lib/binance";
 import { detectPattern, detectAllPatterns, formatPrice } from "./lib/patterns";
-import { rsi, sma } from "./lib/indicators";
+import { rsi, sma, atr } from "./lib/indicators";
+import AutoTradeModal from "./components/AutoTradeModal";
 import {
   generateFallbackAnalysis,
   parseAnalysisPrices,
@@ -119,6 +120,8 @@ export default function App() {
   const [watchlist, setWatchlist] = useState<WatchlistItem[]>([]);
   const [watchSymbols, setWatchSymbols] = useState<Set<string>>(new Set());
   const [historyRefresh, setHistoryRefresh] = useState(0);
+  const [autoTradeOpen, setAutoTradeOpen] = useState(false);
+  const [currentAtr, setCurrentAtr] = useState<number>(0);
 
   const { user } = useAuth();
   const [authModalOpen, setAuthModalOpen] = useState(false);
@@ -230,6 +233,15 @@ export default function App() {
       setCandles(data);
       setPattern(detectPattern(data));
       setAllPatterns(detectAllPatterns(data));
+
+      if (data.length >= 15) {
+        const atrSeries = atr(data, 14);
+        const lastAtr = atrSeries[atrSeries.length - 1];
+        if (lastAtr !== null && lastAtr !== undefined) {
+          setCurrentAtr(lastAtr);
+        }
+      }
+
       if (data.length >= 2) {
         const first = data[data.length - 25]?.close ?? data[0].close;
         const last = data[data.length - 1].close;
@@ -614,6 +626,13 @@ export default function App() {
 
         <div className="p-3 border-t border-slate-800 space-y-2">
           <button
+            onClick={() => setAutoTradeOpen(true)}
+            className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-gradient-to-r from-cyan-600 via-blue-600 to-indigo-600 hover:from-cyan-500 hover:to-blue-500 text-white text-xs font-bold transition-all shadow-md shadow-cyan-950/40"
+          >
+            <Zap className="w-4 h-4 text-yellow-300" />
+            Auto-Trade Engine
+          </button>
+          <button
             onClick={handleScanClick}
             className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-sm font-medium transition-colors"
           >
@@ -645,6 +664,14 @@ export default function App() {
               </h1>
             </div>
             <div className="flex items-center gap-2">
+              <button
+                onClick={() => setAutoTradeOpen(true)}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold transition-colors"
+                title="Auto-Trade"
+              >
+                <Zap className="w-3.5 h-3.5 text-yellow-300" />
+                <span>Auto</span>
+              </button>
               <button
                 onClick={handleScanClick}
                 className="flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-sm font-medium transition-colors"
@@ -928,6 +955,7 @@ export default function App() {
                     tpPrice={tpPrice}
                     fomoLocked={fomoLocked}
                     fomoRemainingSeconds={fomoRemainingSeconds}
+                    onOpenAutoTrade={() => setAutoTradeOpen(true)}
                   />
                 </div>
               </div>
@@ -1039,6 +1067,13 @@ export default function App() {
         symbol={selectedCoin.symbol}
       />
 
+      <AutoTradeModal
+        open={autoTradeOpen}
+        onClose={() => setAutoTradeOpen(false)}
+        currentSymbol={selectedCoin.binanceSymbol}
+        currentPrice={lastPrice}
+        currentAtr={currentAtr || ((lastPrice ?? 100) * 0.02)}
+      />
       <AuthModal
         open={authModalOpen}
         onClose={() => setAuthModalOpen(false)}

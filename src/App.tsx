@@ -21,6 +21,10 @@ import {
   BarChart3,
   TrendingUp,
   TrendingDown,
+  Sparkles,
+  Wallet,
+  LogOut,
+  User as UserIcon,
 } from "lucide-react";
 import CandlestickChart from "./components/CandlestickChart";
 import PatternPanel from "./components/PatternPanel";
@@ -36,6 +40,7 @@ import TrendIndicator from "./components/TrendIndicator";
 import { COINS, PRO_COINS } from "./constants";
 import { fetchCandles, fetchMarketStats } from "./lib/binance";
 import { detectPattern, detectAllPatterns, formatPrice } from "./lib/patterns";
+import { rsi, sma } from "./lib/indicators";
 import {
   generateFallbackAnalysis,
   parseAnalysisPrices,
@@ -43,6 +48,10 @@ import {
 } from "./lib/fallback";
 import { supabase } from "./lib/supabase";
 import { canScan, incrementScanCount, getRemainingScans, FREE_LIMIT } from "./lib/scanLimit";
+import { useAuth } from "./lib/auth";
+import AIChat from "./components/AIChat";
+import Portfolio from "./components/Portfolio";
+import AuthModal from "./components/AuthModal";
 import type { Candle, Coin, DetectedPattern, ScanResult, Timeframe, WatchlistItem, AppTab, MarketStats, PatternWithConfidence } from "./types";
 
 const TIMEFRAMES: { value: Timeframe; label: string }[] = [
@@ -60,6 +69,8 @@ const TABS: { key: AppTab; label: string; icon: typeof ChartIcon }[] = [
   { key: "watchlist", label: "Watchlist", icon: Star },
   { key: "history", label: "History", icon: HistoryIcon },
   { key: "alerts", label: "Alerts", icon: Bell },
+  { key: "chat", label: "AI Chat", icon: Sparkles },
+  { key: "portfolio", label: "Portfolio", icon: Wallet },
 ];
 
 const ALL_COINS = [...COINS, ...PRO_COINS];
@@ -105,6 +116,12 @@ export default function App() {
   const [watchlist, setWatchlist] = useState<WatchlistItem[]>([]);
   const [watchSymbols, setWatchSymbols] = useState<Set<string>>(new Set());
   const [historyRefresh, setHistoryRefresh] = useState(0);
+
+  const { user } = useAuth();
+  const [authModalOpen, setAuthModalOpen] = useState(false);
+  const [rsiValue, setRsiValue] = useState<number | null>(null);
+  const [trendValue, setTrendValue] = useState<string | null>(null);
+  const [fearGreedValue, setFearGreedValue] = useState<number | null>(null);
 
   const filteredCoins = useMemo(() => {
     if (!coinSearch.trim()) return ALL_COINS;
@@ -174,6 +191,18 @@ export default function App() {
         const last = data[data.length - 1].close;
         setLastPrice(last);
         setPriceChange(((last - first) / first) * 100);
+        const closes = data.map((c) => c.close);
+        const rsiData = rsi(closes, 14);
+        const lastRsi = rsiData[rsiData.length - 1];
+        setRsiValue(lastRsi);
+        const ma7 = sma(closes, 7);
+        const ma25 = sma(closes, 25);
+        const lastMa7 = ma7[ma7.length - 1];
+        const lastMa25 = ma25[ma25.length - 1];
+        if (lastMa7 !== null && lastMa25 !== null) {
+          const diff = ((lastMa7 - lastMa25) / lastMa25) * 100;
+          setTrendValue(diff > 0.3 ? "uptrend" : diff < -0.3 ? "downtrend" : "sideways");
+        }
       }
       const stats = await fetchMarketStats(binanceSymbol);
       setMarketStats(stats);
@@ -263,6 +292,24 @@ export default function App() {
     const interval = setInterval(autoResolveSignals, 60000);
     return () => clearInterval(interval);
   }, [autoResolveSignals]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadFearGreed() {
+      try {
+        const res = await fetch("https://api.alternative.me/fng/?limit=1");
+        if (!res.ok) return;
+        const json = await res.json();
+        const val = parseInt(json.data[0].value, 10);
+        if (!cancelled) setFearGreedValue(val);
+      } catch {
+        // ignore
+      }
+    }
+    loadFearGreed();
+    const interval = setInterval(loadFearGreed, 300000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, []);
 
   const handleExplain = useCallback(async () => {
     if (!pattern || !lastPrice) return;
@@ -411,6 +458,13 @@ export default function App() {
     setActiveTab("chart");
   }, []);
 
+  const showCoinBySymbol = useCallback((symbol: string) => {
+    const coin = ALL_COINS.find((c) => c.symbol === symbol.toUpperCase());
+    if (coin) {
+      setSelectedCoin(coin);
+    }
+  }, []);
+
   const changePercent = priceChange ?? 0;
   const statsChange = marketStats?.priceChangePercent24h ?? changePercent;
   const tfLabel = TIMEFRAMES.find((t) => t.value === timeframe)?.label ?? "1H";
@@ -452,6 +506,36 @@ export default function App() {
             );
           })}
         </nav>
+
+        {/* Auth section */}
+        <div className="px-3 py-2 border-t border-slate-800">
+          {user ? (
+            <div className="flex items-center gap-2">
+              <div className="w-8 h-8 rounded-full bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center text-xs font-bold shrink-0">
+                {user.email?.slice(0, 2).toUpperCase() ?? "U"}
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-medium text-white truncate">{user.email}</p>
+                <p className="text-[10px] text-slate-500">Signed in</p>
+              </div>
+              <button
+                onClick={() => supabase.auth.signOut()}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-red-400 transition-colors"
+                title="Sign out"
+              >
+                <LogOut className="w-4 h-4" />
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => setAuthModalOpen(true)}
+              className="w-full flex items-center justify-center gap-2 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-sm font-medium transition-colors"
+            >
+              <UserIcon className="w-4 h-4 text-cyan-400" />
+              Sign In
+            </button>
+          )}
+        </div>
 
         <div className="p-3 border-t border-slate-800 space-y-2">
           <button
@@ -792,6 +876,23 @@ export default function App() {
           {activeTab === "alerts" && (
             <PriceAlerts onSelectCoin={selectCoinFromTab} />
           )}
+
+          {activeTab === "chat" && (
+            <AIChat
+              coin={selectedCoin}
+              price={lastPrice}
+              change24h={marketStats?.priceChangePercent24h ?? priceChange}
+              rsi={rsiValue}
+              trend={trendValue}
+              pattern={pattern?.name ?? null}
+              fearGreed={fearGreedValue}
+              onShowCoin={showCoinBySymbol}
+            />
+          )}
+
+          {activeTab === "portfolio" && (
+            <Portfolio />
+          )}
         </main>
 
         {/* Footer (desktop) */}
@@ -837,6 +938,10 @@ export default function App() {
         </div>
       </nav>
 
+      <AuthModal
+        open={authModalOpen}
+        onClose={() => setAuthModalOpen(false)}
+      />
       <ProModal
         open={proModalOpen}
         onClose={() => setProModalOpen(false)}

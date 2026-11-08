@@ -10,7 +10,7 @@ import {
   type SeriesMarker,
   type Time,
 } from "lightweight-charts";
-import { TrendingUp, TrendingDown, Minus, Layers, Target, ShieldCheck } from "lucide-react";
+import { TrendingUp, TrendingDown, Minus, Layers, Target } from "lucide-react";
 import type { Candle, DetectedPattern } from "../types";
 import { getPatternColor } from "../lib/patterns";
 import { sma, rsi, findSupportResistance } from "../lib/indicators";

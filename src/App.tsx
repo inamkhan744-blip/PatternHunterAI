@@ -822,7 +822,13 @@ export default function App() {
                     </div>
                   </div>
                   <div className="flex-1 relative">
-                    <CandlestickChart candles={candles} pattern={pattern} loading={loading} chartType={chartType} />
+                    <CandlestickChart
+                      candles={candles}
+                      pattern={pattern}
+                      symbol={selectedCoin.binanceSymbol}
+                      loading={loading}
+                      chartType={chartType}
+                    />
                   </div>
                 </div>
 

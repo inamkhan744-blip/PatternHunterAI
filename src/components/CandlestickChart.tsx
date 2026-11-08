@@ -10,30 +10,38 @@ import {
   type SeriesMarker,
   type Time,
 } from "lightweight-charts";
-import { TrendingUp, TrendingDown, Minus, Layers } from "lucide-react";
+import { TrendingUp, TrendingDown, Minus, Layers, Target } from "lucide-react";
 import type { Candle, DetectedPattern } from "../types";
 import { getPatternColor } from "../lib/patterns";
 import { sma, rsi, findSupportResistance } from "../lib/indicators";
 import { scanSMC, calculateHTFTrend, type SMCData, type HTFTrendResult } from "../lib/SMCScanner";
+import { evaluateConfluence, type ConfluenceResult } from "../lib/ConfluenceEngine";
+import SniperChecklistModal from "./SniperChecklistModal";
 
 interface Props {
   candles: Candle[];
   pattern: DetectedPattern | null;
   symbol?: string;
+  timeframe?: string;
   showIndicators?: boolean;
   loading?: boolean;
   chartType?: "candles" | "line";
   showSMC?: boolean;
+  fomoLocked?: boolean;
+  fomoRemainingSeconds?: number;
 }
 
 export default function CandlestickChart({
   candles,
   pattern,
   symbol,
+  timeframe = "1H",
   showIndicators = true,
   loading = false,
   chartType = "candles",
   showSMC = true,
+  fomoLocked = false,
+  fomoRemainingSeconds = 0,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -55,11 +63,20 @@ export default function CandlestickChart({
   const [htfTrend, setHtfTrend] = useState<HTFTrendResult | null>(null);
   const [htfLoading, setHtfLoading] = useState(false);
 
+  // Sniper Confluence Modal state
+  const [confluenceModalOpen, setConfluenceModalOpen] = useState(false);
+
   // Detect SMC data (Order Blocks & Fair Value Gaps)
   const smcData: SMCData = useMemo(() => {
     if (!showSMC || candles.length < 5) return { orderBlocks: [], fvgs: [] };
     return scanSMC(candles);
   }, [candles, showSMC]);
+
+  // Confluence Calculation
+  const confluenceResult: ConfluenceResult | null = useMemo(() => {
+    if (candles.length < 5) return null;
+    return evaluateConfluence(candles, smcData, htfTrend);
+  }, [candles, smcData, htfTrend]);
 
   // Fetch 1H and 4H EMA(50) for Higher Timeframe trend
   const loadHTFTrend = useCallback(async (sym: string) => {
@@ -620,20 +637,43 @@ export default function CandlestickChart({
           )}
         </div>
 
-        {/* SMC legend */}
-        <div className="flex items-center gap-3 text-[10px] text-slate-400">
-          <div className="flex items-center gap-1.5">
-            <Layers className="w-3.5 h-3.5 text-cyan-400" />
-            <span className="font-medium text-slate-300">SMC:</span>
+        {/* SMC legend & Analyze Setup Button */}
+        <div className="flex items-center gap-3 text-[10px] text-slate-400 flex-wrap">
+          <div className="hidden sm:flex items-center gap-3">
+            <div className="flex items-center gap-1.5">
+              <Layers className="w-3.5 h-3.5 text-cyan-400" />
+              <span className="font-medium text-slate-300">SMC:</span>
+            </div>
+            <div className="flex items-center gap-1">
+              <span className="w-2.5 h-2.5 rounded-sm bg-green-500/30 border border-green-500/80" />
+              <span>Bullish OB/FVG</span>
+            </div>
+            <div className="flex items-center gap-1">
+              <span className="w-2.5 h-2.5 rounded-sm bg-red-500/30 border border-red-500/80" />
+              <span>Bearish OB/FVG</span>
+            </div>
           </div>
-          <div className="flex items-center gap-1">
-            <span className="w-2.5 h-2.5 rounded-sm bg-green-500/30 border border-green-500/80" />
-            <span>Bullish OB/FVG</span>
-          </div>
-          <div className="flex items-center gap-1">
-            <span className="w-2.5 h-2.5 rounded-sm bg-red-500/30 border border-red-500/80" />
-            <span>Bearish OB/FVG</span>
-          </div>
+
+          {/* Analyze Setup Button */}
+          <button
+            onClick={() => setConfluenceModalOpen(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-semibold shadow-md shadow-cyan-950/40 border border-cyan-400/30 transition-all active:scale-95 text-xs"
+            title="Open Sniper Confluence Setup Analysis"
+          >
+            <Target className="w-3.5 h-3.5 text-cyan-200" />
+            <span>Analyze Setup</span>
+            {confluenceResult && (
+              <span
+                className={`ml-1 px-1.5 py-0.2 rounded text-[10px] font-bold ${
+                  confluenceResult.canExecute
+                    ? "bg-green-500/30 text-green-300"
+                    : "bg-slate-900/60 text-slate-300"
+                }`}
+              >
+                {confluenceResult.score}/100
+              </span>
+            )}
+          </button>
         </div>
       </div>
 
@@ -668,6 +708,24 @@ export default function CandlestickChart({
           <span className="text-sm text-slate-500">No data available</span>
         </div>
       )}
+
+      {/* Sniper Checklist Modal */}
+      <SniperChecklistModal
+        open={confluenceModalOpen}
+        onClose={() => setConfluenceModalOpen(false)}
+        result={confluenceResult}
+        symbol={symbol}
+        timeframe={timeframe}
+        fomoLocked={fomoLocked}
+        fomoRemainingSeconds={fomoRemainingSeconds}
+        onExecuteTrade={() => {
+          if (fomoLocked) {
+            alert("🚨 Trade execution disabled: Anti-FOMO Lock active.");
+            return;
+          }
+          alert(`Trade executed with High Confluence (${confluenceResult?.score}/100)!`);
+        }}
+      />
     </div>
   );
 }

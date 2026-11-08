@@ -33,6 +33,8 @@ interface Props {
   entryPrice: number | null;
   slPrice: number | null;
   tpPrice: number | null;
+  fomoLocked?: boolean;
+  fomoRemainingSeconds?: number;
 }
 
 function confidenceColor(conf: number): string {
@@ -61,6 +63,8 @@ export default function PatternPanel({
   entryPrice,
   slPrice,
   tpPrice,
+  fomoLocked = false,
+  fomoRemainingSeconds = 0,
 }: Props) {
   const [saved, setSaved] = useState(false);
 
@@ -242,11 +246,23 @@ export default function PatternPanel({
                 )}
               </button>
               <button
-                onClick={openBinanceApp}
-                className="flex-1 flex items-center justify-center gap-2 py-2.5 px-3 rounded-lg bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-900 text-sm font-bold transition-all"
+                onClick={() => {
+                  if (fomoLocked) {
+                    alert("🚨 Trade execution disabled: Anti-FOMO Lock active. Please wait for cooldown.");
+                    return;
+                  }
+                  openBinanceApp();
+                }}
+                disabled={fomoLocked}
+                className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-3 rounded-lg text-sm font-bold transition-all ${
+                  fomoLocked
+                    ? "bg-red-500/20 text-red-400 border border-red-500/40 cursor-not-allowed opacity-60"
+                    : "bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-900"
+                }`}
+                title={fomoLocked ? `Trade locked: Anti-FOMO active (${Math.ceil(fomoRemainingSeconds / 60)}m left)` : "Trade on Binance"}
               >
                 <ExternalLink className="w-4 h-4" />
-                Trade on Binance
+                {fomoLocked ? `Locked (${Math.ceil(fomoRemainingSeconds / 60)}m)` : "Trade on Binance"}
               </button>
             </div>
           </div>

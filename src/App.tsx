@@ -826,6 +826,7 @@ export default function App() {
                       candles={candles}
                       pattern={pattern}
                       symbol={selectedCoin.binanceSymbol}
+                      timeframe={tfLabel}
                       loading={loading}
                       chartType={chartType}
                     />

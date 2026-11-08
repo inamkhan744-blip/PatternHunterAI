@@ -37,6 +37,9 @@ import SignalHistory from "./components/SignalHistory";
 import PriceAlerts from "./components/PriceAlerts";
 import FearGreedIndex from "./components/FearGreedIndex";
 import TrendIndicator from "./components/TrendIndicator";
+import NewsSentimentRadar from "./components/NewsSentimentRadar";
+import MacroWidget from "./components/MacroWidget";
+import AntiFOMOModal from "./components/AntiFOMOModal";
 import { COINS, PRO_COINS } from "./constants";
 import { fetchCandles, fetchMarketStats } from "./lib/binance";
 import { detectPattern, detectAllPatterns, formatPrice } from "./lib/patterns";
@@ -123,6 +126,12 @@ export default function App() {
   const [trendValue, setTrendValue] = useState<string | null>(null);
   const [fearGreedValue, setFearGreedValue] = useState<number | null>(null);
 
+  // Anti-FOMO state
+  const [fomoLocked, setFomoLocked] = useState(false);
+  const [fomoRemainingSeconds, setFomoRemainingSeconds] = useState(0);
+  const [fomoModalOpen, setFomoModalOpen] = useState(false);
+  const [priceChange1h, setPriceChange1h] = useState(0);
+
   const filteredCoins = useMemo(() => {
     if (!coinSearch.trim()) return ALL_COINS;
     const q = coinSearch.toLowerCase();
@@ -135,7 +144,42 @@ export default function App() {
     const params = new URLSearchParams(window.location.search);
     if (params.get("pro") === "true") setIsPro(true);
     setRemainingScans(getRemainingScans());
+
+    // Restore existing FOMO lock from localStorage if active
+    const savedLockUntil = localStorage.getItem("anti_fomo_lock_until");
+    if (savedLockUntil) {
+      const lockUntil = parseInt(savedLockUntil, 10);
+      const diffSec = Math.floor((lockUntil - Date.now()) / 1000);
+      if (diffSec > 0) {
+        setFomoLocked(true);
+        setFomoRemainingSeconds(diffSec);
+      } else {
+        localStorage.removeItem("anti_fomo_lock_until");
+      }
+    }
   }, []);
+
+  // Countdown timer for Anti-FOMO lock
+  useEffect(() => {
+    if (!fomoLocked) return;
+    const timer = setInterval(() => {
+      const savedLockUntil = localStorage.getItem("anti_fomo_lock_until");
+      if (savedLockUntil) {
+        const diffSec = Math.floor((parseInt(savedLockUntil, 10) - Date.now()) / 1000);
+        if (diffSec <= 0) {
+          setFomoLocked(false);
+          setFomoRemainingSeconds(0);
+          localStorage.removeItem("anti_fomo_lock_until");
+        } else {
+          setFomoRemainingSeconds(diffSec);
+        }
+      } else {
+        setFomoLocked(false);
+        setFomoRemainingSeconds(0);
+      }
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [fomoLocked]);
 
   const loadWatchlist = useCallback(async () => {
     const { data } = await supabase.from("watchlist").select("*").order("created_at", { ascending: false });
@@ -202,6 +246,37 @@ export default function App() {
         if (lastMa7 !== null && lastMa25 !== null) {
           const diff = ((lastMa7 - lastMa25) / lastMa25) * 100;
           setTrendValue(diff > 0.3 ? "uptrend" : diff < -0.3 ? "downtrend" : "sideways");
+        }
+
+        // Anti-FOMO Check: Price change of the last 1 hour
+        let change1h = 0;
+        if (tf === "1h") {
+          const currentCandle = data[data.length - 1];
+          change1h = ((currentCandle.close - currentCandle.open) / currentCandle.open) * 100;
+        } else if (tf === "15m" && data.length >= 5) {
+          const price1hAgo = data[data.length - 5].close;
+          change1h = ((last - price1hAgo) / price1hAgo) * 100;
+        } else if (tf === "5m" && data.length >= 13) {
+          const price1hAgo = data[data.length - 13].close;
+          change1h = ((last - price1hAgo) / price1hAgo) * 100;
+        } else {
+          const refIndex = Math.max(0, data.length - 2);
+          const refPrice = data[refIndex].close;
+          change1h = ((last - refPrice) / refPrice) * 100;
+        }
+
+        setPriceChange1h(change1h);
+
+        // If price moved > 8% (positive or negative) in the last 1 hour
+        if (Math.abs(change1h) >= 8) {
+          const lockUntil = Date.now() + 10 * 60 * 1000;
+          const currentSaved = localStorage.getItem("anti_fomo_lock_until");
+          if (!currentSaved || parseInt(currentSaved, 10) < Date.now()) {
+            localStorage.setItem("anti_fomo_lock_until", String(lockUntil));
+            setFomoLocked(true);
+            setFomoRemainingSeconds(10 * 60);
+            setFomoModalOpen(true);
+          }
         }
       }
       const stats = await fetchMarketStats(binanceSymbol);
@@ -826,8 +901,11 @@ export default function App() {
                       candles={candles}
                       pattern={pattern}
                       symbol={selectedCoin.binanceSymbol}
+                      timeframe={tfLabel}
                       loading={loading}
                       chartType={chartType}
+                      fomoLocked={fomoLocked}
+                      fomoRemainingSeconds={fomoRemainingSeconds}
                     />
                   </div>
                 </div>
@@ -848,8 +926,16 @@ export default function App() {
                     entryPrice={entryPrice}
                     slPrice={slPrice}
                     tpPrice={tpPrice}
+                    fomoLocked={fomoLocked}
+                    fomoRemainingSeconds={fomoRemainingSeconds}
                   />
                 </div>
+              </div>
+
+              {/* Macro & AI News Sentiment Widgets Row */}
+              <div className="mt-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <MacroWidget />
+                <NewsSentimentRadar />
               </div>
             </div>
           )}
@@ -943,6 +1029,15 @@ export default function App() {
           })}
         </div>
       </nav>
+
+      {/* Anti-FOMO Alert Modal */}
+      <AntiFOMOModal
+        open={fomoModalOpen}
+        onClose={() => setFomoModalOpen(false)}
+        priceChange1h={priceChange1h}
+        remainingSeconds={fomoRemainingSeconds}
+        symbol={selectedCoin.symbol}
+      />
 
       <AuthModal
         open={authModalOpen}

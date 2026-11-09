@@ -672,7 +672,7 @@ export default function CandlestickChart({
   const isHtfBear = htfTrendLabel === "Bearish";
 
   return (
-    <div className="relative w-full h-full flex flex-col">
+    <div className="relative w-full h-full min-h-[500px] lg:min-h-[60vh] flex flex-col">
       {/* HTF Trend Badge above chart */}
       <div className="px-4 py-2 border-b border-slate-800/80 bg-slate-900/40 flex items-center justify-between text-xs flex-wrap gap-2">
         <div className="flex items-center gap-2">
@@ -778,7 +778,7 @@ export default function CandlestickChart({
       </div>
 
       {/* Chart Canvas Container */}
-      <div className="relative flex-1 min-h-0">
+      <div className="relative flex-1 min-h-[380px] lg:min-h-[440px]">
         <div ref={containerRef} className="w-full h-full" />
         <canvas
           ref={canvasRef}

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, useMemo } from "react";
+import { useCallback, useEffect, useState, useMemo, useRef } from "react";
 import {
   Activity,
   Crown,
@@ -63,7 +63,13 @@ import VisionAIUpload from "./components/VisionAIUpload";
 import SettingsModal from "./components/SettingsModal";
 import OrderBook from "./components/OrderBook";
 import PnLCalendar from "./components/PnLCalendar";
-import { Settings as SettingsIcon, Eye, Download, BookOpen, Calendar as CalendarIcon, Wifi } from "lucide-react";
+import { Settings as SettingsIcon, Eye, Download, BookOpen, Calendar as CalendarIcon, Wifi, ChevronUp, Power } from "lucide-react";
+import { isUserAdmin, isUserPro } from "./lib/SubscriptionManager";
+import { autoTradeEngine } from "./lib/BinanceAutoTrade";
+import { paperTradingEngine } from "./lib/PaperTrading";
+import { evaluateConfluence } from "./lib/ConfluenceEngine";
+import { scanSMC, calculateHTFTrend, type SMCData, type HTFTrendResult } from "./lib/SMCScanner";
+import { subscribeTicker } from "./lib/websocket";
 import type { Candle, Coin, DetectedPattern, ScanResult, Timeframe, WatchlistItem, AppTab, MarketStats, PatternWithConfidence } from "./types";
 
 const TIMEFRAMES: { value: Timeframe; label: string }[] = [
@@ -140,7 +146,20 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   const { user } = useAuth();
+  const isAdmin = useMemo(() => isUserAdmin(user?.email), [user?.email]);
+  const effectiveIsPro = useMemo(() => isUserPro(user?.email, isPro), [user?.email, isPro]);
   const [authModalOpen, setAuthModalOpen] = useState(false);
+
+  // Auto-Pilot master state synced with autoTradeEngine
+  const [autoPilotActive, setAutoPilotActive] = useState<boolean>(() => autoTradeEngine.getConfig().autoPilotEnabled);
+
+  // Collapsible panels state for Chart UI optimization
+  const [lowerPanelsOpen, setLowerPanelsOpen] = useState(true);
+  const [patternPanelOpen, setPatternPanelOpen] = useState(true);
+
+  // HTF Trend state for Auto-Pilot Confluence Calculation
+  const [htfTrendState, setHtfTrendState] = useState<HTFTrendResult | null>(null);
+  const autoTradeExecutionLock = useRef(false);
   const [rsiValue, setRsiValue] = useState<number | null>(null);
   const [trendValue, setTrendValue] = useState<string | null>(null);
   const [fearGreedValue, setFearGreedValue] = useState<number | null>(null);
@@ -150,6 +169,12 @@ export default function App() {
   const [fomoRemainingSeconds, setFomoRemainingSeconds] = useState(0);
   const [fomoModalOpen, setFomoModalOpen] = useState(false);
   const [priceChange1h, setPriceChange1h] = useState(0);
+
+  useEffect(() => {
+    if (isAdmin) {
+      setIsPro(true);
+    }
+  }, [isAdmin]);
 
   const filteredCoins = useMemo(() => {
     if (!coinSearch.trim()) return ALL_COINS;
@@ -162,6 +187,7 @@ export default function App() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     if (params.get("pro") === "true") setIsPro(true);
+    if (isAdmin) setIsPro(true);
     setRemainingScans(getRemainingScans());
 
     // Restore existing FOMO lock from localStorage if active
@@ -390,6 +416,79 @@ export default function App() {
     setHistoryRefresh((k) => k + 1);
   }, []);
 
+  // HTF Trend update for background confluence calculations
+  useEffect(() => {
+    let mounted = true;
+    const fetchTrend = async () => {
+      try {
+        const trend = await calculateHTFTrend(selectedCoin.binanceSymbol);
+        if (mounted) setHtfTrendState(trend);
+      } catch (e) {
+        // silent
+      }
+    };
+    fetchTrend();
+    const interval = setInterval(fetchTrend, 60000);
+    return () => {
+      mounted = false;
+      clearInterval(interval);
+    };
+  }, [selectedCoin.binanceSymbol]);
+
+  // Real-time WebSocket Price Subscription & Auto-Pilot Execution Loop
+  useEffect(() => {
+    const unsub = subscribeTicker(selectedCoin.binanceSymbol, (price, changePct) => {
+      setLastPrice(price);
+      setPriceChange(changePct);
+
+      // Auto-Pilot execution check on real-time price tick
+      const config = autoTradeEngine.getConfig();
+      if (!config.autoPilotEnabled) return;
+      if (autoTradeExecutionLock.current) return;
+      if (candles.length < 5) return;
+
+      const smcData = scanSMC(candles);
+      const confluence = evaluateConfluence(candles, smcData, htfTrendState);
+
+      // Auto-Pilot Execution hurdle: score > 85
+      if (confluence && confluence.score > 85) {
+        autoTradeExecutionLock.current = true;
+        const atrVal = currentAtr || (price * 0.02);
+        const direction = confluence.setupBias === "Bearish" ? "SHORT" : "LONG";
+
+        // Check if demo/paper trading or live execution
+        if (!config.apiKey || !config.apiSecret) {
+          paperTradingEngine.executeOrder({
+            symbol: selectedCoin.binanceSymbol,
+            entryPrice: price,
+            atrValue: atrVal,
+            direction,
+            marketType: config.marketType,
+            leverage: config.leverage,
+            riskPercent: config.riskPercent,
+          });
+        } else {
+          autoTradeEngine.executeTrade({
+            symbol: selectedCoin.binanceSymbol,
+            entryPrice: price,
+            atrValue: atrVal,
+            direction,
+            marketType: config.marketType,
+            userEmail: user?.email,
+            isPro: effectiveIsPro || isAdmin,
+          }).catch(() => {});
+        }
+
+        // Lock execution for 10 seconds to prevent tick flooding
+        setTimeout(() => {
+          autoTradeExecutionLock.current = false;
+        }, 10000);
+      }
+    });
+
+    return () => unsub();
+  }, [selectedCoin.binanceSymbol, candles, htfTrendState, currentAtr, user?.email, effectiveIsPro, isAdmin]);
+
   useEffect(() => {
     autoResolveSignals();
     const interval = setInterval(autoResolveSignals, 60000);
@@ -571,7 +670,18 @@ export default function App() {
   const changePercent = priceChange ?? 0;
   const statsChange = marketStats?.priceChangePercent24h ?? changePercent;
   const tfLabel = TIMEFRAMES.find((t) => t.value === timeframe)?.label ?? "1H";
-  const inWatch = watchSymbols.has(selectedCoin.binanceSymbol);
+  const handleHeaderToggleAutoPilot = useCallback(() => {
+    if (!effectiveIsPro && !isAdmin) {
+      setProModalOpen(true);
+      return;
+    }
+    const currentCfg = autoTradeEngine.getConfig();
+    const nextState = !currentCfg.autoPilotEnabled;
+    const updated = autoTradeEngine.saveConfig({ autoPilotEnabled: nextState });
+    setAutoPilotActive(updated.autoPilotEnabled);
+  }, [effectiveIsPro, isAdmin]);
+
+    const inWatch = watchSymbols.has(selectedCoin.binanceSymbol);
 
   return (
     <div className="min-h-screen bg-slate-950 text-white flex flex-col lg:flex-row pb-16 lg:pb-0">
@@ -662,15 +772,26 @@ export default function App() {
           >
             <Radar className="w-4 h-4 text-cyan-400" />
             Scan Top 50
-            {!isPro && <Crown className="w-3.5 h-3.5 text-amber-400 ml-auto" />}
+            {!effectiveIsPro && <Crown className="w-3.5 h-3.5 text-amber-400 ml-auto" />}
           </button>
-          <button
-            onClick={() => setProModalOpen(true)}
-            className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-900 text-sm font-bold transition-all"
-          >
-            <Crown className="w-4 h-4" />
-            {isPro ? "Pro Active" : "Go Pro"}
-          </button>
+          {isAdmin ? (
+            <div className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-emerald-500/20 border border-emerald-500/50 text-[#00ff66] text-xs font-black uppercase tracking-wider shadow-lg shadow-emerald-950/40">
+              <span>👑 ADMIN MODE ACTIVE</span>
+            </div>
+          ) : !effectiveIsPro ? (
+            <button
+              onClick={() => setProModalOpen(true)}
+              className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-900 text-sm font-bold transition-all shadow-md shadow-amber-950/30"
+            >
+              <Crown className="w-4 h-4" />
+              Go Pro
+            </button>
+          ) : (
+            <div className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-cyan-500/20 border border-cyan-500/40 text-cyan-300 text-xs font-bold uppercase tracking-wider">
+              <Crown className="w-3.5 h-3.5 text-amber-400" />
+              Pro Active
+            </div>
+          )}
           <button
             onClick={() => setSettingsOpen(true)}
             className="w-full flex items-center justify-between px-3 py-2 rounded-lg bg-slate-800/80 hover:bg-slate-700/80 border border-slate-700 text-xs text-slate-300 font-medium transition-colors"
@@ -713,13 +834,24 @@ export default function App() {
               >
                 <SettingsIcon className="w-4 h-4 text-cyan-400" />
               </button>
-              <button
-                onClick={() => setProModalOpen(true)}
-                className="flex items-center gap-2 px-3 py-2 rounded-lg bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-900 text-sm font-bold transition-all"
-              >
-                <Crown className="w-4 h-4" />
-                <span>{isPro ? "Pro" : "Go Pro"}</span>
-              </button>
+              {isAdmin ? (
+                <div className="px-2.5 py-1.5 rounded-lg bg-emerald-500/20 border border-emerald-500/50 text-[#00ff66] text-xs font-black flex items-center gap-1">
+                  <span>👑 ADMIN</span>
+                </div>
+              ) : !effectiveIsPro ? (
+                <button
+                  onClick={() => setProModalOpen(true)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-900 text-xs font-bold transition-all"
+                >
+                  <Crown className="w-3.5 h-3.5" />
+                  <span>Go Pro</span>
+                </button>
+              ) : (
+                <div className="px-2.5 py-1.5 rounded-lg bg-cyan-500/20 border border-cyan-500/40 text-cyan-300 text-xs font-bold flex items-center gap-1">
+                  <Crown className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Pro</span>
+                </div>
+              )}
             </div>
           </div>
         </header>
@@ -903,6 +1035,26 @@ export default function App() {
                   <Sparkles className="w-3.5 h-3.5 fill-slate-950" />
                   <span>AI Swarm</span>
                 </button>
+
+                {/* Highly Visible Auto-Pilot Toggle Button */}
+                <button
+                  onClick={handleHeaderToggleAutoPilot}
+                  className={`px-3.5 py-1.5 rounded-lg font-black text-xs uppercase tracking-wider flex items-center gap-2 transition-all border ${
+                    autoPilotActive
+                      ? "bg-emerald-500/20 text-[#00ff66] border-emerald-400 shadow-[0_0_15px_rgba(0,255,102,0.4)] animate-pulse"
+                      : "bg-red-500/10 text-red-400 border-red-500/50 hover:bg-red-500/20"
+                  }`}
+                  title={autoPilotActive ? "Click to Pause Auto-Pilot" : "Click to Enable Auto-Pilot (High Confluence Signals > 85)"}
+                >
+                  <Power className={`w-3.5 h-3.5 ${autoPilotActive ? "text-[#00ff66]" : "text-red-400"}`} />
+                  <span>AUTO-PILOT: {autoPilotActive ? "ON" : "OFF"}</span>
+                </button>
+
+                {isAdmin && (
+                  <div className="hidden md:flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/20 border border-emerald-500/50 text-[#00ff66] font-black text-xs uppercase tracking-wider shadow-md shadow-emerald-950/30">
+                    <span>👑 ADMIN MODE ACTIVE</span>
+                  </div>
+                )}
                 <button
                   onClick={() => loadData(selectedCoin.binanceSymbol, timeframe)}
                   disabled={loading}
@@ -942,10 +1094,11 @@ export default function App() {
         {/* Main content */}
         <main className="flex-1 max-w-7xl mx-auto w-full">
           {activeTab === "chart" && (
-            <div className="px-4 sm:px-6 py-4">
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 lg:h-[calc(100vh-280px)] min-h-[500px]">
-                {/* Chart */}
-                <div className="lg:col-span-2 rounded-2xl bg-slate-900 border border-slate-800 overflow-hidden flex flex-col min-h-[400px]">
+            <div className="px-4 sm:px-6 py-4 space-y-4">
+              {/* Main Chart and Optional Pattern Panel Grid */}
+              <div className={`grid grid-cols-1 ${patternPanelOpen ? "lg:grid-cols-3" : "grid-cols-1"} gap-4`}>
+                {/* Chart - min-height 500px or 60vh */}
+                <div className={`${patternPanelOpen ? "lg:col-span-2" : "col-span-1"} rounded-2xl bg-slate-900 border border-slate-800 overflow-hidden flex flex-col min-h-[500px] h-[60vh] lg:h-[65vh] shadow-xl`}>
                   <div className="px-5 py-3 border-b border-slate-800 flex items-center justify-between">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-sm font-semibold text-white">
@@ -973,9 +1126,16 @@ export default function App() {
                         <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
                         <span className="text-xs text-slate-500 hidden sm:inline">Live · Binance</span>
                       </div>
+                      <button
+                        onClick={() => setPatternPanelOpen((v) => !v)}
+                        className="ml-2 px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-slate-300 font-medium transition flex items-center gap-1"
+                        title={patternPanelOpen ? "Collapse Pattern Panel" : "Expand Pattern Panel"}
+                      >
+                        <span>{patternPanelOpen ? "Maximize Chart" : "Show Patterns"}</span>
+                      </button>
                     </div>
                   </div>
-                  <div className="flex-1 relative">
+                  <div className="flex-1 relative min-h-[420px]">
                     <CandlestickChart
                       candles={candles}
                       pattern={pattern}
@@ -989,33 +1149,53 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Pattern panel */}
-                <div className="rounded-2xl bg-slate-900 border border-slate-800 overflow-hidden flex flex-col min-h-[500px] lg:max-h-[calc(100vh-280px)]">
-                  <PatternPanel
-                    pattern={pattern}
-                    allPatterns={allPatterns}
-                    price={lastPrice}
-                    explanation={explanation}
-                    loading={aiLoading}
-                    error={aiError}
-                    onExplain={handleExplain}
-                    coin={selectedCoin}
-                    timeframe={timeframe}
-                    onSaveSignal={handleSaveSignal}
-                    entryPrice={entryPrice}
-                    slPrice={slPrice}
-                    tpPrice={tpPrice}
-                    fomoLocked={fomoLocked}
-                    fomoRemainingSeconds={fomoRemainingSeconds}
-                    onOpenAutoTrade={() => setAutoTradeOpen(true)}
-                  />
-                </div>
+                {/* Pattern panel - collapsible or scrollable */}
+                {patternPanelOpen && (
+                  <div className="rounded-2xl bg-slate-900 border border-slate-800 overflow-hidden flex flex-col min-h-[500px] h-[60vh] lg:h-[65vh] overflow-y-auto">
+                    <PatternPanel
+                      pattern={pattern}
+                      allPatterns={allPatterns}
+                      price={lastPrice}
+                      explanation={explanation}
+                      loading={aiLoading}
+                      error={aiError}
+                      onExplain={handleExplain}
+                      coin={selectedCoin}
+                      timeframe={timeframe}
+                      onSaveSignal={handleSaveSignal}
+                      entryPrice={entryPrice}
+                      slPrice={slPrice}
+                      tpPrice={tpPrice}
+                      fomoLocked={fomoLocked}
+                      fomoRemainingSeconds={fomoRemainingSeconds}
+                      onOpenAutoTrade={() => setAutoTradeOpen(true)}
+                    />
+                  </div>
+                )}
               </div>
 
-              {/* Macro & AI News Sentiment Widgets Row */}
-              <div className="mt-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
-                <MacroWidget />
-                <NewsSentimentRadar />
+              {/* Collapsible Lower Panels Section: Macro Radar & News Radar */}
+              <div className="rounded-2xl bg-slate-900/60 border border-slate-800 overflow-hidden shadow-lg">
+                <button
+                  onClick={() => setLowerPanelsOpen((v) => !v)}
+                  className="w-full px-5 py-3 bg-slate-900/90 hover:bg-slate-800/80 border-b border-slate-800 flex items-center justify-between text-xs font-bold uppercase tracking-wider text-slate-300 transition"
+                >
+                  <div className="flex items-center gap-2">
+                    <Radar className="w-4 h-4 text-cyan-400" />
+                    <span>Macro Radar & AI News Sentiment Matrix</span>
+                    <span className="text-[10px] font-normal text-slate-500 normal-case">
+                      (Click to {lowerPanelsOpen ? "collapse" : "expand"})
+                    </span>
+                  </div>
+                  <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform ${lowerPanelsOpen ? "rotate-180" : ""}`} />
+                </button>
+
+                {lowerPanelsOpen && (
+                  <div className="p-4 grid grid-cols-1 lg:grid-cols-2 gap-4 max-h-[550px] overflow-y-auto">
+                    <MacroWidget />
+                    <NewsSentimentRadar />
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -1164,7 +1344,7 @@ export default function App() {
       <ProModal
         open={proModalOpen}
         onClose={() => setProModalOpen(false)}
-        isPro={isPro}
+        isPro={effectiveIsPro}
       />
       <ScanPanel
         open={scanPanelOpen}
@@ -1172,7 +1352,7 @@ export default function App() {
         scanning={scanning}
         results={scanResults}
         error={scanError}
-        isPro={isPro}
+        isPro={effectiveIsPro}
         remainingScans={remainingScans}
         onSelectCoin={selectCoinFromScan}
         onFreeScan={handleFreeScan}

@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
-import { Layers, Loader2, TrendingUp, TrendingDown, Minus } from "lucide-react";
+import { Layers, Loader2, TrendingUp, TrendingDown, Minus, RefreshCw } from "lucide-react";
 import { fetchCandles } from "../lib/binance";
 import { detectPattern } from "../lib/patterns";
 import { sma, rsi } from "../lib/indicators";

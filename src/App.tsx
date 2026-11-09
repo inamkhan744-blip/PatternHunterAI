@@ -59,6 +59,9 @@ import AuthModal from "./components/AuthModal";
 import ArbitrageTab from "./components/ArbitrageTab";
 import SwarmTerminal from "./components/SwarmTerminal";
 import Backtesting from "./components/Backtesting";
+import VisionAIUpload from "./components/VisionAIUpload";
+import SettingsModal from "./components/SettingsModal";
+import { Settings as SettingsIcon, Eye, Download } from "lucide-react";
 import type { Candle, Coin, DetectedPattern, ScanResult, Timeframe, WatchlistItem, AppTab, MarketStats, PatternWithConfidence } from "./types";
 
 const TIMEFRAMES: { value: Timeframe; label: string }[] = [
@@ -128,6 +131,10 @@ export default function App() {
   const [autoTradeOpen, setAutoTradeOpen] = useState(false);
   const [currentAtr, setCurrentAtr] = useState<number>(0);
   const [swarmOpen, setSwarmOpen] = useState(false);
+
+  // Vision AI & Settings Modals
+  const [visionAIOpen, setVisionAIOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const { user } = useAuth();
   const [authModalOpen, setAuthModalOpen] = useState(false);
@@ -631,9 +638,17 @@ export default function App() {
         </div>
 
         <div className="p-3 border-t border-slate-800 space-y-2">
+          {/* Vision AI Chart Upload Button */}
+          <button
+            onClick={() => setVisionAIOpen(true)}
+            className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-slate-950 text-xs font-bold transition-all shadow-md shadow-cyan-950/40"
+          >
+            <Eye className="w-4 h-4 text-slate-950" />
+            Vision AI Upload
+          </button>
           <button
             onClick={() => setAutoTradeOpen(true)}
-            className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-gradient-to-r from-cyan-600 via-blue-600 to-indigo-600 hover:from-cyan-500 hover:to-blue-500 text-white text-xs font-bold transition-all shadow-md shadow-cyan-950/40"
+            className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-gradient-to-r from-indigo-600 via-blue-600 to-cyan-600 hover:from-indigo-500 hover:to-blue-500 text-white text-xs font-bold transition-all shadow-md shadow-indigo-950/40"
           >
             <Zap className="w-4 h-4 text-yellow-300" />
             Auto-Trade Engine
@@ -653,6 +668,16 @@ export default function App() {
             <Crown className="w-4 h-4" />
             {isPro ? "Pro Active" : "Go Pro"}
           </button>
+          <button
+            onClick={() => setSettingsOpen(true)}
+            className="w-full flex items-center justify-between px-3 py-2 rounded-lg bg-slate-800/80 hover:bg-slate-700/80 border border-slate-700 text-xs text-slate-300 font-medium transition-colors"
+          >
+            <span className="flex items-center gap-2">
+              <SettingsIcon className="w-4 h-4 text-cyan-400" />
+              Settings
+            </span>
+            <Download className="w-3.5 h-3.5 text-slate-400" />
+          </button>
         </div>
       </aside>
 
@@ -671,19 +696,19 @@ export default function App() {
             </div>
             <div className="flex items-center gap-2">
               <button
-                onClick={() => setAutoTradeOpen(true)}
-                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold transition-colors"
-                title="Auto-Trade"
+                onClick={() => setVisionAIOpen(true)}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold transition-colors"
+                title="Vision AI Chart Upload"
               >
-                <Zap className="w-3.5 h-3.5 text-yellow-300" />
-                <span>Auto</span>
+                <Eye className="w-3.5 h-3.5 text-white" />
+                <span>Vision</span>
               </button>
               <button
-                onClick={handleScanClick}
-                className="flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-sm font-medium transition-colors"
+                onClick={() => setSettingsOpen(true)}
+                className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 transition-colors"
+                title="Settings & Install PWA"
               >
-                <Radar className="w-4 h-4 text-cyan-400" />
-                {!isPro && <Crown className="w-3.5 h-3.5 text-amber-400" />}
+                <SettingsIcon className="w-4 h-4 text-cyan-400" />
               </button>
               <button
                 onClick={() => setProModalOpen(true)}
@@ -857,6 +882,15 @@ export default function App() {
                     </span>
                   </div>
                 )}
+                {/* Vision AI Chart Upload Button on Toolbar */}
+                <button
+                  onClick={() => setVisionAIOpen(true)}
+                  className="px-3 py-1.5 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-slate-950 font-black text-xs uppercase tracking-wider flex items-center gap-1.5 shadow-md shadow-cyan-950/40 transition"
+                  title="Analyze Chart Screenshot with Gemini Vision AI"
+                >
+                  <Eye className="w-3.5 h-3.5 text-slate-950" />
+                  <span>Vision AI</span>
+                </button>
                 {/* AI Swarm Debater Button on the Chart */}
                 <button
                   onClick={() => setSwarmOpen(true)}
@@ -1130,6 +1164,21 @@ export default function App() {
         remainingScans={remainingScans}
         onSelectCoin={selectCoinFromScan}
         onFreeScan={handleFreeScan}
+      />
+
+      {/* Vision AI Chart Upload Modal */}
+      <VisionAIUpload
+        open={visionAIOpen}
+        onClose={() => setVisionAIOpen(false)}
+        activeSymbol={selectedCoin.binanceSymbol}
+      />
+
+      {/* System Settings & PWA Installation Modal */}
+      <SettingsModal
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        onOpenAutoTrade={() => setAutoTradeOpen(true)}
+        onOpenVisionAI={() => setVisionAIOpen(true)}
       />
     </div>
   );

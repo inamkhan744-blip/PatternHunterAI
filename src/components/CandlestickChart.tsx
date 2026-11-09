@@ -10,13 +10,14 @@ import {
   type SeriesMarker,
   type Time,
 } from "lightweight-charts";
-import { TrendingUp, TrendingDown, Minus, Layers, Target } from "lucide-react";
+import { TrendingUp, TrendingDown, Minus, Layers, Target, Flame } from "lucide-react";
 import type { Candle, DetectedPattern } from "../types";
 import { getPatternColor } from "../lib/patterns";
 import { sma, rsi, findSupportResistance } from "../lib/indicators";
 import { scanSMC, calculateHTFTrend, type SMCData, type HTFTrendResult } from "../lib/SMCScanner";
 import { evaluateConfluence, type ConfluenceResult } from "../lib/ConfluenceEngine";
 import SniperChecklistModal from "./SniperChecklistModal";
+import LiquidationHeatmap, { generateLiquidationLevels, type HeatmapOverviewData } from "./LiquidationHeatmap";
 
 interface Props {
   candles: Candle[];
@@ -66,6 +67,10 @@ export default function CandlestickChart({
   // Sniper Confluence Modal state
   const [confluenceModalOpen, setConfluenceModalOpen] = useState(false);
 
+  // Liquidation Heatmap toggle & detail modal state
+  const [showLiquidationHeatmap, setShowLiquidationHeatmap] = useState(true);
+  const [heatmapModalOpen, setHeatmapModalOpen] = useState(false);
+
   // Detect SMC data (Order Blocks & Fair Value Gaps)
   const smcData: SMCData = useMemo(() => {
     if (!showSMC || candles.length < 5) return { orderBlocks: [], fvgs: [] };
@@ -77,6 +82,12 @@ export default function CandlestickChart({
     if (candles.length < 5) return null;
     return evaluateConfluence(candles, smcData, htfTrend);
   }, [candles, smcData, htfTrend]);
+
+  // Compute liquidation levels for overlay
+  const lastClose = candles.length > 0 ? candles[candles.length - 1].close : 0;
+  const liquidationData: HeatmapOverviewData = useMemo(() => {
+    return generateLiquidationLevels(lastClose, symbol || "BTCUSDT");
+  }, [lastClose, symbol]);
 
   // Fetch 1H and 4H EMA(50) for Higher Timeframe trend
   const loadHTFTrend = useCallback(async (sym: string) => {
@@ -124,7 +135,10 @@ export default function CandlestickChart({
     ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, rect.width, rect.height);
 
-    if (!showSMC || (!smcData.orderBlocks.length && !smcData.fvgs.length)) {
+    const hasSMC = showSMC && (smcData.orderBlocks.length > 0 || smcData.fvgs.length > 0);
+    const hasHeatmap = showLiquidationHeatmap && liquidationData.levels.length > 0 && lastClose > 0;
+
+    if (!hasSMC && !hasHeatmap) {
       ctx.restore();
       return;
     }
@@ -201,33 +215,93 @@ export default function CandlestickChart({
     };
 
     // Draw FVGs first
-    for (const fvg of smcData.fvgs) {
-      drawBox(
-        fvg.startTime,
-        fvg.endTime,
-        fvg.top,
-        fvg.bottom,
-        fvg.type === "bullish",
-        fvg.type === "bullish" ? "+FVG" : "-FVG",
-        fvg.mitigated
-      );
+    if (showSMC) {
+      for (const fvg of smcData.fvgs) {
+        drawBox(
+          fvg.startTime,
+          fvg.endTime,
+          fvg.top,
+          fvg.bottom,
+          fvg.type === "bullish",
+          fvg.type === "bullish" ? "+FVG" : "-FVG",
+          fvg.mitigated
+        );
+      }
+
+      // Draw Order Blocks
+      for (const ob of smcData.orderBlocks) {
+        drawBox(
+          ob.startTime,
+          ob.endTime,
+          ob.top,
+          ob.bottom,
+          ob.type === "bullish",
+          ob.type === "bullish" ? "+OB" : "-OB",
+          ob.mitigated
+        );
+      }
     }
 
-    // Draw Order Blocks
-    for (const ob of smcData.orderBlocks) {
-      drawBox(
-        ob.startTime,
-        ob.endTime,
-        ob.top,
-        ob.bottom,
-        ob.type === "bullish",
-        ob.type === "bullish" ? "+OB" : "-OB",
-        ob.mitigated
-      );
+    // Draw Liquidation Heatmap Horizontal Bars across right area
+    if (showLiquidationHeatmap && liquidationData.levels.length > 0) {
+      const maxVol = Math.max(...liquidationData.levels.map((l) => l.estimatedVolumeMillions), 1);
+
+      for (const level of liquidationData.levels) {
+        const y = activeSeries.priceToCoordinate(level.price);
+        if (y === null || y < 0 || y > rect.height) continue;
+
+        const isShort = level.price > lastClose;
+        const barWidth = Math.min(plotWidth * 0.45, Math.max(70, (level.estimatedVolumeMillions / maxVol) * (plotWidth * 0.45)));
+        const startX = plotWidth - barWidth;
+
+        // Gradient for liquidation band
+        const grad = ctx.createLinearGradient(startX, y, plotWidth, y);
+        if (level.intensity === "extreme") {
+          grad.addColorStop(0, "rgba(239, 68, 68, 0.05)");
+          grad.addColorStop(0.5, "rgba(249, 115, 22, 0.35)");
+          grad.addColorStop(1, "rgba(239, 68, 68, 0.7)");
+        } else if (level.intensity === "high") {
+          grad.addColorStop(0, "rgba(245, 158, 11, 0.05)");
+          grad.addColorStop(0.6, "rgba(245, 158, 11, 0.25)");
+          grad.addColorStop(1, "rgba(239, 68, 68, 0.5)");
+        } else if (level.intensity === "medium") {
+          grad.addColorStop(0, "rgba(234, 179, 8, 0.03)");
+          grad.addColorStop(1, "rgba(245, 158, 11, 0.3)");
+        } else {
+          grad.addColorStop(0, "rgba(234, 179, 8, 0.02)");
+          grad.addColorStop(1, "rgba(234, 179, 8, 0.2)");
+        }
+
+        ctx.fillStyle = grad;
+        ctx.fillRect(startX, y - 6, barWidth, 12);
+
+        // Thin indicator line
+        ctx.strokeStyle = level.intensity === "extreme"
+          ? "rgba(239, 68, 68, 0.75)"
+          : level.intensity === "high"
+          ? "rgba(249, 115, 22, 0.7)"
+          : "rgba(234, 179, 8, 0.55)";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(startX, y);
+        ctx.lineTo(plotWidth, y);
+        ctx.stroke();
+
+        // Label on bar
+        ctx.font = "bold 9px 'JetBrains Mono', monospace";
+        ctx.fillStyle = level.intensity === "extreme" ? "#fecaca" : "#fef08a";
+        ctx.textAlign = "right";
+        ctx.textBaseline = "middle";
+        ctx.fillText(
+          `${level.leverage} ${isShort ? "SHORT" : "LONG"} LIQ $${level.estimatedVolumeMillions}M`,
+          plotWidth - 6,
+          y
+        );
+      }
     }
 
     ctx.restore();
-  }, [chartType, showSMC, smcData]);
+  }, [chartType, showSMC, smcData, showLiquidationHeatmap, liquidationData, lastClose]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -637,7 +711,7 @@ export default function CandlestickChart({
           )}
         </div>
 
-        {/* SMC legend & Analyze Setup Button */}
+        {/* SMC legend & Analyze Setup Button & Liquidation Heatmap Toggle */}
         <div className="flex items-center gap-3 text-[10px] text-slate-400 flex-wrap">
           <div className="hidden sm:flex items-center gap-3">
             <div className="flex items-center gap-1.5">
@@ -653,6 +727,32 @@ export default function CandlestickChart({
               <span>Bearish OB/FVG</span>
             </div>
           </div>
+
+          {/* Liquidation Heatmap Toggle Button */}
+          <button
+            onClick={() => setShowLiquidationHeatmap((v) => !v)}
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold transition border ${
+              showLiquidationHeatmap
+                ? "bg-amber-500/20 text-amber-300 border-amber-500/50 shadow-sm shadow-amber-950/40"
+                : "bg-slate-800 text-slate-400 border-slate-700 hover:text-white"
+            }`}
+            title="Toggle Liquidation Heatmap Overlay"
+          >
+            <Flame className="w-3.5 h-3.5 text-amber-400" />
+            <span>Heatmap</span>
+            {showLiquidationHeatmap && (
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+            )}
+          </button>
+
+          {/* Open Detailed Heatmap Modal Button */}
+          <button
+            onClick={() => setHeatmapModalOpen(true)}
+            className="hidden sm:flex items-center gap-1 px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs font-medium transition"
+            title="Open Detailed Liquidation Heatmap Matrix"
+          >
+            <span>Pools</span>
+          </button>
 
           {/* Analyze Setup Button */}
           <button
@@ -726,6 +826,19 @@ export default function CandlestickChart({
           alert(`Trade executed with High Confluence (${confluenceResult?.score}/100)!`);
         }}
       />
+
+      {/* Liquidation Heatmap Detailed Modal */}
+      {heatmapModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="w-full max-w-2xl">
+            <LiquidationHeatmap
+              currentPrice={lastClose}
+              symbol={symbol || "BTCUSDT"}
+              onClose={() => setHeatmapModalOpen(false)}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

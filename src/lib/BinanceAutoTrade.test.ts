@@ -1,16 +1,6 @@
-import {
-  calculatePositionSize,
-  calculateLiquidationPrice,
-  checkLiquidationProximity,
-  calculateAtrStopLoss,
-  evaluateTrailingStopLoss,
-  BinanceAutoTradeEngine,
-  ManagedTrade,
-} from "./BinanceAutoTrade";
-
-// Mock localStorage for node test runner
+// Mock localStorage for node test runner before any imports
 const memoryStorage: Record<string, string> = {};
-globalThis.localStorage = {
+(globalThis as unknown as { localStorage: Storage }).localStorage = {
   getItem: (key: string) => memoryStorage[key] || null,
   setItem: (key: string, value: string) => {
     memoryStorage[key] = value;
@@ -25,7 +15,19 @@ globalThis.localStorage = {
   length: 0,
 };
 
-function runTests() {
+import {
+  calculatePositionSize,
+  calculateLiquidationPrice,
+  checkLiquidationProximity,
+  calculateAtrStopLoss,
+  evaluateTrailingStopLoss,
+  BinanceAutoTradeEngine,
+  ManagedTrade,
+} from "./BinanceAutoTrade";
+import { simulateSwarmDebate } from "./AgentSwarm";
+import { paperTradingEngine } from "./PaperTrading";
+
+async function runTests() {
   console.log("Starting Fortress Binance Auto-Trade Engine Unit Tests...");
   let passed = 0;
   let total = 0;
@@ -115,8 +117,95 @@ function runTests() {
 
   // Simulate first loss
   const closedLoss1 = engine.closeTrade(mockTrade.id, 48500, "SL");
-  // If trade not in engine trades array, manually test loss tracker:
   assert(engine.getCircuitBreaker().consecutiveLosses >= 0, "Engine circuit breaker initialized");
+
+  // 7. Post-Loss Cooldown (30 minutes)
+  engine.clearPostLossCooldown();
+  assert(engine.getPostLossCooldown().isActive === false, "Cooldown inactive after clear");
+  // Trigger cooldown
+  const now = Date.now();
+  // Simulate SL close directly on a managed trade inside engine
+  const tradeToClose: ManagedTrade = {
+    ...mockTrade,
+    id: "trade-sl-test",
+    openTime: now - 10000,
+  };
+  (engine as unknown as { trades: ManagedTrade[] }).trades.push(tradeToClose);
+  engine.closeTrade("trade-sl-test", 48000, "SL");
+  const cooldownState = engine.getPostLossCooldown();
+  assert(cooldownState.isActive === true, "Post-loss cooldown active after trade hits SL");
+  assert(cooldownState.remainingSeconds > 1700 && cooldownState.remainingSeconds <= 1800, "Cooldown set to ~30 minutes (1800 seconds)");
+
+  // 8. Swarm Risk Manager Veto
+  // Should NO-GO if spread is bad (> 0.1%)
+  const swarmSpreadVeto = simulateSwarmDebate({
+    symbol: "ETHUSDT",
+    price: 3000,
+    spreadPct: 0.15,
+  });
+  assert(swarmSpreadVeto.verdict === "NO-GO", "Risk Manager vetoes trade on excessive spread (>0.1%)");
+
+  // Should NO-GO if volatility is extreme (ATR > 3% of price)
+  const swarmVolVeto = simulateSwarmDebate({
+    symbol: "SOLUSDT",
+    price: 100,
+    atrValue: 4.5,
+  });
+  assert(swarmVolVeto.verdict === "NO-GO", "Risk Manager vetoes trade on extreme ATR volatility");
+
+  // Should GO when confluence is strong and risk checks pass
+  const swarmGo = simulateSwarmDebate({
+    symbol: "BTCUSDT",
+    price: 50000,
+    trend: "uptrend",
+    patternDirection: "bullish",
+    rsi: 50,
+    spreadPct: 0.02,
+    atrValue: 500,
+  });
+  assert(swarmGo.verdict === "GO", "Risk Manager issues GO verdict when confluence is verified and risk metrics pass");
+
+  // 9. Dynamic Confluence Scaling
+  // Normal ATR (1% of price) -> required score is 85
+  const normalConfluence = engine.getRequiredConfluenceScore(50000, 500);
+  assert(normalConfluence.requiredScore === 85, "Required confluence score is 85 in normal market volatility");
+
+  // High ATR (3% of price) -> required score scales dynamically to 95
+  const highVolConfluence = engine.getRequiredConfluenceScore(50000, 1500);
+  assert(highVolConfluence.requiredScore === 95, "Required confluence score dynamically scales to 95 on high ATR volatility");
+
+  // 10. Duplicate Protection (< 5 Minutes)
+  const dupCheck1 = engine.checkDuplicateProtection("BTCUSDT");
+  assert(dupCheck1.allowed === false, "Duplicate protection blocks BTCUSDT because trade was opened within 5 minutes");
+
+  const dupCheck2 = engine.checkDuplicateProtection("XRPUSDT");
+  assert(dupCheck2.allowed === true, "Duplicate protection allows new coin XRPUSDT not traded recently");
+
+  // 11. Daily Drawdown Circuit Breaker
+  const initialDrawdown = engine.getDailyDrawdown();
+  assert(initialDrawdown.maxDailyLossPercent === 3.0, "Default max daily loss percent is 3.0%");
+  assert(typeof initialDrawdown.drawdownPct === "number", "Drawdown percentage calculated");
+
+  // 12. Paper Trading Simulation Engine
+  paperTradingEngine.resetAccount(10000);
+  const pAcc = paperTradingEngine.getAccount();
+  assert(pAcc.balance === 10000, "Paper trading account starts with virtual $10,000");
+
+  const pOrder = paperTradingEngine.executeOrder({
+    symbol: "ETHUSDT",
+    entryPrice: 3000,
+    atrValue: 50,
+    direction: "LONG",
+    riskPercent: 2,
+  });
+  assert(pOrder.success === true && pOrder.trade !== undefined, "Paper order successfully executed virtually");
+  assert(paperTradingEngine.getOpenTrades().length === 1, "Paper open trades contains 1 position");
+
+  // Simulate close with profit
+  paperTradingEngine.closeTrade(pOrder.trade!.id, 3100, "TP");
+  assert(paperTradingEngine.getOpenTrades().length === 0, "Paper open trades cleared after close");
+  assert(paperTradingEngine.getAccount().winCount === 1, "Paper win count incremented");
+  assert(paperTradingEngine.getAccount().balance > 10000, "Paper virtual balance increased after profitable trade");
 
   console.log(`\nTests completed: ${passed}/${total} passed.`);
 }

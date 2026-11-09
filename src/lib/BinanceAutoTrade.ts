@@ -7,8 +7,11 @@
  */
 
 import { getDecryptedApiKeys, storeEncryptedApiKeys } from "./CryptoSecurity";
-import { notifyTradeOpened, notifyTradeClosed } from "./TelegramService";
+import { notifyTradeOpened, notifyTradeClosed, sendTelegramAlert } from "./TelegramService";
 import { checkTradeExecutionAllowance, incrementDailyTradeCount } from "./SubscriptionManager";
+import { simulateSwarmDebate } from "./AgentSwarm";
+import { fetchCandles } from "./binance";
+import { rsi } from "./indicators";
 
 export type MarketType = "Spot" | "Futures";
 export type TradeDirection = "LONG" | "SHORT";
@@ -26,6 +29,8 @@ export interface AutoTradeConfig {
   trailingSlEnabled: boolean; // Move SL to BE at 1:1 RR
   autoPilotEnabled: boolean;
   disclaimerAgreed: boolean;
+  paperTradingEnabled: boolean; // Paper mode virtual trading
+  maxDailyLossPercent: number; // Max daily loss % (default 3%) before tripping circuit breaker
 }
 
 export interface ManagedTrade {
@@ -70,6 +75,8 @@ const STORAGE_KEY_CONFIG = "fortress_binance_autotrade_config";
 const STORAGE_KEY_TRADES = "fortress_binance_managed_trades";
 const STORAGE_KEY_CIRCUIT = "fortress_binance_circuit_breaker";
 const STORAGE_KEY_VAULT = "fortress_binance_profit_vault_total";
+const STORAGE_KEY_POST_LOSS_COOLDOWN = "fortress_binance_post_loss_cooldown";
+const STORAGE_KEY_DAILY_STATS = "fortress_binance_daily_stats";
 
 export const DEFAULT_CONFIG: AutoTradeConfig = {
   apiKey: "",
@@ -84,6 +91,8 @@ export const DEFAULT_CONFIG: AutoTradeConfig = {
   trailingSlEnabled: true,
   autoPilotEnabled: false,
   disclaimerAgreed: false,
+  paperTradingEnabled: false,
+  maxDailyLossPercent: 3.0,
 };
 
 // Base URLs
@@ -287,6 +296,12 @@ export async function signQuery(queryString: string, secret: string): Promise<st
   return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+export interface DailyTradeStats {
+  date: string; // YYYY-MM-DD
+  startingBalance: number;
+  realizedPnlToday: number;
+}
+
 export class BinanceAutoTradeEngine {
   private config: AutoTradeConfig;
   private trades: ManagedTrade[] = [];
@@ -295,12 +310,20 @@ export class BinanceAutoTradeEngine {
     isTripped: false,
   };
   private profitVaultTotal: number = 0;
+  private postLossCooldownUntil: number = 0;
+  private dailyStats: DailyTradeStats = {
+    date: new Date().toISOString().slice(0, 10),
+    startingBalance: 10000,
+    realizedPnlToday: 0,
+  };
 
   constructor() {
     this.config = this.loadConfig();
     this.trades = this.loadTrades();
     this.circuitBreaker = this.loadCircuitBreaker();
     this.profitVaultTotal = this.loadProfitVault();
+    this.postLossCooldownUntil = this.loadPostLossCooldown();
+    this.dailyStats = this.loadDailyStats();
   }
 
   // --- Persistence ---
@@ -394,6 +417,192 @@ export class BinanceAutoTradeEngine {
       isTripped: false,
     };
     this.saveCircuitBreaker();
+  }
+
+  // --- Post-Loss Cooldown (30 Minutes) ---
+  private loadPostLossCooldown(): number {
+    try {
+      const stored = localStorage.getItem(STORAGE_KEY_POST_LOSS_COOLDOWN);
+      if (stored) return parseInt(stored, 10) || 0;
+    } catch {
+      // fallback
+    }
+    return 0;
+  }
+
+  private savePostLossCooldown(untilTimestamp: number): void {
+    this.postLossCooldownUntil = untilTimestamp;
+    localStorage.setItem(STORAGE_KEY_POST_LOSS_COOLDOWN, String(untilTimestamp));
+  }
+
+  public getPostLossCooldown(): { isActive: boolean; remainingSeconds: number; untilTimestamp: number } {
+    const now = Date.now();
+    if (this.postLossCooldownUntil > now) {
+      return {
+        isActive: true,
+        remainingSeconds: Math.ceil((this.postLossCooldownUntil - now) / 1000),
+        untilTimestamp: this.postLossCooldownUntil,
+      };
+    }
+    return { isActive: false, remainingSeconds: 0, untilTimestamp: 0 };
+  }
+
+  public clearPostLossCooldown(): void {
+    this.savePostLossCooldown(0);
+  }
+
+  // --- Daily Drawdown Tracking ---
+  private loadDailyStats(): DailyTradeStats {
+    const today = new Date().toISOString().slice(0, 10);
+    try {
+      const stored = localStorage.getItem(STORAGE_KEY_DAILY_STATS);
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (parsed.date === today) {
+          return parsed;
+        }
+      }
+    } catch {
+      // fallback
+    }
+    return {
+      date: today,
+      startingBalance: 10000,
+      realizedPnlToday: 0,
+    };
+  }
+
+  private saveDailyStats(): void {
+    localStorage.setItem(STORAGE_KEY_DAILY_STATS, JSON.stringify(this.dailyStats));
+  }
+
+  public getDailyDrawdown(): {
+    realizedPnlToday: number;
+    drawdownPct: number;
+    maxDailyLossPercent: number;
+    startingBalance: number;
+  } {
+    const today = new Date().toISOString().slice(0, 10);
+    if (this.dailyStats.date !== today) {
+      this.dailyStats = {
+        date: today,
+        startingBalance: 10000,
+        realizedPnlToday: 0,
+      };
+      this.saveDailyStats();
+    }
+
+    const startBal = this.dailyStats.startingBalance > 0 ? this.dailyStats.startingBalance : 10000;
+    const lossAmount = Math.min(0, this.dailyStats.realizedPnlToday);
+    const drawdownPct = Math.abs(lossAmount / startBal) * 100;
+
+    return {
+      realizedPnlToday: this.dailyStats.realizedPnlToday,
+      drawdownPct: Number(drawdownPct.toFixed(2)),
+      maxDailyLossPercent: this.config.maxDailyLossPercent ?? 3.0,
+      startingBalance: startBal,
+    };
+  }
+
+  // --- Dynamic Confluence Scaling ---
+  public getRequiredConfluenceScore(entryPrice: number, atrValue: number): {
+    requiredScore: number;
+    atrPercent: number;
+    isHighVolatility: boolean;
+  } {
+    const atrPercent = entryPrice > 0 ? (atrValue / entryPrice) * 100 : 0;
+    // If ATR > 2.0% of price, market is high volatility: dynamically scale required score to 95+
+    const isHighVolatility = atrPercent >= 2.0;
+    const requiredScore = isHighVolatility ? 95 : 85;
+
+    return {
+      requiredScore,
+      atrPercent: Number(atrPercent.toFixed(2)),
+      isHighVolatility,
+    };
+  }
+
+  // --- Global Market Filter: BTC 1H Trend & RSI Check ---
+  public async checkBtcMarketFilter(direction: TradeDirection, symbol: string): Promise<{
+    allowed: boolean;
+    btcH1Rsi?: number;
+    reason?: string;
+  }> {
+    // If trade is on BTC itself, or trade is SHORT, filter does not block
+    if (symbol.toUpperCase().startsWith("BTC") || direction === "SHORT") {
+      return { allowed: true };
+    }
+
+    try {
+      const btcCandles = await fetchCandles("BTCUSDT", 30, "1h");
+      if (btcCandles.length < 15) {
+        return { allowed: true };
+      }
+      const closes = btcCandles.map((c) => c.close);
+      const rsiValues = rsi(closes, 14);
+      const btcH1Rsi = rsiValues[rsiValues.length - 1];
+
+      if (btcH1Rsi !== null && btcH1Rsi < 30) {
+        return {
+          allowed: false,
+          btcH1Rsi: Number(btcH1Rsi.toFixed(1)),
+          reason: `GLOBAL MARKET VETO: BTC 1H RSI is dumping at ${btcH1Rsi.toFixed(1)} (<30). All Altcoin LONG trades are strictly prohibited.`,
+        };
+      }
+      return { allowed: true, btcH1Rsi: btcH1Rsi !== null ? Number(btcH1Rsi.toFixed(1)) : undefined };
+    } catch {
+      return { allowed: true };
+    }
+  }
+
+  // --- Bid/Ask Spread Guard ---
+  public async checkSpreadGuard(symbol: string): Promise<{
+    allowed: boolean;
+    spreadPct: number;
+    reason?: string;
+  }> {
+    try {
+      const res = await fetch(`https://api.binance.com/api/v3/ticker/bookTicker?symbol=${symbol}`);
+      if (!res.ok) return { allowed: true, spreadPct: 0 };
+      const data = await res.json();
+      const bid = parseFloat(data.bidPrice);
+      const ask = parseFloat(data.askPrice);
+      if (bid > 0 && ask > 0) {
+        const spread = ask - bid;
+        const spreadPct = (spread / ask) * 100;
+        if (spreadPct > 0.10) {
+          return {
+            allowed: false,
+            spreadPct: Number(spreadPct.toFixed(3)),
+            reason: `SPREAD GUARD VETO: Bid/Ask spread (${spreadPct.toFixed(3)}%) exceeds 0.10% threshold. Order blocked to prevent institutional slippage.`,
+          };
+        }
+        return { allowed: true, spreadPct: Number(spreadPct.toFixed(3)) };
+      }
+    } catch {
+      // fallback
+    }
+    return { allowed: true, spreadPct: 0 };
+  }
+
+  // --- Duplicate Protection (< 5 Minutes) ---
+  public checkDuplicateProtection(symbol: string): { allowed: boolean; reason?: string } {
+    const now = Date.now();
+    const fiveMinutesMs = 5 * 60 * 1000;
+
+    const recentTrade = this.trades.find(
+      (t) => t.symbol === symbol && now - t.openTime < fiveMinutesMs
+    );
+
+    if (recentTrade) {
+      const remainingSec = Math.ceil((fiveMinutesMs - (now - recentTrade.openTime)) / 1000);
+      return {
+        allowed: false,
+        reason: `DUPLICATE PROTECTION: ${symbol} was already traded within the last 5 minutes. Cooldown active for ${remainingSec}s.`,
+      };
+    }
+
+    return { allowed: true };
   }
 
   private loadProfitVault(): number {
@@ -496,6 +705,74 @@ export class BinanceAutoTradeEngine {
   }): Promise<{ success: boolean; trade?: ManagedTrade; error?: string }> {
     const marketType = params.marketType ?? this.config.marketType;
     const direction = params.direction ?? (marketType === "Spot" ? "LONG" : this.config.direction);
+
+    // 1. Post-Loss Cooldown Check (30 Minutes)
+    const cooldown = this.getPostLossCooldown();
+    if (cooldown.isActive) {
+      const mins = Math.floor(cooldown.remainingSeconds / 60);
+      const secs = cooldown.remainingSeconds % 60;
+      return {
+        success: false,
+        error: `POST-LOSS COOLDOWN ACTIVE: Trade blocked. ${mins}m ${secs}s remaining before new orders can be executed.`,
+      };
+    }
+
+    // 2. Daily Drawdown Circuit Breaker Check
+    const drawdown = this.getDailyDrawdown();
+    if (drawdown.drawdownPct >= drawdown.maxDailyLossPercent) {
+      this.config.autoPilotEnabled = false;
+      this.saveConfig({ autoPilotEnabled: false });
+      return {
+        success: false,
+        error: `DAILY DRAWDOWN BREACH: Daily loss (${drawdown.drawdownPct}%) has reached or exceeded max limit of ${drawdown.maxDailyLossPercent}%. Auto-Pilot is shut down.`,
+      };
+    }
+
+    // 3. Duplicate Protection (< 5 Minutes)
+    const dupCheck = this.checkDuplicateProtection(params.symbol);
+    if (!dupCheck.allowed) {
+      return {
+        success: false,
+        error: dupCheck.reason,
+      };
+    }
+
+    // 4. Spread Guard Check (> 0.1% blocked)
+    const spreadCheck = await this.checkSpreadGuard(params.symbol);
+    if (!spreadCheck.allowed) {
+      return {
+        success: false,
+        error: spreadCheck.reason,
+      };
+    }
+
+    // 5. Global Market Filter: BTC 1H dumping blocks Altcoin Longs
+    const btcCheck = await this.checkBtcMarketFilter(direction, params.symbol);
+    if (!btcCheck.allowed) {
+      return {
+        success: false,
+        error: btcCheck.reason,
+      };
+    }
+
+    // 6. Dynamic Confluence Scaling
+    const dynamicScaling = this.getRequiredConfluenceScore(params.entryPrice, params.atrValue);
+
+    // 7. Swarm Risk Manager Veto
+    const swarmResult = simulateSwarmDebate({
+      symbol: params.symbol,
+      price: params.entryPrice,
+      atrValue: params.atrValue,
+      spreadPct: spreadCheck.spreadPct,
+      confluenceScore: dynamicScaling.requiredScore,
+    });
+
+    if (swarmResult.verdict === "NO-GO") {
+      return {
+        success: false,
+        error: `SWARM RISK MANAGER VETO: ${swarmResult.verdictReason}`,
+      };
+    }
 
     // Subscription & Daily Limits Check
     const allowance = checkTradeExecutionAllowance(params.userEmail, params.isPro);
@@ -746,8 +1023,48 @@ export class BinanceAutoTradeEngine {
       }
     }
 
+    // Update daily PnL stats
+    const today = new Date().toISOString().slice(0, 10);
+    if (this.dailyStats.date !== today) {
+      this.dailyStats = {
+        date: today,
+        startingBalance: 10000,
+        realizedPnlToday: 0,
+      };
+    }
+    this.dailyStats.realizedPnlToday = Number((this.dailyStats.realizedPnlToday + realizedPnl).toFixed(2));
+    this.saveDailyStats();
+
+    // Check Daily Drawdown Circuit Breaker
+    const drawdown = this.getDailyDrawdown();
+    if (drawdown.drawdownPct >= drawdown.maxDailyLossPercent) {
+      this.config.autoPilotEnabled = false;
+      this.saveConfig({ autoPilotEnabled: false });
+      this.circuitBreaker.isTripped = true;
+      this.circuitBreaker.trippedAt = Date.now();
+      this.circuitBreaker.reason = `Max Daily Loss % reached (${drawdown.drawdownPct}% >= ${drawdown.maxDailyLossPercent}%). Auto-Pilot disabled.`;
+      this.saveCircuitBreaker();
+
+      // Close all remaining positions
+      this.emergencyStop().catch(() => {});
+
+      // Urgent Telegram Alert
+      sendTelegramAlert(
+        `🚨 <b>[CIRCUIT BREAKER ENGAGED]</b>\n` +
+        `Max Daily Loss reached: <b>-${drawdown.drawdownPct.toFixed(2)}%</b> (Limit: ${drawdown.maxDailyLossPercent}%).\n` +
+        `Auto-Pilot has been immediately shut OFF, and all active positions have been liquidated.`
+      ).catch(() => {});
+    }
+
     if (realizedPnl < 0) {
       this.circuitBreaker.consecutiveLosses += 1;
+
+      // 1. Post-Loss Cooldown: If a trade hits Stop Loss, enter 30-minute cooldown
+      if (exitReason === "SL" || realizedPnl < 0) {
+        const cooldownUntil = Date.now() + 30 * 60 * 1000;
+        this.savePostLossCooldown(cooldownUntil);
+      }
+
       if (this.circuitBreaker.consecutiveLosses >= 2) {
         this.circuitBreaker.isTripped = true;
         this.circuitBreaker.trippedAt = Date.now();

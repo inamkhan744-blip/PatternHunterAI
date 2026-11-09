@@ -329,16 +329,18 @@ export class BinanceAutoTradeEngine {
   // --- Persistence ---
   public loadConfig(): AutoTradeConfig {
     let baseConfig = { ...DEFAULT_CONFIG };
-    try {
-      const stored = localStorage.getItem(STORAGE_KEY_CONFIG);
-      if (stored) {
-        baseConfig = { ...DEFAULT_CONFIG, ...JSON.parse(stored) };
+    if (typeof localStorage !== "undefined") {
+      try {
+        const stored = localStorage.getItem(STORAGE_KEY_CONFIG);
+        if (stored) {
+          baseConfig = { ...DEFAULT_CONFIG, ...JSON.parse(stored) };
+        }
+      } catch {
+        // fallback
       }
-    } catch {
-      // fallback
     }
 
-    // Load encrypted API keys if available
+    // Load encrypted API keys from localStorage if available
     const decryptedKeys = getDecryptedApiKeys();
     if (decryptedKeys.apiKey) baseConfig.apiKey = decryptedKeys.apiKey;
     if (decryptedKeys.apiSecret) baseConfig.apiSecret = decryptedKeys.apiSecret;
@@ -349,20 +351,24 @@ export class BinanceAutoTradeEngine {
   public saveConfig(configUpdates: Partial<AutoTradeConfig>): AutoTradeConfig {
     // If API keys were supplied in update, encrypt them via AES-256
     const hasKeyUpdate = configUpdates.apiKey !== undefined || configUpdates.apiSecret !== undefined;
-    const currentApiKey = configUpdates.apiKey !== undefined ? configUpdates.apiKey : this.config.apiKey;
-    const currentApiSecret = configUpdates.apiSecret !== undefined ? configUpdates.apiSecret : this.config.apiSecret;
+    const currentApiKey = configUpdates.apiKey !== undefined ? configUpdates.apiKey : (this.config.apiKey || getDecryptedApiKeys().apiKey);
+    const currentApiSecret = configUpdates.apiSecret !== undefined ? configUpdates.apiSecret : (this.config.apiSecret || getDecryptedApiKeys().apiSecret);
 
     if (hasKeyUpdate) {
       storeEncryptedApiKeys(currentApiKey, currentApiSecret);
     }
 
     this.config = { ...this.config, ...configUpdates };
+    this.config.apiKey = currentApiKey;
+    this.config.apiSecret = currentApiSecret;
     this.config.leverage = Math.max(1, Math.min(10, this.config.leverage));
     this.config.maxOpenTrades = Math.max(1, Math.min(3, this.config.maxOpenTrades));
 
-    // Store config without raw keys in plain storage
-    const safeStorageConfig = { ...this.config, apiKey: "", apiSecret: "" };
-    localStorage.setItem(STORAGE_KEY_CONFIG, JSON.stringify(safeStorageConfig));
+    if (typeof localStorage !== "undefined") {
+      // Store config without raw keys in plain storage
+      const safeStorageConfig = { ...this.config, apiKey: "", apiSecret: "" };
+      localStorage.setItem(STORAGE_KEY_CONFIG, JSON.stringify(safeStorageConfig));
+    }
 
     return this.config;
   }

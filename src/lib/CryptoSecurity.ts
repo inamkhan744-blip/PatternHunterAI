@@ -46,6 +46,7 @@ export function decryptData(cipherText: string, secretKey: string = STORAGE_PEPP
  * Encrypts and securely stores Binance API credentials in localStorage.
  */
 export function storeEncryptedApiKeys(apiKey: string, apiSecret: string): void {
+  if (typeof localStorage === "undefined") return;
   try {
     const payload = JSON.stringify({ apiKey, apiSecret });
     const encrypted = encryptData(payload);
@@ -59,6 +60,9 @@ export function storeEncryptedApiKeys(apiKey: string, apiSecret: string): void {
  * Retrieves and decrypts Binance API credentials from localStorage.
  */
 export function getDecryptedApiKeys(): ApiCredentials {
+  if (typeof localStorage === "undefined") {
+    return { apiKey: "", apiSecret: "" };
+  }
   try {
     const encrypted = localStorage.getItem(STORAGE_KEY_ENCRYPTED_KEYS);
     if (!encrypted) {

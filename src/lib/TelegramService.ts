@@ -18,6 +18,9 @@ export const DEFAULT_TELEGRAM_CONFIG: TelegramConfig = {
 };
 
 export function loadTelegramConfig(): TelegramConfig {
+  if (typeof localStorage === "undefined") {
+    return { ...DEFAULT_TELEGRAM_CONFIG };
+  }
   try {
     const raw = localStorage.getItem(STORAGE_KEY_TG_CONFIG);
     if (raw) {
@@ -32,10 +35,12 @@ export function loadTelegramConfig(): TelegramConfig {
 export function saveTelegramConfig(config: Partial<TelegramConfig>): TelegramConfig {
   const current = loadTelegramConfig();
   const updated = { ...current, ...config };
-  try {
-    localStorage.setItem(STORAGE_KEY_TG_CONFIG, JSON.stringify(updated));
-  } catch (e) {
-    console.error("Failed to save Telegram config:", e);
+  if (typeof localStorage !== "undefined") {
+    try {
+      localStorage.setItem(STORAGE_KEY_TG_CONFIG, JSON.stringify(updated));
+    } catch (e) {
+      console.error("Failed to save Telegram config:", e);
+    }
   }
   return updated;
 }

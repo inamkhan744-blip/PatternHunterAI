@@ -151,10 +151,12 @@ function analyzeSentimentHeuristically(headlines: string[]): { sentiment: Sentim
 /**
  * Passes the top 5 headlines to Gemini API to determine overall sentiment: "Bullish", "Bearish", or "Neutral".
  */
+import { getGeminiApiKey, getSelectedModel } from "./ModelManager";
+
 export async function analyzeNewsSentiment(headlines: NewsItem[]): Promise<SentimentAnalysisResult> {
   const top5 = headlines.slice(0, 5);
   const headlineTexts = top5.map((h, i) => `${i + 1}. ${h.title}`);
-  const geminiApiKey = (import.meta.env.VITE_GEMINI_API_KEY as string | undefined)?.trim();
+  const geminiApiKey = getGeminiApiKey();
 
   if (geminiApiKey) {
     const prompt = `You are a crypto market sentiment analyst. Analyze the following 5 crypto headlines and classify the overall sentiment.
@@ -168,7 +170,8 @@ Respond STRICTLY with a valid JSON object in this exact format:
 Headlines:
 ${headlineTexts.join("\n")}`;
 
-    const models = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.0-flash-001"];
+    const selectedModel = getSelectedModel();
+    const models = Array.from(new Set([selectedModel, "gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.0-flash-001"]));
 
     for (const model of models) {
       try {

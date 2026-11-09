@@ -10,7 +10,7 @@ import {
   type SeriesMarker,
   type Time,
 } from "lightweight-charts";
-import { TrendingUp, TrendingDown, Minus, Layers, Target, Flame } from "lucide-react";
+import { TrendingUp, TrendingDown, Minus, Layers, Target, Flame, Edit3, Slash, MoveHorizontal, Percent, Trash2 } from "lucide-react";
 import type { Candle, DetectedPattern } from "../types";
 import { getPatternColor } from "../lib/patterns";
 import { sma, rsi, findSupportResistance } from "../lib/indicators";
@@ -35,16 +35,18 @@ interface Props {
 }
 
 // Helper to determine price format precision and minMove based on sample price
-function getPriceFormatOptions(price: number): { type: "price"; precision: number; minMove: number } {
+export function getPriceFormatOptions(price: number): { type: "price"; precision: number; minMove: number } {
   if (price <= 0 || !Number.isFinite(price)) {
     return { type: "price", precision: 2, minMove: 0.01 };
   }
-  if (price >= 1) {
+  if (price >= 500) {
     return { type: "price", precision: 2, minMove: 0.01 };
+  } else if (price >= 1) {
+    return { type: "price", precision: 3, minMove: 0.001 };
   } else if (price >= 0.01) {
-    return { type: "price", precision: 4, minMove: 0.0001 };
+    return { type: "price", precision: 5, minMove: 0.00001 };
   } else if (price >= 0.0001) {
-    return { type: "price", precision: 6, minMove: 0.000001 };
+    return { type: "price", precision: 7, minMove: 0.0000001 };
   } else {
     // Very small coin prices like SHIB, PEPE, BONK ($0.0000123)
     return { type: "price", precision: 8, minMove: 0.00000001 };
@@ -93,6 +95,19 @@ export default function CandlestickChart({
   // Grid bot state for chart overlay
   const [gridState, setGridState] = useState<GridBotState>(gridTradingBot.getState());
   const [showGridOverlay, setShowGridOverlay] = useState(true);
+
+  // Interactive Drawing Tools state
+  type DrawingTool = "none" | "trendline" | "horizontal" | "fibonacci";
+  const [activeDrawingTool, setActiveDrawingTool] = useState<DrawingTool>("none");
+  interface Point2D { x: number; y: number; time?: number; price?: number }
+  interface UserDrawing {
+    id: string;
+    type: "trendline" | "horizontal" | "fibonacci";
+    p1: Point2D;
+    p2?: Point2D;
+  }
+  const [drawings, setDrawings] = useState<UserDrawing[]>([]);
+  const [drawingInProgress, setDrawingInProgress] = useState<UserDrawing | null>(null);
 
   useEffect(() => {
     return gridTradingBot.subscribe((s) => {
@@ -303,6 +318,73 @@ export default function CandlestickChart({
       }
     }
 
+    // Draw User Interactive Drawings (Trendlines, Horizontal Ray, Fibonacci Retracement)
+    const allDrawings = [...drawings, ...(drawingInProgress ? [drawingInProgress] : [])];
+    for (const d of allDrawings) {
+      if (d.type === "trendline" && d.p2) {
+        ctx.save();
+        ctx.strokeStyle = "#38bdf8";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(d.p1.x, d.p1.y);
+        ctx.lineTo(d.p2.x, d.p2.y);
+        ctx.stroke();
+
+        ctx.fillStyle = "#38bdf8";
+        ctx.beginPath();
+        ctx.arc(d.p1.x, d.p1.y, 4, 0, Math.PI * 2);
+        ctx.arc(d.p2.x, d.p2.y, 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      } else if (d.type === "horizontal") {
+        ctx.save();
+        ctx.strokeStyle = "#fbbf24";
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.moveTo(0, d.p1.y);
+        ctx.lineTo(plotWidth, d.p1.y);
+        ctx.stroke();
+
+        const pVal = activeSeries.coordinateToPrice(d.p1.y);
+        if (pVal !== null) {
+          ctx.font = "bold 10px 'JetBrains Mono', monospace";
+          ctx.fillStyle = "#fbbf24";
+          ctx.fillText(`H-RAY $${pVal.toFixed(2)}`, 12, d.p1.y - 4);
+        }
+        ctx.restore();
+      } else if (d.type === "fibonacci" && d.p2) {
+        const topY = Math.min(d.p1.y, d.p2.y);
+        const bottomY = Math.max(d.p1.y, d.p2.y);
+        const diff = bottomY - topY;
+        const fibRatios = [
+          { r: 0, label: "0.0%", color: "#94a3b8" },
+          { r: 0.236, label: "23.6%", color: "#38bdf8" },
+          { r: 0.382, label: "38.2%", color: "#34d399" },
+          { r: 0.5, label: "50.0%", color: "#fbbf24" },
+          { r: 0.618, label: "61.8% (Golden)", color: "#f87171" },
+          { r: 0.786, label: "78.6%", color: "#a855f7" },
+          { r: 1.0, label: "100.0%", color: "#94a3b8" },
+        ];
+
+        ctx.save();
+        for (const fib of fibRatios) {
+          const lineY = d.p1.y < d.p2.y ? topY + diff * fib.r : bottomY - diff * fib.r;
+          ctx.strokeStyle = fib.color;
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(Math.min(d.p1.x, d.p2.x), lineY);
+          ctx.lineTo(plotWidth, lineY);
+          ctx.stroke();
+
+          ctx.font = "9px 'JetBrains Mono', monospace";
+          ctx.fillStyle = fib.color;
+          ctx.fillText(`Fib ${fib.label}`, Math.max(d.p1.x, d.p2.x) + 6, lineY - 2);
+        }
+        ctx.restore();
+      }
+    }
+
     // Draw Liquidation Heatmap Horizontal Bars across right area
     if (showLiquidationHeatmap && liquidationData.levels.length > 0) {
       const maxVol = Math.max(...liquidationData.levels.map((l) => l.estimatedVolumeMillions), 1);
@@ -362,7 +444,7 @@ export default function CandlestickChart({
     }
 
     ctx.restore();
-  }, [chartType, showSMC, smcData, showLiquidationHeatmap, liquidationData, lastClose, showGridOverlay, gridState, symbol]);
+  }, [chartType, showSMC, smcData, showLiquidationHeatmap, liquidationData, lastClose, showGridOverlay, gridState, symbol, drawings, drawingInProgress]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -479,13 +561,28 @@ export default function CandlestickChart({
       rsiSeriesRef.current = rsiSeries;
     }
 
+    let animId: number | null = null;
     const timeScaleHandler = () => {
-      requestAnimationFrame(drawSMCOverlay);
+      if (animId !== null) cancelAnimationFrame(animId);
+      animId = requestAnimationFrame(() => {
+        drawSMCOverlay();
+      });
     };
     chart.timeScale().subscribeVisibleTimeRangeChange(timeScaleHandler);
     chart.timeScale().subscribeVisibleLogicalRangeChange(timeScaleHandler);
 
+    // Also attach resize observer to container
+    let resizeObserver: ResizeObserver | null = null;
+    if (containerRef.current) {
+      resizeObserver = new ResizeObserver(() => {
+        timeScaleHandler();
+      });
+      resizeObserver.observe(containerRef.current);
+    }
+
     return () => {
+      if (animId !== null) cancelAnimationFrame(animId);
+      if (resizeObserver) resizeObserver.disconnect();
       chart.timeScale().unsubscribeVisibleTimeRangeChange(timeScaleHandler);
       chart.timeScale().unsubscribeVisibleLogicalRangeChange(timeScaleHandler);
       chart.remove();
@@ -751,6 +848,51 @@ export default function CandlestickChart({
   const isHtfBull = htfTrendLabel === "Bullish";
   const isHtfBear = htfTrendLabel === "Bearish";
 
+  // Handle canvas click for interactive drawing
+  const handleCanvasMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (activeDrawingTool === "none") return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    if (activeDrawingTool === "horizontal") {
+      setDrawings((prev) => [
+        ...prev,
+        { id: String(Date.now()), type: "horizontal", p1: { x, y } },
+      ]);
+      setActiveDrawingTool("none");
+      return;
+    }
+
+    if (!drawingInProgress) {
+      setDrawingInProgress({
+        id: String(Date.now()),
+        type: activeDrawingTool,
+        p1: { x, y },
+        p2: { x, y },
+      });
+    } else {
+      setDrawings((prev) => [
+        ...prev,
+        { ...drawingInProgress, p2: { x, y } },
+      ]);
+      setDrawingInProgress(null);
+      setActiveDrawingTool("none");
+    }
+  };
+
+  const handleCanvasMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!drawingInProgress) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    setDrawingInProgress({
+      ...drawingInProgress,
+      p2: { x, y },
+    });
+    requestAnimationFrame(drawSMCOverlay);
+  };
+
   return (
     <div className="relative w-full h-full min-h-[500px] lg:min-h-[60vh] flex flex-col">
       {/* HTF Trend Badge above chart */}
@@ -852,6 +994,62 @@ export default function CandlestickChart({
             <span>Pools</span>
           </button>
 
+          {/* Interactive Drawing Toolbar */}
+          <div className="flex items-center bg-slate-800/80 rounded-lg p-0.5 border border-slate-700">
+            <button
+              onClick={() => {
+                setActiveDrawingTool("none");
+                setDrawingInProgress(null);
+              }}
+              className={`p-1.5 rounded ${activeDrawingTool === "none" ? "bg-slate-700 text-cyan-400" : "text-slate-400 hover:text-white"}`}
+              title="Cursor / Select"
+            >
+              <Edit3 className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={() => {
+                setActiveDrawingTool("trendline");
+                setDrawingInProgress(null);
+              }}
+              className={`p-1.5 rounded ${activeDrawingTool === "trendline" ? "bg-slate-700 text-cyan-400" : "text-slate-400 hover:text-white"}`}
+              title="Draw Trendline (Click 2 points)"
+            >
+              <Slash className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={() => {
+                setActiveDrawingTool("horizontal");
+                setDrawingInProgress(null);
+              }}
+              className={`p-1.5 rounded ${activeDrawingTool === "horizontal" ? "bg-slate-700 text-cyan-400" : "text-slate-400 hover:text-white"}`}
+              title="Draw Horizontal Ray"
+            >
+              <MoveHorizontal className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={() => {
+                setActiveDrawingTool("fibonacci");
+                setDrawingInProgress(null);
+              }}
+              className={`p-1.5 rounded ${activeDrawingTool === "fibonacci" ? "bg-slate-700 text-cyan-400" : "text-slate-400 hover:text-white"}`}
+              title="Fibonacci Retracement (Click High & Low)"
+            >
+              <Percent className="w-3.5 h-3.5" />
+            </button>
+            {drawings.length > 0 && (
+              <button
+                onClick={() => {
+                  setDrawings([]);
+                  setDrawingInProgress(null);
+                }}
+                className="p-1.5 rounded text-red-400 hover:bg-slate-700"
+                title="Clear all drawings"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+
           {/* Analyze Setup Button */}
           <button
             onClick={() => setConfluenceModalOpen(true)}
@@ -875,8 +1073,20 @@ export default function CandlestickChart({
         </div>
       </div>
 
+      {/* Drawing mode hint if active */}
+      {activeDrawingTool !== "none" && (
+        <div className="px-4 py-1 bg-cyan-950/80 border-b border-cyan-500/30 text-cyan-300 text-[11px] font-mono flex items-center justify-between">
+          <span>Click on chart to place {activeDrawingTool.toUpperCase()} ({drawingInProgress ? "Click endpoint" : "Click start point"}).</span>
+          <button onClick={() => { setActiveDrawingTool("none"); setDrawingInProgress(null); }} className="text-slate-400 hover:text-white">Cancel</button>
+        </div>
+      )}
+
       {/* Chart Canvas Container */}
-      <div className="relative flex-1 min-h-[380px] lg:min-h-[440px]">
+      <div
+        className={`relative flex-1 min-h-[380px] lg:min-h-[440px] ${activeDrawingTool !== "none" ? "cursor-crosshair" : ""}`}
+        onMouseDown={handleCanvasMouseDown}
+        onMouseMove={handleCanvasMouseMove}
+      >
         <div ref={containerRef} className="w-full h-full" />
         <canvas
           ref={canvasRef}

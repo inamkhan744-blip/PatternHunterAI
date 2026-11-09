@@ -15,7 +15,7 @@ export interface SwarmAgentMessage {
   timestamp: string;
 }
 
-import { getGeminiApiKey } from "./ModelManager";
+import { getGeminiApiKey, getSelectedModel } from "./ModelManager";
 
 export interface SwarmDebateResult {
   symbol: string;
@@ -28,9 +28,10 @@ export interface SwarmDebateResult {
   recommendedPositionPct: number;
   messages: SwarmAgentMessage[];
   apiKeyUsed?: boolean;
+  isRealAI?: boolean;
 }
 
-export function simulateSwarmDebate(params: {
+export interface SwarmDebateParams {
   symbol: string;
   price: number;
   rsi?: number | null;
@@ -41,7 +42,13 @@ export function simulateSwarmDebate(params: {
   spreadPct?: number | null;
   atrValue?: number | null;
   confluenceScore?: number | null;
-}): SwarmDebateResult {
+}
+
+/**
+ * Fast synchronous heuristic debate generator.
+ * Used for instant fallback or unit testing.
+ */
+export function simulateSwarmDebate(params: SwarmDebateParams): SwarmDebateResult {
   const {
     symbol,
     price,
@@ -169,5 +176,127 @@ export function simulateSwarmDebate(params: {
     recommendedPositionPct,
     messages: [bullMessage, bearMessage, riskMessage],
     apiKeyUsed: hasGeminiKey,
+    isRealAI: false,
   };
+}
+
+/**
+ * Real Gemini AI Swarm Generator:
+ * Invokes Google Gemini API directly using the user's stored API Key.
+ * Falls back to simulateSwarmDebate if the key is missing or on network/API failure.
+ */
+export async function runRealSwarmDebate(params: SwarmDebateParams): Promise<SwarmDebateResult> {
+  const geminiKey = getGeminiApiKey();
+  const baseSim = simulateSwarmDebate(params);
+
+  if (!geminiKey) {
+    return baseSim;
+  }
+
+  const model = getSelectedModel() || "gemini-2.0-flash";
+  const now = new Date();
+  const timeStr = (offsetSec: number) => {
+    const d = new Date(now.getTime() + offsetSec * 1000);
+    return d.toISOString().substring(11, 19);
+  };
+
+  const prompt = `You are an elite hedge fund investment committee debating an algorithmic trade setup.
+Asset: ${params.symbol}
+Current Price: $${params.price}
+RSI(14): ${params.rsi ?? 50}
+Trend: ${params.trend ?? "neutral"}
+Pattern: ${params.patternName ?? "Consolidation"} (${params.patternDirection ?? "neutral"})
+Fear & Greed Index: ${params.fearGreed ?? 50}
+ATR: ${params.atrValue ?? "N/A"}
+Spread %: ${params.spreadPct ?? "0.02%"}
+Preliminary Confluence Score: ${baseSim.confluenceScore}/100
+
+Produce a JSON response strictly matching this schema with NO markdown code fences:
+{
+  "bullThesis": "Concise high-conviction bullish argument from Bull Agent (max 3 sentences)",
+  "bullConfidence": 85,
+  "bearThesis": "Concise risk/supply warning from Bear Agent (max 3 sentences)",
+  "bearConfidence": 70,
+  "riskVerdict": "GO" or "NO-GO",
+  "riskThesis": "Concise risk assessment and sizing rationale from Risk Manager (max 3 sentences)",
+  "recommendedDirection": "LONG" or "SHORT" or "HOLD",
+  "recommendedLeverage": 3,
+  "recommendedPositionPct": 2.5
+}`;
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 12000);
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(geminiKey)}`;
+
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: {
+          temperature: 0.4,
+          maxOutputTokens: 600,
+          responseMimeType: "application/json",
+        },
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    if (!res.ok) {
+      return baseSim;
+    }
+
+    const data = await res.json();
+    const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!rawText) return baseSim;
+
+    const cleaned = rawText.replace(/```json\n?|```/g, "").trim();
+    const parsed = JSON.parse(cleaned);
+
+    const bullMessage: SwarmAgentMessage = {
+      agent: "Bull Agent",
+      role: "BULL",
+      sentiment: "BULLISH",
+      confidence: Math.min(100, Math.max(10, parsed.bullConfidence || baseSim.messages[0].confidence)),
+      timestamp: timeStr(0),
+      message: parsed.bullThesis || baseSim.messages[0].message,
+    };
+
+    const bearMessage: SwarmAgentMessage = {
+      agent: "Bear Agent",
+      role: "BEAR",
+      sentiment: "BEARISH",
+      confidence: Math.min(100, Math.max(10, parsed.bearConfidence || baseSim.messages[1].confidence)),
+      timestamp: timeStr(1),
+      message: parsed.bearThesis || baseSim.messages[1].message,
+    };
+
+    const isGo = parsed.riskVerdict === "GO";
+    const riskMessage: SwarmAgentMessage = {
+      agent: "Risk Manager",
+      role: "RISK",
+      sentiment: isGo ? "GO" : "NO-GO",
+      confidence: Math.round(baseSim.confluenceScore),
+      timestamp: timeStr(2),
+      message: parsed.riskThesis || baseSim.messages[2].message,
+    };
+
+    return {
+      symbol: params.symbol,
+      price: params.price,
+      confluenceScore: baseSim.confluenceScore,
+      verdict: isGo ? "GO" : "NO-GO",
+      verdictReason: riskMessage.message,
+      recommendedDirection: parsed.recommendedDirection || baseSim.recommendedDirection,
+      recommendedLeverage: Math.min(10, Math.max(1, parsed.recommendedLeverage || baseSim.recommendedLeverage)),
+      recommendedPositionPct: Math.min(10, Math.max(0.5, parsed.recommendedPositionPct || baseSim.recommendedPositionPct)),
+      messages: [bullMessage, bearMessage, riskMessage],
+      apiKeyUsed: true,
+      isRealAI: true,
+    };
+  } catch {
+    return baseSim;
+  }
 }

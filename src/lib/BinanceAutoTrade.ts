@@ -100,6 +100,63 @@ export const SPOT_API_BASE = "https://api.binance.com";
 export const FUTURES_API_BASE = "https://fapi.binance.com";
 
 /**
+ * Proxy fetch helper to route Binance REST API requests through Supabase Edge Function 'binance-proxy'
+ * when running in browser environments to completely circumvent CORS restrictions.
+ */
+export async function proxyBinanceFetch(options: {
+  target: "spot" | "futures";
+  path: string;
+  method?: "GET" | "POST" | "DELETE" | "PUT";
+  query?: string;
+  body?: string;
+  apiKey?: string;
+}): Promise<Response> {
+  const { target, path, method = "GET", query = "", body, apiKey } = options;
+  const isBrowser = typeof window !== "undefined" && typeof window.document !== "undefined";
+  const supabaseUrl = typeof import.meta !== "undefined" && import.meta.env ? import.meta.env.VITE_SUPABASE_URL : "";
+  const supabaseAnonKey = typeof import.meta !== "undefined" && import.meta.env ? import.meta.env.VITE_SUPABASE_ANON_KEY : "";
+
+  // If Supabase proxy endpoint is reachable in browser, use edge proxy
+  if (isBrowser && supabaseUrl && supabaseAnonKey && !supabaseUrl.includes("placeholder")) {
+    try {
+      const proxyEndpoint = `${supabaseUrl}/functions/v1/binance-proxy`;
+      const res = await fetch(proxyEndpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${supabaseAnonKey}`,
+          ...(apiKey ? { "X-MBX-APIKEY": apiKey } : {}),
+        },
+        body: JSON.stringify({
+          target,
+          path,
+          method,
+          query,
+          body,
+          headers: apiKey ? { "X-MBX-APIKEY": apiKey } : {},
+        }),
+      });
+      return res;
+    } catch {
+      // fallback to direct fetch below
+    }
+  }
+
+  // Fallback: direct fetch (e.g. In Node tests or server environment)
+  const baseUrl = target === "futures" ? FUTURES_API_BASE : SPOT_API_BASE;
+  const fullUrl = query ? `${baseUrl}${path}?${query}` : `${baseUrl}${path}`;
+  const headers: Record<string, string> = {};
+  if (apiKey) headers["X-MBX-APIKEY"] = apiKey;
+  if (body) headers["Content-Type"] = "application/x-www-form-urlencoded";
+
+  return fetch(fullUrl, {
+    method,
+    headers,
+    ...(body ? { body } : {}),
+  });
+}
+
+/**
  * Calculates position size auto-compounded based on risk percent, account balance, and leverage.
  */
 export function calculatePositionSize(
@@ -568,7 +625,12 @@ export class BinanceAutoTradeEngine {
     reason?: string;
   }> {
     try {
-      const res = await fetch(`https://api.binance.com/api/v3/ticker/bookTicker?symbol=${symbol}`);
+      const res = await proxyBinanceFetch({
+        target: "spot",
+        path: "/api/v3/ticker/bookTicker",
+        query: `symbol=${symbol}`,
+        method: "GET",
+      });
       if (!res.ok) return { allowed: true, spreadPct: 0 };
       const data = await res.json();
       const bid = parseFloat(data.bidPrice);
@@ -641,15 +703,15 @@ export class BinanceAutoTradeEngine {
     const timestamp = Date.now();
     const query = `timestamp=${timestamp}`;
     const signature = await signQuery(query, this.config.apiSecret);
-    const base = this.getApiBase(type);
-
-    const endpoint = type === "Futures"
-      ? `${base}/fapi/v2/balance?${query}&signature=${signature}`
-      : `${base}/api/v3/account?${query}&signature=${signature}`;
+    const path = type === "Futures" ? "/fapi/v2/balance" : "/api/v3/account";
 
     try {
-      const res = await fetch(endpoint, {
-        headers: { "X-MBX-APIKEY": this.config.apiKey },
+      const res = await proxyBinanceFetch({
+        target: type === "Futures" ? "futures" : "spot",
+        path,
+        method: "GET",
+        query: `${query}&signature=${signature}`,
+        apiKey: this.config.apiKey,
       });
       if (!res.ok) {
         throw new Error(`Binance API error: ${res.statusText}`);
@@ -683,13 +745,12 @@ export class BinanceAutoTradeEngine {
     const signature = await signQuery(query, this.config.apiSecret);
 
     try {
-      const res = await fetch(`${FUTURES_API_BASE}/fapi/v1/leverage`, {
+      const res = await proxyBinanceFetch({
+        target: "futures",
+        path: "/fapi/v1/leverage",
         method: "POST",
-        headers: {
-          "X-MBX-APIKEY": this.config.apiKey,
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
         body: `${query}&signature=${signature}`,
+        apiKey: this.config.apiKey,
       });
       return res.ok;
     } catch {
@@ -920,8 +981,7 @@ export class BinanceAutoTradeEngine {
     marketType: MarketType;
   }): Promise<{ orderId?: string | number; error?: string }> {
     const timestamp = Date.now();
-    const base = this.getApiBase(params.marketType);
-    const endpoint = params.marketType === "Futures" ? `${base}/fapi/v1/order` : `${base}/api/v3/order`;
+    const path = params.marketType === "Futures" ? "/fapi/v1/order" : "/api/v3/order";
 
     const query = [
       `symbol=${params.symbol}`,
@@ -936,13 +996,12 @@ export class BinanceAutoTradeEngine {
     const signature = await signQuery(query, this.config.apiSecret);
 
     try {
-      const res = await fetch(endpoint, {
+      const res = await proxyBinanceFetch({
+        target: params.marketType === "Futures" ? "futures" : "spot",
+        path,
         method: "POST",
-        headers: {
-          "X-MBX-APIKEY": this.config.apiKey,
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
         body: `${query}&signature=${signature}`,
+        apiKey: this.config.apiKey,
       });
       const data = await res.json();
       if (!res.ok) {
@@ -1107,13 +1166,12 @@ export class BinanceAutoTradeEngine {
     const signature = await signQuery(query, this.config.apiSecret);
 
     try {
-      const res = await fetch(`${SPOT_API_BASE}/sapi/v1/futures/transfer`, {
+      const res = await proxyBinanceFetch({
+        target: "spot",
+        path: "/sapi/v1/futures/transfer",
         method: "POST",
-        headers: {
-          "X-MBX-APIKEY": this.config.apiKey,
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
         body: `${query}&signature=${signature}`,
+        apiKey: this.config.apiKey,
       });
       return res.ok;
     } catch {
@@ -1144,9 +1202,12 @@ export class BinanceAutoTradeEngine {
         for (const sym of symbols) {
           const q = `symbol=${sym}&timestamp=${timestamp}`;
           const sig = await signQuery(q, this.config.apiSecret);
-          await fetch(`${FUTURES_API_BASE}/fapi/v1/allOpenOrders?${q}&signature=${sig}`, {
+          await proxyBinanceFetch({
+            target: "futures",
+            path: "/fapi/v1/allOpenOrders",
             method: "DELETE",
-            headers: { "X-MBX-APIKEY": this.config.apiKey },
+            query: `${q}&signature=${sig}`,
+            apiKey: this.config.apiKey,
           });
           cancelledOrdersCount++;
         }
@@ -1162,9 +1223,12 @@ export class BinanceAutoTradeEngine {
         for (const sym of symbols) {
           const q = `symbol=${sym}&timestamp=${timestamp}`;
           const sig = await signQuery(q, this.config.apiSecret);
-          await fetch(`${SPOT_API_BASE}/api/v3/openOrders?${q}&signature=${sig}`, {
+          await proxyBinanceFetch({
+            target: "spot",
+            path: "/api/v3/openOrders",
             method: "DELETE",
-            headers: { "X-MBX-APIKEY": this.config.apiKey },
+            query: `${q}&signature=${sig}`,
+            apiKey: this.config.apiKey,
           });
           cancelledOrdersCount++;
         }

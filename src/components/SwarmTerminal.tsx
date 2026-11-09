@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import {
   simulateSwarmDebate,
+  runRealSwarmDebate,
   SwarmDebateResult,
   SwarmAgentMessage,
 } from "../lib/AgentSwarm";
@@ -50,13 +51,13 @@ export default function SwarmTerminal({
   const [debating, setDebating] = useState<boolean>(false);
   const [activeStep, setActiveStep] = useState<number>(0);
 
-  const startDebate = () => {
+  const startDebate = async () => {
     const effectivePrice = price || 65000;
     setDebating(true);
     setVisibleMessages([]);
     setActiveStep(0);
 
-    const debate = simulateSwarmDebate({
+    const debate = await runRealSwarmDebate({
       symbol,
       price: effectivePrice,
       rsi: rsi || 52,
@@ -71,18 +72,18 @@ export default function SwarmTerminal({
     setTimeout(() => {
       setVisibleMessages([debate.messages[0]]);
       setActiveStep(1);
-    }, 600);
+    }, 500);
 
     setTimeout(() => {
       setVisibleMessages([debate.messages[0], debate.messages[1]]);
       setActiveStep(2);
-    }, 1500);
+    }, 1200);
 
     setTimeout(() => {
       setVisibleMessages([debate.messages[0], debate.messages[1], debate.messages[2]]);
       setActiveStep(3);
       setDebating(false);
-    }, 2400);
+    }, 1900);
   };
 
   useEffect(() => {
@@ -108,7 +109,7 @@ export default function SwarmTerminal({
                   BLOOMBERG AI SWARM // HEDGE FUND DEBATE
                 </span>
                 <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/30">
-                  3-AGENT TRIAGE
+                  {result?.isRealAI ? "⚡ GEMINI LIVE NEURAL TRIAGE" : "3-AGENT TRIAGE"}
                 </span>
               </div>
               <p className="text-[10px] text-slate-400">

@@ -63,7 +63,11 @@ import VisionAIUpload from "./components/VisionAIUpload";
 import SettingsModal from "./components/SettingsModal";
 import OrderBook from "./components/OrderBook";
 import PnLCalendar from "./components/PnLCalendar";
-import { Settings as SettingsIcon, Eye, Download, BookOpen, Calendar as CalendarIcon, Wifi, ChevronUp, Power } from "lucide-react";
+import GridBotUI from "./components/GridBotUI";
+import CopyTradingTab from "./components/CopyTradingTab";
+import StrategyBuilder from "./components/StrategyBuilder";
+import { gridTradingBot } from "./lib/GridBot";
+import { Settings as SettingsIcon, Eye, Download, BookOpen, Calendar as CalendarIcon, Wifi, ChevronUp, Power, Grid as GridIcon, Users, Cpu } from "lucide-react";
 import { isUserAdmin, isUserPro } from "./lib/SubscriptionManager";
 import { autoTradeEngine } from "./lib/BinanceAutoTrade";
 import { paperTradingEngine } from "./lib/PaperTrading";
@@ -83,6 +87,9 @@ const TIMEFRAMES: { value: Timeframe; label: string }[] = [
 
 const TABS: { key: AppTab; label: string; icon: typeof ChartIcon }[] = [
   { key: "chart", label: "Chart", icon: ChartIcon },
+  { key: "grid", label: "Grid Bot", icon: GridIcon },
+  { key: "copy", label: "Copy Trading", icon: Users },
+  { key: "strategy", label: "Strategy Builder", icon: Cpu },
   { key: "depth", label: "Order Book", icon: BookOpen },
   { key: "arbitrage", label: "Arbitrage", icon: ArrowUpRight },
   { key: "backtest", label: "Backtest Lab", icon: BarChart3 },
@@ -441,6 +448,10 @@ export default function App() {
       setLastPrice(price);
       setPriceChange(changePct);
 
+      // Feed real-time price to Grid Bot & Paper Trading engine
+      gridTradingBot.onPriceTick(price, selectedCoin.binanceSymbol);
+      paperTradingEngine.evaluatePrice(price, selectedCoin.binanceSymbol);
+
       // Auto-Pilot execution check on real-time price tick
       const config = autoTradeEngine.getConfig();
       if (!config.autoPilotEnabled) return;
@@ -780,7 +791,7 @@ export default function App() {
             </div>
           ) : !effectiveIsPro ? (
             <button
-              onClick={() => setProModalOpen(true)}
+              onClick={() => window.open("https://inamkhan08.gumroad.com/l/idbxpj", "_blank", "noopener,noreferrer")}
               className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-900 text-sm font-bold transition-all shadow-md shadow-amber-950/30"
             >
               <Crown className="w-4 h-4" />
@@ -840,7 +851,7 @@ export default function App() {
                 </div>
               ) : !effectiveIsPro ? (
                 <button
-                  onClick={() => setProModalOpen(true)}
+                  onClick={() => window.open("https://inamkhan08.gumroad.com/l/idbxpj", "_blank", "noopener,noreferrer")}
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-900 text-xs font-bold transition-all"
                 >
                   <Crown className="w-3.5 h-3.5" />
@@ -1240,6 +1251,20 @@ export default function App() {
               fearGreed={fearGreedValue}
               onShowCoin={showCoinBySymbol}
             />
+          )}
+
+          {activeTab === "grid" && (
+            <div className="px-4 sm:px-6 py-4">
+              <GridBotUI selectedCoin={selectedCoin} currentPrice={lastPrice || 0} />
+            </div>
+          )}
+
+          {activeTab === "copy" && (
+            <CopyTradingTab />
+          )}
+
+          {activeTab === "strategy" && (
+            <StrategyBuilder selectedCoin={selectedCoin} timeframe={timeframe} />
           )}
 
           {activeTab === "arbitrage" && (

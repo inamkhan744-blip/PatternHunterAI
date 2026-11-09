@@ -32,6 +32,7 @@ import {
   CircuitBreakerState,
 } from "../lib/BinanceAutoTrade";
 import { paperTradingEngine, PaperTrade } from "../lib/PaperTrading";
+import { tradeManager } from "../lib/TradeManager";
 import { formatPrice } from "../lib/patterns";
 import RiskDisclaimerModal from "./RiskDisclaimerModal";
 import { useAuth } from "../lib/auth";
@@ -144,40 +145,6 @@ export default function AutoTradeModal({
     }
   };
 
-  const handleToggleAutoPilot = () => {
-    if (!isPro && !isAdmin) {
-      setStatusMessage({
-        type: "error",
-        text: "Auto-Pilot is locked for Free users. Upgrade to Pro or authenticate with admin bypass.",
-      });
-      return;
-    }
-    if (!config.disclaimerAgreed) {
-      setDisclaimerOpen(true);
-      return;
-    }
-    if (circuitBreaker.isTripped) {
-      setStatusMessage({
-        type: "error",
-        text: "Circuit Breaker is tripped! Please reset the circuit breaker before re-enabling God-Mode Auto-Pilot.",
-      });
-      return;
-    }
-    const cd = autoTradeEngine.getPostLossCooldown();
-    if (cd.isActive) {
-      setStatusMessage({
-        type: "error",
-        text: `Post-Loss Cooldown is active (${Math.ceil(cd.remainingSeconds / 60)}m remaining). Auto-Pilot cannot be engaged during cooldown.`,
-      });
-      return;
-    }
-    const nextState = !config.autoPilotEnabled;
-    handleConfigChange({ autoPilotEnabled: nextState });
-    setStatusMessage({
-      type: "info",
-      text: nextState ? "Auto-Pilot ACTIVE: trades will execute automatically on signals." : "Auto-Pilot PAUSED.",
-    });
-  };
 
   const handleDisclaimerAgreed = () => {
     handleConfigChange({ disclaimerAgreed: true });
@@ -255,6 +222,21 @@ export default function AutoTradeModal({
         });
 
         if (pResult.success && pResult.trade) {
+          tradeManager.addTrade({
+            symbol: pResult.trade.symbol,
+            entryPrice: pResult.trade.entryPrice,
+            currentPrice: currentPrice,
+            quantity: pResult.trade.quantity,
+            stopLossPrice: pResult.trade.stopLossPrice,
+            takeProfitPrice: pResult.trade.takeProfitPrice,
+            direction: pResult.trade.direction,
+            marketType: pResult.trade.marketType,
+            leverage: pResult.trade.leverage,
+            source: "MANUAL",
+            mode: "PAPER",
+            customId: pResult.trade.id,
+          });
+
           setStatusMessage({
             type: "success",
             text: `[PAPER TRADE] Virtual Order Executed: ${pResult.trade.marketType} ${pResult.trade.direction} ${pResult.trade.quantity} ${pResult.trade.symbol} @ ${formatPrice(pResult.trade.entryPrice)}`,
@@ -280,6 +262,21 @@ export default function AutoTradeModal({
         });
 
         if (result.success && result.trade) {
+          tradeManager.addTrade({
+            symbol: result.trade.symbol,
+            entryPrice: result.trade.entryPrice,
+            currentPrice: currentPrice,
+            quantity: result.trade.quantity,
+            stopLossPrice: result.trade.stopLossPrice,
+            takeProfitPrice: result.trade.takeProfitPrice,
+            direction: result.trade.direction,
+            marketType: result.trade.marketType,
+            leverage: result.trade.leverage,
+            source: "MANUAL",
+            mode: "REAL",
+            customId: result.trade.id,
+          });
+
           setStatusMessage({
             type: "success",
             text: `LIMIT Order placed: ${result.trade.marketType} ${result.trade.direction} ${result.trade.quantity} ${result.trade.symbol} @ ${formatPrice(result.trade.entryPrice)}`,
@@ -305,6 +302,7 @@ export default function AutoTradeModal({
     setEmergencyLoading(true);
     try {
       const res = await autoTradeEngine.emergencyStop();
+      tradeManager.closeAllTrades("KILL_SWITCH");
       setOpenTrades(autoTradeEngine.getOpenTrades());
       setConfig(autoTradeEngine.getConfig());
       setStatusMessage({
@@ -702,20 +700,12 @@ export default function AutoTradeModal({
                 )}
               </div>
 
-              {/* Master Auto-Pilot Toggle (Locked for Free Users) */}
+              {/* Auto-Pilot Status & Guidance */}
               <div className="p-4 rounded-xl bg-[#0d121f] border border-slate-800 flex flex-col justify-between space-y-3 relative overflow-hidden">
-                {!isPro && !isAdmin && (
-                  <div className="absolute inset-0 bg-slate-950/75 backdrop-blur-[2px] z-10 flex flex-col items-center justify-center p-4 text-center">
-                    <Lock className="w-6 h-6 text-amber-400 mb-1" />
-                    <span className="text-xs font-bold text-amber-300 uppercase">Auto-Pilot Locked</span>
-                    <span className="text-[10px] text-slate-400 mt-1 font-sans">Available exclusively for Pro Subscribers & Admin</span>
-                  </div>
-                )}
-
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-semibold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
                     <Power className="w-3.5 h-3.5 text-green-400" />
-                    Auto-Pilot
+                    Auto-Pilot Status
                   </span>
                   <span
                     className={`text-[10px] font-bold px-2 py-0.5 rounded ${
@@ -724,26 +714,18 @@ export default function AutoTradeModal({
                         : "bg-slate-700 text-slate-400"
                     }`}
                   >
-                    {config.autoPilotEnabled ? "ACTIVE" : "DISABLED"}
+                    {config.autoPilotEnabled ? "ON" : "OFF"}
                   </span>
                 </div>
 
                 <p className="text-xs text-slate-400 leading-relaxed font-sans">
-                  Automates limit order entries on pattern confirmations while obeying ATR stops and the 2-loss circuit breaker.
+                  Controlled directly via the primary <strong className="text-white">AUTO-PILOT</strong> toggle switch in the Top Header for seamless zero-latency access across all tabs.
                 </p>
 
-                <button
-                  onClick={handleToggleAutoPilot}
-                  disabled={!isPro && !isAdmin}
-                  className={`w-full py-2.5 rounded-xl font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-2 transition ${
-                    config.autoPilotEnabled
-                      ? "bg-red-500/20 text-[#ff3344] border border-red-500/50 hover:bg-red-500/30"
-                      : "bg-gradient-to-r from-emerald-500 to-green-600 hover:from-emerald-400 hover:to-green-500 text-slate-950 shadow-lg shadow-green-950/40"
-                  }`}
-                >
-                  <Power className="w-4 h-4" />
-                  {config.autoPilotEnabled ? "Disable Auto-Pilot" : "Enable Auto-Pilot"}
-                </button>
+                <div className="p-2.5 rounded-lg bg-slate-950/80 border border-slate-800 text-[11px] text-slate-400 font-sans flex items-center gap-2">
+                  <Zap className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                  <span>Use Top Header switch to toggle state anytime</span>
+                </div>
               </div>
             </div>
 

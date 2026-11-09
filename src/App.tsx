@@ -25,6 +25,18 @@ import {
   Wallet,
   LogOut,
   User as UserIcon,
+  Layers,
+  Settings as SettingsIcon,
+  Eye,
+  Download,
+  BookOpen,
+  Calendar as CalendarIcon,
+  Wifi,
+  ChevronUp,
+  Power,
+  Grid as GridIcon,
+  Users,
+  Cpu,
 } from "lucide-react";
 import CandlestickChart from "./components/CandlestickChart";
 import PatternPanel from "./components/PatternPanel";
@@ -53,9 +65,10 @@ import {
 import { supabase } from "./lib/supabase";
 import { canScan, incrementScanCount, getRemainingScans, FREE_LIMIT } from "./lib/scanLimit";
 import { useAuth } from "./lib/auth";
+import AuthScreen from "./components/AuthScreen";
+import ActivePositions from "./components/ActivePositions";
 import AIChat from "./components/AIChat";
 import Portfolio from "./components/Portfolio";
-import AuthModal from "./components/AuthModal";
 import ArbitrageTab from "./components/ArbitrageTab";
 import SwarmTerminal from "./components/SwarmTerminal";
 import Backtesting from "./components/Backtesting";
@@ -67,11 +80,11 @@ import GridBotUI from "./components/GridBotUI";
 import CopyTradingTab from "./components/CopyTradingTab";
 import StrategyBuilder from "./components/StrategyBuilder";
 import { gridTradingBot } from "./lib/GridBot";
-import { Settings as SettingsIcon, Eye, Download, BookOpen, Calendar as CalendarIcon, Wifi, ChevronUp, Power, Grid as GridIcon, Users, Cpu } from "lucide-react";
 import { isUserAdmin, isUserPro } from "./lib/SubscriptionManager";
 import { getGeminiApiKey, getSelectedModel } from "./lib/ModelManager";
 import { autoTradeEngine } from "./lib/BinanceAutoTrade";
 import { paperTradingEngine } from "./lib/PaperTrading";
+import { tradeManager } from "./lib/TradeManager";
 import { evaluateConfluence } from "./lib/ConfluenceEngine";
 import { scanSMC, calculateHTFTrend, type SMCData, type HTFTrendResult } from "./lib/SMCScanner";
 import { subscribeTicker } from "./lib/websocket";
@@ -86,20 +99,49 @@ const TIMEFRAMES: { value: Timeframe; label: string }[] = [
   { value: "1W", label: "1W" },
 ];
 
-const TABS: { key: AppTab; label: string; icon: typeof ChartIcon }[] = [
+interface NavGroup {
+  groupTitle: string;
+  items: { key: AppTab; label: string; icon: React.ComponentType<{ className?: string }> }[];
+}
+
+const NAV_GROUPS: NavGroup[] = [
+  {
+    groupTitle: "Trading",
+    items: [
+      { key: "chart", label: "Chart", icon: ChartIcon },
+      { key: "positions", label: "Positions & History", icon: Layers },
+      { key: "depth", label: "Order Book", icon: BookOpen },
+    ],
+  },
+  {
+    groupTitle: "Tools & Bots",
+    items: [
+      { key: "grid", label: "Grid Bot", icon: GridIcon },
+      { key: "copy", label: "Copy Trading", icon: Users },
+      { key: "strategy", label: "Strategy Builder", icon: Cpu },
+      { key: "arbitrage", label: "Arbitrage", icon: ArrowUpRight },
+      { key: "backtest", label: "Backtest Lab", icon: BarChart3 },
+    ],
+  },
+  {
+    groupTitle: "Market Insights",
+    items: [
+      { key: "scanner", label: "Scanner", icon: List },
+      { key: "watchlist", label: "Watchlist", icon: Star },
+      { key: "history", label: "Signals", icon: HistoryIcon },
+      { key: "alerts", label: "Alerts", icon: Bell },
+      { key: "chat", label: "AI Chat", icon: Sparkles },
+      { key: "portfolio", label: "Portfolio", icon: Wallet },
+    ],
+  },
+];
+
+const MOBILE_TABS: { key: AppTab; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
   { key: "chart", label: "Chart", icon: ChartIcon },
-  { key: "grid", label: "Grid Bot", icon: GridIcon },
-  { key: "copy", label: "Copy Trading", icon: Users },
-  { key: "strategy", label: "Strategy Builder", icon: Cpu },
-  { key: "depth", label: "Order Book", icon: BookOpen },
-  { key: "arbitrage", label: "Arbitrage", icon: ArrowUpRight },
-  { key: "backtest", label: "Backtest Lab", icon: BarChart3 },
+  { key: "positions", label: "Positions", icon: Layers },
   { key: "scanner", label: "Scanner", icon: List },
-  { key: "watchlist", label: "Watchlist", icon: Star },
-  { key: "history", label: "History", icon: HistoryIcon },
-  { key: "alerts", label: "Alerts", icon: Bell },
-  { key: "chat", label: "AI Chat", icon: Sparkles },
   { key: "portfolio", label: "Portfolio", icon: Wallet },
+  { key: "grid", label: "Bots", icon: GridIcon },
 ];
 
 const ALL_COINS = [...COINS, ...PRO_COINS];
@@ -112,6 +154,8 @@ function formatVolume(vol: number): string {
 }
 
 export default function App() {
+  const { user, loading: authLoading } = useAuth();
+
   const [activeTab, setActiveTab] = useState<AppTab>("chart");
   const [selectedCoin, setSelectedCoin] = useState<Coin>(COINS[0]);
   const [timeframe, setTimeframe] = useState<Timeframe>("1h");
@@ -153,10 +197,12 @@ export default function App() {
   const [visionAIOpen, setVisionAIOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
-  const { user } = useAuth();
+  // Admin and Pro derivation: inamkhan744@gmail.com unlocks isAdmin & isPro
   const isAdmin = useMemo(() => isUserAdmin(user?.email), [user?.email]);
-  const effectiveIsPro = useMemo(() => isUserPro(user?.email, isPro), [user?.email, isPro]);
-  const [authModalOpen, setAuthModalOpen] = useState(false);
+  const effectiveIsPro = useMemo(() => {
+    if (isAdmin) return true;
+    return isUserPro(user?.email, isPro);
+  }, [isAdmin, user?.email, isPro]);
 
   // Auto-Pilot master state synced with autoTradeEngine
   const [autoPilotActive, setAutoPilotActive] = useState<boolean>(() => autoTradeEngine.getConfig().autoPilotEnabled);
@@ -222,7 +268,7 @@ export default function App() {
         localStorage.removeItem("anti_fomo_lock_until");
       }
     }
-  }, []);
+  }, [isAdmin]);
 
   // Countdown timer for Anti-FOMO lock
   useEffect(() => {
@@ -255,8 +301,10 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    loadWatchlist();
-  }, [loadWatchlist]);
+    if (user) {
+      loadWatchlist();
+    }
+  }, [user, loadWatchlist]);
 
   const toggleWatch = useCallback(
     async (coin: Coin) => {
@@ -365,18 +413,17 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    loadData(selectedCoin.binanceSymbol, timeframe);
-  }, [selectedCoin, timeframe, loadData]);
+    if (user) {
+      loadData(selectedCoin.binanceSymbol, timeframe);
+    }
+  }, [user, selectedCoin, timeframe, loadData]);
 
   // ---- Keyboard shortcuts ----
   useEffect(() => {
     function handleKey(e: KeyboardEvent) {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
-      if (e.key >= "1" && e.key <= "5") {
-        const idx = parseInt(e.key, 10) - 1;
-        if (idx < TABS.length) setActiveTab(TABS[idx].key);
-      } else if (e.key.toLowerCase() === "r" && activeTab === "chart") {
+      if (e.key.toLowerCase() === "r" && activeTab === "chart") {
         loadData(selectedCoin.binanceSymbol, timeframe);
       }
     }
@@ -385,6 +432,7 @@ export default function App() {
   }, [activeTab, selectedCoin, timeframe, loadData]);
 
   useEffect(() => {
+    if (!user) return;
     const interval = setInterval(async () => {
       try {
         const data = await fetchCandles(selectedCoin.binanceSymbol, 5, timeframe);
@@ -400,7 +448,7 @@ export default function App() {
       }
     }, 15000);
     return () => clearInterval(interval);
-  }, [selectedCoin, timeframe, activeTab]);
+  }, [user, selectedCoin, timeframe, activeTab]);
 
   const autoResolveSignals = useCallback(async () => {
     const { data: pending } = await supabase
@@ -438,12 +486,13 @@ export default function App() {
 
   // HTF Trend update for background confluence calculations
   useEffect(() => {
+    if (!user) return;
     let mounted = true;
     const fetchTrend = async () => {
       try {
         const trend = await calculateHTFTrend(selectedCoin.binanceSymbol);
         if (mounted) setHtfTrendState(trend);
-      } catch (e) {
+      } catch {
         // silent
       }
     };
@@ -453,10 +502,11 @@ export default function App() {
       mounted = false;
       clearInterval(interval);
     };
-  }, [selectedCoin.binanceSymbol]);
+  }, [user, selectedCoin.binanceSymbol]);
 
   // Real-time WebSocket Price Subscription & Auto-Pilot Execution Loop
   useEffect(() => {
+    if (!user) return;
     const unsub = subscribeTicker(selectedCoin.binanceSymbol, (price, changePct) => {
       // Simulate live jitter for WebSocket round-trip display
       setWsLatency(Math.floor(22 + Math.random() * 18));
@@ -466,7 +516,8 @@ export default function App() {
       setLastPrice(price);
       setPriceChange(changePct);
 
-      // Feed real-time price to Grid Bot & Paper Trading engine
+      // Feed real-time price to TradeManager, Grid Bot & Paper Trading engine
+      tradeManager.updateLivePrice(selectedCoin.binanceSymbol, price);
       gridTradingBot.onPriceTick(price, selectedCoin.binanceSymbol);
       paperTradingEngine.evaluatePrice(price, selectedCoin.binanceSymbol);
 
@@ -494,7 +545,7 @@ export default function App() {
 
         // Check if demo/paper trading or live execution
         if (!config.apiKey || !config.apiSecret) {
-          paperTradingEngine.executeOrder({
+          const pResult = paperTradingEngine.executeOrder({
             symbol: selectedCoin.binanceSymbol,
             entryPrice: price,
             atrValue: atrVal,
@@ -503,6 +554,23 @@ export default function App() {
             leverage: config.leverage,
             riskPercent: config.riskPercent,
           });
+
+          if (pResult.success && pResult.trade) {
+            tradeManager.addTrade({
+              symbol: pResult.trade.symbol,
+              entryPrice: pResult.trade.entryPrice,
+              currentPrice: price,
+              quantity: pResult.trade.quantity,
+              stopLossPrice: pResult.trade.stopLossPrice,
+              takeProfitPrice: pResult.trade.takeProfitPrice,
+              direction: pResult.trade.direction,
+              marketType: pResult.trade.marketType,
+              leverage: pResult.trade.leverage,
+              source: "AUTO-PILOT",
+              mode: "PAPER",
+              customId: pResult.trade.id,
+            });
+          }
         } else {
           autoTradeEngine.executeTrade({
             symbol: selectedCoin.binanceSymbol,
@@ -512,6 +580,23 @@ export default function App() {
             marketType: config.marketType,
             userEmail: user?.email,
             isPro: effectiveIsPro || isAdmin,
+          }).then((res) => {
+            if (res.success && res.trade) {
+              tradeManager.addTrade({
+                symbol: res.trade.symbol,
+                entryPrice: res.trade.entryPrice,
+                currentPrice: price,
+                quantity: res.trade.quantity,
+                stopLossPrice: res.trade.stopLossPrice,
+                takeProfitPrice: res.trade.takeProfitPrice,
+                direction: res.trade.direction,
+                marketType: res.trade.marketType,
+                leverage: res.trade.leverage,
+                source: "AUTO-PILOT",
+                mode: "REAL",
+                customId: res.trade.id,
+              });
+            }
           }).catch(() => {});
         }
 
@@ -524,15 +609,17 @@ export default function App() {
     });
 
     return () => unsub();
-  }, [selectedCoin.binanceSymbol, candles, htfTrendState, currentAtr, user?.email, effectiveIsPro, isAdmin]);
+  }, [user, selectedCoin.binanceSymbol, candles, htfTrendState, currentAtr, effectiveIsPro, isAdmin]);
 
   useEffect(() => {
+    if (!user) return;
     autoResolveSignals();
     const interval = setInterval(autoResolveSignals, 60000);
     return () => clearInterval(interval);
-  }, [autoResolveSignals]);
+  }, [user, autoResolveSignals]);
 
   useEffect(() => {
+    if (!user) return;
     let cancelled = false;
     async function loadFearGreed() {
       try {
@@ -548,7 +635,7 @@ export default function App() {
     loadFearGreed();
     const interval = setInterval(loadFearGreed, 300000);
     return () => { cancelled = true; clearInterval(interval); };
-  }, []);
+  }, [user]);
 
   const handleExplain = useCallback(async () => {
     if (!pattern || !lastPrice) return;
@@ -715,7 +802,7 @@ Followed by a 2-3 sentence strategic rationale.`;
         .map((s) => (s.status === "fulfilled" ? s.value : null))
         .filter((v): v is ScanResult => v !== null);
       setScanResults(results);
-      if (!isPro) {
+      if (!effectiveIsPro && !isAdmin) {
         incrementScanCount();
         setRemainingScans(getRemainingScans());
       }
@@ -724,14 +811,14 @@ Followed by a 2-3 sentence strategic rationale.`;
     } finally {
       setScanning(false);
     }
-  }, [isPro]);
+  }, [effectiveIsPro, isAdmin]);
 
   const handleScanClick = useCallback(() => {
     setScanPanelOpen(true);
     if (scanResults.length === 0 && !scanning) {
-      if (isPro) runScan();
+      if (effectiveIsPro || isAdmin) runScan();
     }
-  }, [isPro, scanResults.length, scanning, runScan]);
+  }, [effectiveIsPro, isAdmin, scanResults.length, scanning, runScan]);
 
   const handleFreeScan = useCallback(() => {
     if (canScan()) runScan();
@@ -761,6 +848,8 @@ Followed by a 2-3 sentence strategic rationale.`;
   const changePercent = priceChange ?? 0;
   const statsChange = marketStats?.priceChangePercent24h ?? changePercent;
   const tfLabel = TIMEFRAMES.find((t) => t.value === timeframe)?.label ?? "1H";
+
+  // Single top header Auto-Pilot toggle logic
   const handleHeaderToggleAutoPilot = useCallback(() => {
     if (!effectiveIsPro && !isAdmin) {
       setProModalOpen(true);
@@ -772,12 +861,26 @@ Followed by a 2-3 sentence strategic rationale.`;
     setAutoPilotActive(updated.autoPilotEnabled);
   }, [effectiveIsPro, isAdmin]);
 
-    const inWatch = watchSymbols.has(selectedCoin.binanceSymbol);
+  const inWatch = watchSymbols.has(selectedCoin.binanceSymbol);
+
+  // Authentication gate: show full AuthScreen until signed in
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-[#070b14] flex flex-col items-center justify-center text-white font-mono space-y-3">
+        <Loader2 className="w-8 h-8 animate-spin text-cyan-400" />
+        <span className="text-xs uppercase tracking-wider text-slate-400">Loading Fortress Terminal...</span>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <AuthScreen />;
+  }
 
   return (
     <div className="min-h-screen bg-slate-950 text-white flex flex-col lg:flex-row pb-16 lg:pb-0">
-      {/* Desktop sidebar */}
-      <aside className="hidden lg:flex flex-col w-56 border-r border-slate-800 bg-slate-950/80 shrink-0 sticky top-0 h-screen">
+      {/* Desktop sidebar with consolidated sections */}
+      <aside className="hidden lg:flex flex-col w-60 border-r border-slate-800 bg-slate-950/90 shrink-0 sticky top-0 h-screen overflow-y-auto">
         <div className="flex items-center gap-3 px-5 py-4 border-b border-slate-800">
           <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-500 to-cyan-400 flex items-center justify-center shrink-0">
             <Activity className="w-5 h-5 text-white" />
@@ -786,59 +889,65 @@ Followed by a 2-3 sentence strategic rationale.`;
             <h1 className="text-sm font-bold tracking-tight leading-none">
               PatternHunter <span className="text-cyan-400">AI</span>
             </h1>
-            <span className="text-[10px] text-slate-500 leading-none mt-1">Crypto Patterns</span>
+            <span className="text-[10px] text-slate-500 leading-none mt-1">Fortress Hedge Fund</span>
           </div>
         </div>
 
-        <nav className="flex-1 p-3 space-y-1">
-          {TABS.map((tab) => {
-            const Icon = tab.icon;
-            const active = activeTab === tab.key;
-            return (
-              <button
-                key={tab.key}
-                onClick={() => setActiveTab(tab.key)}
-                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
-                  active
-                    ? "bg-slate-800 text-white"
-                    : "text-slate-400 hover:text-white hover:bg-slate-800/50"
-                }`}
-              >
-                <Icon className={`w-4 h-4 ${active ? "text-cyan-400" : ""}`} />
-                {tab.label}
-              </button>
-            );
-          })}
+        {/* Consolidated Section Navigation */}
+        <nav className="flex-1 p-3 space-y-4">
+          {NAV_GROUPS.map((group) => (
+            <div key={group.groupTitle} className="space-y-1">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 px-3 block font-mono">
+                {group.groupTitle}
+              </span>
+              {group.items.map((tab) => {
+                const Icon = tab.icon;
+                const active = activeTab === tab.key;
+                return (
+                  <button
+                    key={tab.key}
+                    onClick={() => setActiveTab(tab.key)}
+                    className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-xs font-semibold transition-colors ${
+                      active
+                        ? "bg-slate-800 text-cyan-300 border border-cyan-500/30"
+                        : "text-slate-400 hover:text-white hover:bg-slate-800/50"
+                    }`}
+                  >
+                    <Icon className={`w-4 h-4 ${active ? "text-cyan-400" : ""}`} />
+                    <span>{tab.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          ))}
         </nav>
 
-        {/* Auth section */}
-        <div className="px-3 py-2 border-t border-slate-800">
-          {user ? (
-            <div className="flex items-center gap-2">
-              <div className="w-8 h-8 rounded-full bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center text-xs font-bold shrink-0">
-                {user.email?.slice(0, 2).toUpperCase() ?? "U"}
-              </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-xs font-medium text-white truncate">{user.email}</p>
-                <p className="text-[10px] text-slate-500">Signed in</p>
-              </div>
-              <button
-                onClick={() => supabase.auth.signOut()}
-                className="p-1.5 rounded-lg text-slate-400 hover:text-red-400 transition-colors"
-                title="Sign out"
-              >
-                <LogOut className="w-4 h-4" />
-              </button>
+        {/* User Account / Admin Badge section */}
+        <div className="px-3 py-2.5 border-t border-slate-800">
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-full bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center text-xs font-bold shrink-0">
+              {user.email?.slice(0, 2).toUpperCase() ?? "U"}
             </div>
-          ) : (
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-medium text-white truncate">{user.email}</p>
+              <p className="text-[10px] text-slate-500 flex items-center gap-1 font-mono">
+                {isAdmin ? (
+                  <span className="text-[#00ff66] font-bold">Admin Mode</span>
+                ) : effectiveIsPro ? (
+                  <span className="text-amber-400 font-bold">Pro Trader</span>
+                ) : (
+                  <span>Free Tier</span>
+                )}
+              </p>
+            </div>
             <button
-              onClick={() => setAuthModalOpen(true)}
-              className="w-full flex items-center justify-center gap-2 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-sm font-medium transition-colors"
+              onClick={() => supabase.auth.signOut()}
+              className="p-1.5 rounded-lg text-slate-400 hover:text-red-400 transition-colors"
+              title="Sign out"
             >
-              <UserIcon className="w-4 h-4 text-cyan-400" />
-              Sign In
+              <LogOut className="w-4 h-4" />
             </button>
-          )}
+          </div>
         </div>
 
         <div className="p-3 border-t border-slate-800 space-y-2">
@@ -859,30 +968,33 @@ Followed by a 2-3 sentence strategic rationale.`;
           </button>
           <button
             onClick={handleScanClick}
-            className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-sm font-medium transition-colors"
+            className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-medium transition-colors"
           >
             <Radar className="w-4 h-4 text-cyan-400" />
             Scan Top 50
-            {!effectiveIsPro && <Crown className="w-3.5 h-3.5 text-amber-400 ml-auto" />}
+            {!effectiveIsPro && !isAdmin && <Crown className="w-3.5 h-3.5 text-amber-400 ml-auto" />}
           </button>
+
+          {/* Admin Mode Badge vs Go Pro Button */}
           {isAdmin ? (
-            <div className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-emerald-500/20 border border-emerald-500/50 text-[#00ff66] text-xs font-black uppercase tracking-wider shadow-lg shadow-emerald-950/40">
-              <span>👑 ADMIN MODE ACTIVE</span>
+            <div className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-emerald-500/20 border border-emerald-500/50 text-[#00ff66] text-xs font-black uppercase tracking-wider shadow-lg shadow-emerald-950/40 font-mono">
+              <span>👑 ADMIN MODE</span>
             </div>
           ) : !effectiveIsPro ? (
             <button
               onClick={() => window.open("https://inamkhan08.gumroad.com/l/idbxpj", "_blank", "noopener,noreferrer")}
-              className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-900 text-sm font-bold transition-all shadow-md shadow-amber-950/30"
+              className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-900 text-xs font-bold transition-all shadow-md shadow-amber-950/30"
             >
               <Crown className="w-4 h-4" />
               Go Pro
             </button>
           ) : (
-            <div className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-cyan-500/20 border border-cyan-500/40 text-cyan-300 text-xs font-bold uppercase tracking-wider">
+            <div className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-cyan-500/20 border border-cyan-500/40 text-cyan-300 text-xs font-bold uppercase tracking-wider font-mono">
               <Crown className="w-3.5 h-3.5 text-amber-400" />
               Pro Active
             </div>
           )}
+
           <button
             onClick={() => setSettingsOpen(true)}
             className="w-full flex items-center justify-between px-3 py-2 rounded-lg bg-slate-800/80 hover:bg-slate-700/80 border border-slate-700 text-xs text-slate-300 font-medium transition-colors"
@@ -910,13 +1022,25 @@ Followed by a 2-3 sentence strategic rationale.`;
               </h1>
             </div>
             <div className="flex items-center gap-2">
+              {/* Single Auto-Pilot Toggle on Mobile Header */}
+              <button
+                onClick={handleHeaderToggleAutoPilot}
+                className={`px-2.5 py-1.5 rounded-lg text-xs font-black uppercase tracking-wider flex items-center gap-1.5 border font-mono ${
+                  autoPilotActive
+                    ? "bg-emerald-500/20 text-[#00ff66] border-emerald-400 animate-pulse"
+                    : "bg-red-500/10 text-red-400 border-red-500/40"
+                }`}
+              >
+                <Power className="w-3.5 h-3.5" />
+                <span>{autoPilotActive ? "ON" : "OFF"}</span>
+              </button>
+
               <button
                 onClick={() => setVisionAIOpen(true)}
                 className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold transition-colors"
                 title="Vision AI Chart Upload"
               >
                 <Eye className="w-3.5 h-3.5 text-white" />
-                <span>Vision</span>
               </button>
               <button
                 onClick={() => setSettingsOpen(true)}
@@ -926,8 +1050,8 @@ Followed by a 2-3 sentence strategic rationale.`;
                 <SettingsIcon className="w-4 h-4 text-cyan-400" />
               </button>
               {isAdmin ? (
-                <div className="px-2.5 py-1.5 rounded-lg bg-emerald-500/20 border border-emerald-500/50 text-[#00ff66] text-xs font-black flex items-center gap-1">
-                  <span>👑 ADMIN</span>
+                <div className="px-2.5 py-1.5 rounded-lg bg-emerald-500/20 border border-emerald-500/50 text-[#00ff66] text-xs font-black flex items-center gap-1 font-mono">
+                  <span>👑 ADMIN MODE</span>
                 </div>
               ) : !effectiveIsPro ? (
                 <button
@@ -938,7 +1062,7 @@ Followed by a 2-3 sentence strategic rationale.`;
                   <span>Go Pro</span>
                 </button>
               ) : (
-                <div className="px-2.5 py-1.5 rounded-lg bg-cyan-500/20 border border-cyan-500/40 text-cyan-300 text-xs font-bold flex items-center gap-1">
+                <div className="px-2.5 py-1.5 rounded-lg bg-cyan-500/20 border border-cyan-500/40 text-cyan-300 text-xs font-bold flex items-center gap-1 font-mono">
                   <Crown className="w-3.5 h-3.5 text-amber-400" />
                   <span>Pro</span>
                 </div>
@@ -1117,6 +1241,7 @@ Followed by a 2-3 sentence strategic rationale.`;
                   <Eye className="w-3.5 h-3.5 text-slate-950" />
                   <span>Vision AI</span>
                 </button>
+
                 {/* System Status Badges */}
                 <div className="hidden sm:flex items-center gap-1.5 font-mono text-[10px]">
                   {/* Execution Mode Badge */}
@@ -1164,23 +1289,23 @@ Followed by a 2-3 sentence strategic rationale.`;
                   <span>AI Swarm</span>
                 </button>
 
-                {/* Highly Visible Auto-Pilot Toggle Button */}
+                {/* ONE Prominent AUTO-PILOT Toggle Button in the Top Header */}
                 <button
                   onClick={handleHeaderToggleAutoPilot}
-                  className={`px-3 py-1.5 rounded-lg font-black text-xs uppercase tracking-wider flex items-center gap-2 transition-all border ${
+                  className={`px-3 py-1.5 rounded-lg font-black text-xs uppercase tracking-wider flex items-center gap-2 transition-all border font-mono ${
                     autoPilotActive
                       ? "bg-emerald-500/20 text-[#00ff66] border-emerald-400 shadow-[0_0_15px_rgba(0,255,102,0.4)] animate-pulse"
                       : "bg-red-500/10 text-red-400 border-red-500/50 hover:bg-red-500/20"
                   }`}
-                  title={autoPilotActive ? "Click to Pause Auto-Pilot" : "Click to Enable Auto-Pilot (High Confluence Signals > 85)"}
+                  title={autoPilotActive ? "Auto-Pilot is ON. Click to pause." : "Auto-Pilot is OFF. Click to enable high confluence execution."}
                 >
                   <Power className={`w-3.5 h-3.5 ${autoPilotActive ? "text-[#00ff66]" : "text-red-400"}`} />
                   <span>AUTO-PILOT: {autoPilotActive ? "ON" : "OFF"}</span>
                 </button>
 
                 {isAdmin && (
-                  <div className="hidden md:flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/20 border border-emerald-500/50 text-[#00ff66] font-black text-xs uppercase tracking-wider shadow-md shadow-emerald-950/30">
-                    <span>👑 ADMIN MODE ACTIVE</span>
+                  <div className="hidden md:flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/20 border border-emerald-500/50 text-[#00ff66] font-black text-xs uppercase tracking-wider shadow-md shadow-emerald-950/30 font-mono">
+                    <span>👑 ADMIN MODE</span>
                   </div>
                 )}
                 <button
@@ -1328,6 +1453,14 @@ Followed by a 2-3 sentence strategic rationale.`;
             </div>
           )}
 
+          {/* New Active Positions & Trade History Tab */}
+          {activeTab === "positions" && (
+            <ActivePositions
+              currentSymbol={selectedCoin.binanceSymbol}
+              currentPrice={lastPrice}
+            />
+          )}
+
           {activeTab === "scanner" && (
             <MarketScanner
               timeframe={timeframe}
@@ -1430,7 +1563,7 @@ Followed by a 2-3 sentence strategic rationale.`;
       {/* Bottom navigation (mobile) */}
       <nav className="lg:hidden fixed bottom-0 inset-x-0 z-50 bg-slate-950/95 backdrop-blur-xl border-t border-slate-800">
         <div className="flex items-center justify-around px-2 py-2">
-          {TABS.map((tab) => {
+          {MOBILE_TABS.map((tab) => {
             const Icon = tab.icon;
             const active = activeTab === tab.key;
             return (
@@ -1438,7 +1571,7 @@ Followed by a 2-3 sentence strategic rationale.`;
                 key={tab.key}
                 onClick={() => setActiveTab(tab.key)}
                 className={`flex flex-col items-center gap-1 px-2 sm:px-3 py-1.5 rounded-lg transition-colors ${
-                  active ? "text-cyan-400" : "text-slate-500 hover:text-slate-300"
+                  active ? "text-cyan-400 font-bold" : "text-slate-500 hover:text-slate-300"
                 }`}
               >
                 <Icon className="w-5 h-5" />
@@ -1479,22 +1612,21 @@ Followed by a 2-3 sentence strategic rationale.`;
           setAutoTradeOpen(true);
         }}
       />
-      <AuthModal
-        open={authModalOpen}
-        onClose={() => setAuthModalOpen(false)}
-      />
-      <ProModal
-        open={proModalOpen}
-        onClose={() => setProModalOpen(false)}
-        isPro={effectiveIsPro}
-      />
+      {/* Pro Modal only accessible if NOT admin */}
+      {!isAdmin && (
+        <ProModal
+          open={proModalOpen}
+          onClose={() => setProModalOpen(false)}
+          isPro={effectiveIsPro}
+        />
+      )}
       <ScanPanel
         open={scanPanelOpen}
         onClose={() => setScanPanelOpen(false)}
         scanning={scanning}
         results={scanResults}
         error={scanError}
-        isPro={effectiveIsPro}
+        isPro={effectiveIsPro || isAdmin}
         remainingScans={remainingScans}
         onSelectCoin={selectCoinFromScan}
         onFreeScan={handleFreeScan}
@@ -1510,6 +1642,7 @@ Followed by a 2-3 sentence strategic rationale.`;
       {/* System Settings & PWA Installation Modal */}
       <SettingsModal
         open={settingsOpen}
+        isAdmin={isAdmin}
         onClose={() => setSettingsOpen(false)}
         onOpenAutoTrade={() => setAutoTradeOpen(true)}
         onOpenVisionAI={() => setVisionAIOpen(true)}

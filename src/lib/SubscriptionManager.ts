@@ -31,7 +31,7 @@ function getTodayString(): string {
 }
 
 export function isUserAdmin(email?: string | null): boolean {
-  if (!email) return false;
+  if (!email || typeof email !== "string") return false;
   return email.trim().toLowerCase() === ADMIN_BYPASS_EMAIL.toLowerCase();
 }
 
@@ -39,7 +39,7 @@ export function isUserPro(email?: string | null, manualProState: boolean = false
   if (isUserAdmin(email)) {
     return true;
   }
-  return manualProState;
+  return Boolean(manualProState);
 }
 
 export function getProDailyTradeLimit(): ProDailyTradeLimit {

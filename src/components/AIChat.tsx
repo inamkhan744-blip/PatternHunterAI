@@ -1,7 +1,8 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Send, Mic, Loader2, Sparkles, Trash2, Volume2 } from "lucide-react";
+import { Send, Mic, Loader2, Sparkles, Trash2, Volume2, Cpu } from "lucide-react";
 import type { ChatMessage, Coin } from "../types";
 import { COINS, PRO_COINS } from "../constants";
+import { getGeminiApiKey, getSelectedModel } from "../lib/ModelManager";
 
 interface Props {
   coin: Coin;
@@ -93,12 +94,77 @@ export default function AIChat({
       }
     }
 
+    // Check if user has provided local Gemini API key
+    const localGeminiKey = getGeminiApiKey();
+    const localModel = getSelectedModel() || "gemini-2.0-flash";
+
+    if (localGeminiKey) {
+      try {
+        const contextStr = `Current market context:
+- Coin: ${marketContext.coin}
+- Price: ${marketContext.price ? "$" + marketContext.price : "N/A"}
+- 24h Change: ${marketContext.change24h ? marketContext.change24h + "%" : "N/A"}
+- RSI: ${marketContext.rsi ?? "N/A"}
+- Trend: ${marketContext.trend ?? "N/A"}
+- Detected Pattern: ${marketContext.pattern ?? "None"}
+- Fear & Greed Index: ${marketContext.fearGreed ?? "N/A"}`;
+
+        const historyStr = messages.slice(-6).map((m) => `${m.role}: ${m.content}`).join("\n");
+
+        const prompt = `You are PatternHunter AI, an institutional crypto trading assistant.
+${contextStr}
+
+${historyStr ? "Conversation:\n" + historyStr : ""}
+User: ${text}
+
+Guidelines:
+- If user requests to show or view a chart (e.g. "show BTC chart"), append "[ACTION:show_chart:SYMBOL]".
+- Keep answers concise, actionable, and mathematically grounded.
+- Mention entry, stop loss, or target when relevant.
+- Educational only, not financial advice.`;
+
+        const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(localModel)}:generateContent?key=${encodeURIComponent(localGeminiKey)}`;
+        const geminiRes = await fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: { temperature: 0.5, maxOutputTokens: 400 },
+          }),
+        });
+
+        if (geminiRes.ok) {
+          const geminiData = await geminiRes.json();
+          const replyText = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (replyText) {
+            const actionTag = replyText.match(/\[ACTION:show_chart:(\w+)\]/);
+            if (actionTag) {
+              const sym = actionTag[1].toUpperCase();
+              onShowCoin(sym);
+            }
+            const cleanText = replyText.replace(/\[ACTION:show_chart:\w+\]/g, "").trim();
+            const reply: ChatMessage = { role: "assistant", content: cleanText, timestamp: Date.now() };
+            setMessages((prev) => [...prev, reply]);
+            setLoading(false);
+            return;
+          }
+        }
+      } catch {
+        // Fallback to Supabase below
+      }
+    }
+
     try {
-      const apiUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ai-chat`;
+      const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+      const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+      if (!supabaseUrl || supabaseUrl.includes("placeholder")) {
+        throw new Error("Supabase URL not configured");
+      }
+      const apiUrl = `${supabaseUrl}/functions/v1/ai-chat`;
       const res = await fetch(apiUrl, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
+          Authorization: `Bearer ${supabaseKey}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
@@ -110,13 +176,7 @@ export default function AIChat({
 
       const data = await res.json();
       if (data.unavailable || !res.ok) {
-        setError("AI is currently unavailable. Please try again.");
-        const reply: ChatMessage = {
-          role: "assistant",
-          content: `I can't reach the AI service right now, but here's what I see: ${coin.symbol} is at ${price ? "$" + price.toFixed(2) : "N/A"}, RSI: ${rsi?.toFixed(1) ?? "N/A"}, Trend: ${trend ?? "N/A"}, Pattern: ${pattern ?? "None"}. Please try again in a moment.`,
-          timestamp: Date.now(),
-        };
-        setMessages((prev) => [...prev, reply]);
+        throw new Error("AI edge unavailable");
       } else {
         const replyText: string = data.response;
         const actionTag = replyText.match(/\[ACTION:show_chart:(\w+)\]/);
@@ -129,7 +189,12 @@ export default function AIChat({
         setMessages((prev) => [...prev, reply]);
       }
     } catch {
-      setError("Network error. Please check your connection.");
+      const reply: ChatMessage = {
+        role: "assistant",
+        content: `Direct Technical Overview: ${coin.symbol} is currently trading at ${price ? "$" + price.toFixed(2) : "N/A"}. Market metrics show RSI: ${rsi?.toFixed(1) ?? "N/A"}, Trend structure: ${trend ?? "Consolidation"}, Active Pattern: ${pattern ?? "None detected"}. Connect your Gemini API Key in Settings for deep live neural analysis!`,
+        timestamp: Date.now(),
+      };
+      setMessages((prev) => [...prev, reply]);
     } finally {
       setLoading(false);
     }

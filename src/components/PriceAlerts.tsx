@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Bell, Plus, Trash2, Loader2, Check, AlertCircle } from "lucide-react";
+import { Bell, Plus, Trash2, Loader2, Check, AlertCircle, Volume2, Globe } from "lucide-react";
 import { fetchCandles } from "../lib/binance";
 import { formatPrice } from "../lib/patterns";
 import { COINS, PRO_COINS } from "../constants";
@@ -34,11 +34,37 @@ interface Props {
   onSelectCoin: (coin: Coin) => void;
 }
 
+interface ExtendedPriceAlert extends PriceAlert {
+  webhookUrl?: string;
+}
+
+function playAlertChime() {
+  try {
+    const AudioContextClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    if (!AudioContextClass) return;
+    const ctx = new AudioContextClass();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(587.33, ctx.currentTime); // D5
+    osc.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.15); // A5
+    gain.gain.setValueAtTime(0.3, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.4);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.4);
+  } catch {
+    // audio context blocked by browser
+  }
+}
+
 export default function PriceAlerts({ onSelectCoin }: Props) {
-  const [alerts, setAlerts] = useState<PriceAlert[]>([]);
+  const [alerts, setAlerts] = useState<ExtendedPriceAlert[]>([]);
   const [coin, setCoin] = useState<Coin>(COINS[0]);
   const [target, setTarget] = useState("");
   const [direction, setDirection] = useState<"above" | "below">("above");
+  const [webhookUrl, setWebhookUrl] = useState("");
   const [checking, setChecking] = useState(false);
 
   useEffect(() => {
@@ -48,7 +74,7 @@ export default function PriceAlerts({ onSelectCoin }: Props) {
   const checkAlerts = useCallback(async () => {
     if (alerts.length === 0) return;
     setChecking(true);
-    const updated: PriceAlert[] = [];
+    const updated: ExtendedPriceAlert[] = [];
     for (const alert of alerts) {
       if (alert.triggered) {
         updated.push(alert);
@@ -58,6 +84,24 @@ export default function PriceAlerts({ onSelectCoin }: Props) {
         const data = await fetchCandles(alert.binance_symbol, 1, "1m");
         const price = data[0]?.close ?? alert.current_price;
         const hit = alert.direction === "above" ? price >= alert.target_price : price <= alert.target_price;
+        if (hit) {
+          playAlertChime();
+          // Dispatch webhook if configured
+          if (alert.webhookUrl && alert.webhookUrl.startsWith("http")) {
+            fetch(alert.webhookUrl, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                event: "PRICE_ALERT_TRIGGERED",
+                symbol: alert.coin_symbol,
+                targetPrice: alert.target_price,
+                currentPrice: price,
+                direction: alert.direction,
+                timestamp: new Date().toISOString(),
+              }),
+            }).catch(() => {});
+          }
+        }
         updated.push({ ...alert, current_price: price, triggered: hit });
       } catch {
         updated.push(alert);
@@ -71,7 +115,7 @@ export default function PriceAlerts({ onSelectCoin }: Props) {
   const addAlert = useCallback(() => {
     const tp = parseFloat(target);
     if (isNaN(tp) || tp <= 0) return;
-    const newAlert: PriceAlert = {
+    const newAlert: ExtendedPriceAlert = {
       id: uid(),
       coin_symbol: coin.symbol,
       binance_symbol: coin.binanceSymbol,
@@ -80,12 +124,14 @@ export default function PriceAlerts({ onSelectCoin }: Props) {
       current_price: 0,
       triggered: false,
       created_at: new Date().toISOString(),
+      webhookUrl: webhookUrl.trim() || undefined,
     };
     const updated = [...alerts, newAlert];
     setAlerts(updated);
     saveAlerts(updated);
     setTarget("");
-  }, [alerts, coin, target, direction]);
+    setWebhookUrl("");
+  }, [alerts, coin, target, direction, webhookUrl]);
 
   const removeAlert = useCallback((id: string) => {
     const updated = alerts.filter((a) => a.id !== id);
@@ -159,16 +205,26 @@ export default function PriceAlerts({ onSelectCoin }: Props) {
               <option value="below">Price goes below</option>
             </select>
           </div>
-          <div className="flex items-end">
-            <button
-              onClick={addAlert}
-              disabled={!target || parseFloat(target) <= 0}
-              className="w-full flex items-center justify-center gap-2 py-2 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-900 text-sm font-bold transition-colors disabled:opacity-50"
-            >
-              <Plus className="w-4 h-4" />
-              Add Alert
-            </button>
+          <div>
+            <label className="text-xs text-slate-500 mb-1 block">Webhook URL (Optional)</label>
+            <input
+              type="url"
+              value={webhookUrl}
+              onChange={(e) => setWebhookUrl(e.target.value)}
+              placeholder="https://discord.com/api/webhooks/..."
+              className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder:text-slate-600 outline-none focus:border-cyan-500"
+            />
           </div>
+        </div>
+        <div className="mt-3 flex justify-end">
+          <button
+            onClick={addAlert}
+            disabled={!target || parseFloat(target) <= 0}
+            className="flex items-center justify-center gap-2 px-6 py-2 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-900 text-sm font-bold transition-colors disabled:opacity-50"
+          >
+            <Plus className="w-4 h-4" />
+            Add Alert
+          </button>
         </div>
       </div>
 

@@ -61,7 +61,9 @@ import SwarmTerminal from "./components/SwarmTerminal";
 import Backtesting from "./components/Backtesting";
 import VisionAIUpload from "./components/VisionAIUpload";
 import SettingsModal from "./components/SettingsModal";
-import { Settings as SettingsIcon, Eye, Download } from "lucide-react";
+import OrderBook from "./components/OrderBook";
+import PnLCalendar from "./components/PnLCalendar";
+import { Settings as SettingsIcon, Eye, Download, BookOpen, Calendar as CalendarIcon, Wifi } from "lucide-react";
 import type { Candle, Coin, DetectedPattern, ScanResult, Timeframe, WatchlistItem, AppTab, MarketStats, PatternWithConfidence } from "./types";
 
 const TIMEFRAMES: { value: Timeframe; label: string }[] = [
@@ -75,6 +77,7 @@ const TIMEFRAMES: { value: Timeframe; label: string }[] = [
 
 const TABS: { key: AppTab; label: string; icon: typeof ChartIcon }[] = [
   { key: "chart", label: "Chart", icon: ChartIcon },
+  { key: "depth", label: "Order Book", icon: BookOpen },
   { key: "arbitrage", label: "Arbitrage", icon: ArrowUpRight },
   { key: "backtest", label: "Backtest Lab", icon: BarChart3 },
   { key: "scanner", label: "Scanner", icon: List },
@@ -1067,8 +1070,17 @@ export default function App() {
             <Backtesting coin={selectedCoin} timeframe={timeframe} />
           )}
 
+          {activeTab === "depth" && (
+            <OrderBook symbol={selectedCoin.binanceSymbol} />
+          )}
+
           {activeTab === "portfolio" && (
-            <Portfolio />
+            <div className="space-y-6">
+              <Portfolio />
+              <div className="max-w-7xl mx-auto px-4 sm:px-6">
+                <PnLCalendar />
+              </div>
+            </div>
           )}
         </main>
 

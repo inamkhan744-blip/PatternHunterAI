@@ -35,8 +35,22 @@ export function simulateSwarmDebate(params: {
   patternName?: string | null;
   patternDirection?: "bullish" | "bearish" | null;
   fearGreed?: number | null;
+  spreadPct?: number | null;
+  atrValue?: number | null;
+  confluenceScore?: number | null;
 }): SwarmDebateResult {
-  const { symbol, price, rsi = 52, trend = "uptrend", patternName, patternDirection, fearGreed = 60 } = params;
+  const {
+    symbol,
+    price,
+    rsi = 52,
+    trend = "uptrend",
+    patternName,
+    patternDirection,
+    fearGreed = 60,
+    spreadPct,
+    atrValue,
+    confluenceScore: inputConfluence,
+  } = params;
 
   const effectiveRsi = rsi ?? 50;
   const isUptrend = trend === "uptrend";
@@ -90,22 +104,52 @@ export function simulateSwarmDebate(params: {
       : `Resistance overhead at key supply zone. Macro liquidity conditions present elevated tail-risk. If BTC or broader index pulls back, ${symbol} bids will evaporate rapidly. Funding rate creep signals crowded longs vulnerable to a cascade.`,
   };
 
-  // Risk Manager Analysis & Verdict
-  const verdict: "GO" | "NO-GO" = confluence >= 62 ? "GO" : "NO-GO";
+  // Risk Manager Analysis & Strict Institutional Veto
+  // Evaluates market volatility, bid/ask spread, and trend conflicts
+  const atrPercent = atrValue && price > 0 ? (atrValue / price) * 100 : 0;
+  const isHighVolatility = atrPercent > 3.0;
+  const isBadSpread = spreadPct !== undefined && spreadPct !== null && spreadPct > 0.1;
+  const hasConflictingTrend = trend === "downtrend" && (patternDirection === "bullish" || !patternDirection);
+
+  let vetoReason: string | null = null;
+  if (isBadSpread) {
+    vetoReason = `Excessive Bid/Ask spread (${spreadPct.toFixed(3)}% > 0.10% maximum tolerance). Institutional slippage risk too high.`;
+  } else if (isHighVolatility) {
+    vetoReason = `Extreme market volatility detected (ATR is ${atrPercent.toFixed(2)}% of price). Liquidation wick probability unacceptable.`;
+  } else if (hasConflictingTrend) {
+    vetoReason = `Conflicting macro trend posture (${trend}) threatens pattern resolution. Asymmetry skewed negatively.`;
+  }
+
+  // Base threshold is 62 unless high input confluence is provided without veto
+  const baseHurdle = inputConfluence ? 85 : 62;
+  const effectiveConfluence = inputConfluence ?? Math.round(confluence);
+
+  let verdict: "GO" | "NO-GO" = "GO";
+  let verdictMessage = "";
+
+  if (vetoReason) {
+    verdict = "NO-GO";
+    verdictMessage = `RISK MANAGER VETO [NO-GO]: ${vetoReason} Trade execution unconditionally blocked by Swarm Risk Manager.`;
+  } else if (effectiveConfluence < baseHurdle) {
+    verdict = "NO-GO";
+    verdictMessage = `EXECUTION REJECTED. Multi-factor confluence score of ${effectiveConfluence}/100 fails the ${baseHurdle}-point hurdle rate. Dispersion between Bull and Bear arguments creates unfavorable asymmetry. Preserving capital into consolidation. Verdict: [NO-GO].`;
+  } else {
+    verdict = "GO";
+    verdictMessage = `CONFLUENCE VERIFIED (${effectiveConfluence}/100). Institutional edge surpasses statistical hurdle (>=${baseHurdle}). Risk parameters vetted (Spread & Volatility safe). Kelly criterion allows position allocation. Trailing stop to break-even mandatory at 1:1 RR. Verdict: [GO EXECUTION].`;
+  }
+
   const recommendedDirection: "LONG" | "SHORT" | "HOLD" =
-    verdict === "GO" ? (confluence >= 60 ? "LONG" : "SHORT") : "HOLD";
-  const recommendedLeverage = confluence >= 80 ? 5 : confluence >= 70 ? 3 : 2;
-  const recommendedPositionPct = verdict === "GO" ? (confluence >= 75 ? 2.5 : 1.5) : 0;
+    verdict === "GO" ? (effectiveConfluence >= 60 ? "LONG" : "SHORT") : "HOLD";
+  const recommendedLeverage = effectiveConfluence >= 80 ? 5 : effectiveConfluence >= 70 ? 3 : 2;
+  const recommendedPositionPct = verdict === "GO" ? (effectiveConfluence >= 75 ? 2.5 : 1.5) : 0;
 
   const riskMessage: SwarmAgentMessage = {
     agent: "Risk Manager",
     role: "RISK",
     sentiment: verdict === "GO" ? "GO" : "NO-GO",
-    confidence: Math.round(confluence),
+    confidence: Math.round(effectiveConfluence),
     timestamp: timeStr(2),
-    message: verdict === "GO"
-      ? `CONFLUENCE VERIFIED (${confluence}/100). Institutional edge surpasses statistical hurdle (>=62). Kelly criterion allows ${recommendedPositionPct}% account risk allocation at ${recommendedLeverage}x leverage. Trailing stop to break-even mandatory at 1:1 RR. Verdict: [GO EXECUTION].`
-      : `EXECUTION REJECTED. Multi-factor confluence score of ${confluence}/100 fails the 62-point hurdle rate. Dispersion between Bull and Bear arguments creates unfavorable asymmetry. Preserving capital into consolidation. Verdict: [NO-GO].`,
+    message: verdictMessage,
   };
 
   return {

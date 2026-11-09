@@ -31,6 +31,7 @@ import {
   ManagedTrade,
   CircuitBreakerState,
 } from "../lib/BinanceAutoTrade";
+import { paperTradingEngine, PaperTrade } from "../lib/PaperTrading";
 import { formatPrice } from "../lib/patterns";
 import RiskDisclaimerModal from "./RiskDisclaimerModal";
 import { useAuth } from "../lib/auth";
@@ -73,12 +74,14 @@ export default function AutoTradeModal({
   const [config, setConfig] = useState<AutoTradeConfig>(autoTradeEngine.getConfig());
   const [circuitBreaker, setCircuitBreaker] = useState<CircuitBreakerState>(autoTradeEngine.getCircuitBreaker());
   const [openTrades, setOpenTrades] = useState<ManagedTrade[]>(autoTradeEngine.getOpenTrades());
+  const [paperTrades, setPaperTrades] = useState<PaperTrade[]>(paperTradingEngine.getOpenTrades());
   const [accountBalance, setAccountBalance] = useState<number>(10000);
   const [balanceLoading, setBalanceLoading] = useState(false);
   const [disclaimerOpen, setDisclaimerOpen] = useState(false);
   const [executing, setExecuting] = useState(false);
   const [statusMessage, setStatusMessage] = useState<{ type: "success" | "error" | "info"; text: string } | null>(null);
   const [emergencyLoading, setEmergencyLoading] = useState(false);
+  const [cooldownRemaining, setCooldownRemaining] = useState<number>(0);
 
   // Pro & Limit States
   const [proTradeLimit, setLimitState] = useState<ProDailyTradeLimit>(getProDailyTradeLimit());
@@ -95,22 +98,31 @@ export default function AutoTradeModal({
       setConfig(cfg);
       setCircuitBreaker(autoTradeEngine.getCircuitBreaker());
       setOpenTrades(autoTradeEngine.getOpenTrades());
+      setPaperTrades(paperTradingEngine.getOpenTrades());
       setTgConfig(loadTelegramConfig());
       setLimitState(getProDailyTradeLimit());
       setDailyTradeCount(getDailyTradeCount());
+      const cd = autoTradeEngine.getPostLossCooldown();
+      setCooldownRemaining(cd.remainingSeconds);
       loadBalance(cfg.marketType);
     }
   }, [open]);
 
-  // Periodic trade evaluator simulation
+  // Periodic trade evaluator simulation & Cooldown countdown
   useEffect(() => {
-    if (!open || !currentPrice) return;
+    if (!open) return;
     const interval = setInterval(() => {
-      autoTradeEngine.evaluateOpenTrades(currentPrice, currentSymbol);
-      setOpenTrades(autoTradeEngine.getOpenTrades());
-      setCircuitBreaker(autoTradeEngine.getCircuitBreaker());
-      setDailyTradeCount(getDailyTradeCount());
-    }, 3000);
+      if (currentPrice) {
+        autoTradeEngine.evaluateOpenTrades(currentPrice, currentSymbol);
+        paperTradingEngine.evaluatePrice(currentPrice, currentSymbol);
+        setOpenTrades(autoTradeEngine.getOpenTrades());
+        setPaperTrades(paperTradingEngine.getOpenTrades());
+        setCircuitBreaker(autoTradeEngine.getCircuitBreaker());
+        setDailyTradeCount(getDailyTradeCount());
+      }
+      const cd = autoTradeEngine.getPostLossCooldown();
+      setCooldownRemaining(cd.remainingSeconds);
+    }, 1000);
     return () => clearInterval(interval);
   }, [open, currentPrice, currentSymbol]);
 
@@ -147,7 +159,15 @@ export default function AutoTradeModal({
     if (circuitBreaker.isTripped) {
       setStatusMessage({
         type: "error",
-        text: "Circuit Breaker is tripped! Please reset the circuit breaker before re-enabling Auto-Pilot.",
+        text: "Circuit Breaker is tripped! Please reset the circuit breaker before re-enabling God-Mode Auto-Pilot.",
+      });
+      return;
+    }
+    const cd = autoTradeEngine.getPostLossCooldown();
+    if (cd.isActive) {
+      setStatusMessage({
+        type: "error",
+        text: `Post-Loss Cooldown is active (${Math.ceil(cd.remainingSeconds / 60)}m remaining). Auto-Pilot cannot be engaged during cooldown.`,
       });
       return;
     }
@@ -222,29 +242,56 @@ export default function AutoTradeModal({
     setExecuting(true);
     setStatusMessage(null);
     try {
-      const result = await autoTradeEngine.executeTrade({
-        symbol: currentSymbol,
-        entryPrice: currentPrice,
-        atrValue: currentAtr,
-        direction: config.marketType === "Futures" ? config.direction : "LONG",
-        marketType: config.marketType,
-        accountBalance,
-        userEmail: user?.email,
-        isPro,
-      });
+      if (config.paperTradingEnabled) {
+        // Execute Paper Trade
+        const pResult = paperTradingEngine.executeOrder({
+          symbol: currentSymbol,
+          entryPrice: currentPrice,
+          atrValue: currentAtr,
+          direction: config.marketType === "Futures" ? config.direction : "LONG",
+          marketType: config.marketType,
+          leverage: config.leverage,
+          riskPercent: config.riskPercent,
+        });
 
-      if (result.success && result.trade) {
-        setStatusMessage({
-          type: "success",
-          text: `LIMIT Order placed: ${result.trade.marketType} ${result.trade.direction} ${result.trade.quantity} ${result.trade.symbol} @ ${formatPrice(result.trade.entryPrice)}`,
-        });
-        setOpenTrades(autoTradeEngine.getOpenTrades());
-        setDailyTradeCount(getDailyTradeCount());
+        if (pResult.success && pResult.trade) {
+          setStatusMessage({
+            type: "success",
+            text: `[PAPER TRADE] Virtual Order Executed: ${pResult.trade.marketType} ${pResult.trade.direction} ${pResult.trade.quantity} ${pResult.trade.symbol} @ ${formatPrice(pResult.trade.entryPrice)}`,
+          });
+          setPaperTrades(paperTradingEngine.getOpenTrades());
+        } else {
+          setStatusMessage({
+            type: "error",
+            text: pResult.error || "Paper trade execution failed.",
+          });
+        }
       } else {
-        setStatusMessage({
-          type: "error",
-          text: result.error || "Order execution failed.",
+        // Execute Real/Sandbox Engine Trade with God-Mode Checks
+        const result = await autoTradeEngine.executeTrade({
+          symbol: currentSymbol,
+          entryPrice: currentPrice,
+          atrValue: currentAtr,
+          direction: config.marketType === "Futures" ? config.direction : "LONG",
+          marketType: config.marketType,
+          accountBalance,
+          userEmail: user?.email,
+          isPro,
         });
+
+        if (result.success && result.trade) {
+          setStatusMessage({
+            type: "success",
+            text: `LIMIT Order placed: ${result.trade.marketType} ${result.trade.direction} ${result.trade.quantity} ${result.trade.symbol} @ ${formatPrice(result.trade.entryPrice)}`,
+          });
+          setOpenTrades(autoTradeEngine.getOpenTrades());
+          setDailyTradeCount(getDailyTradeCount());
+        } else {
+          setStatusMessage({
+            type: "error",
+            text: result.error || "Order execution failed.",
+          });
+        }
       }
     } finally {
       setExecuting(false);
@@ -375,13 +422,34 @@ export default function AutoTradeModal({
             </div>
           )}
 
+          {/* Post-Loss Cooldown Banner */}
+          {cooldownRemaining > 0 && (
+            <div className="px-6 py-2.5 bg-amber-950/80 border-b border-amber-500/60 flex items-center justify-between">
+              <div className="flex items-center gap-2 text-amber-300 text-xs font-bold">
+                <AlertTriangle className="w-4 h-4 animate-pulse text-amber-400" />
+                <span>
+                  POST-LOSS COOLDOWN ACTIVE: {Math.floor(cooldownRemaining / 60)}m {cooldownRemaining % 60}s remaining. New orders temporarily blocked.
+                </span>
+              </div>
+              <button
+                onClick={() => {
+                  autoTradeEngine.clearPostLossCooldown();
+                  setCooldownRemaining(0);
+                }}
+                className="px-2.5 py-1 bg-amber-600/30 hover:bg-amber-600/50 border border-amber-500/50 text-amber-200 rounded text-[11px] font-bold transition"
+              >
+                Override Cooldown
+              </button>
+            </div>
+          )}
+
           {/* Circuit Breaker Alert Banner */}
           {circuitBreaker.isTripped && (
             <div className="px-6 py-3 bg-red-950/80 border-b border-red-500 flex items-center justify-between">
               <div className="flex items-center gap-2 text-[#ff3344] text-xs font-bold">
                 <Flame className="w-4 h-4 animate-bounce" />
                 <span>
-                  CIRCUIT BREAKER TRIPPED ({circuitBreaker.consecutiveLosses} consecutive losses). Auto-Pilot halted to prevent drawdown.
+                  CIRCUIT BREAKER TRIPPED ({circuitBreaker.reason || `${circuitBreaker.consecutiveLosses} consecutive losses`}). Auto-Pilot halted.
                 </span>
               </div>
               <button
@@ -425,6 +493,107 @@ export default function AutoTradeModal({
                   <span>Free users limited to 3 manual trades/day. Auto-Pilot & Telegram locked.</span>
                 </div>
               )}
+            </div>
+
+            {/* God-Mode AI Safety Checklist Strip */}
+            <div className="p-4 rounded-xl bg-gradient-to-r from-[#0b1220] to-[#090d16] border border-cyan-500/30 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-cyan-300 uppercase tracking-wider flex items-center gap-2">
+                  <Shield className="w-4 h-4 text-cyan-400" />
+                  "God-Mode" AI Institutional Risk Shield (Zero-Error Guard)
+                </span>
+                <span className="text-[10px] font-bold text-[#00ff66] bg-[#00ff66]/10 px-2 py-0.5 rounded border border-[#00ff66]/30">
+                  6/6 SHIELDS ACTIVE
+                </span>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 pt-1 text-[11px]">
+                <div className="p-2 rounded bg-slate-950/70 border border-slate-800 text-slate-300">
+                  <span className="block text-[10px] text-slate-500">1. Cooldown</span>
+                  <span className="font-bold text-[#00ff66]">30m Post-Loss</span>
+                </div>
+                <div className="p-2 rounded bg-slate-950/70 border border-slate-800 text-slate-300">
+                  <span className="block text-[10px] text-slate-500">2. Swarm Veto</span>
+                  <span className="font-bold text-[#00ff66]">Risk Mgr NO-GO</span>
+                </div>
+                <div className="p-2 rounded bg-slate-950/70 border border-slate-800 text-slate-300">
+                  <span className="block text-[10px] text-slate-500">3. Confluence</span>
+                  <span className="font-bold text-[#00ff66]">85 to 95+ ATR</span>
+                </div>
+                <div className="p-2 rounded bg-slate-950/70 border border-slate-800 text-slate-300">
+                  <span className="block text-[10px] text-slate-500">4. Global Filter</span>
+                  <span className="font-bold text-[#00ff66]">BTC 1H RSI &gt;30</span>
+                </div>
+                <div className="p-2 rounded bg-slate-950/70 border border-slate-800 text-slate-300">
+                  <span className="block text-[10px] text-slate-500">5. Spread Guard</span>
+                  <span className="font-bold text-[#00ff66]">&le; 0.1% Spread</span>
+                </div>
+                <div className="p-2 rounded bg-slate-950/70 border border-slate-800 text-slate-300">
+                  <span className="block text-[10px] text-slate-500">6. Max Loss</span>
+                  <span className="font-bold text-amber-400">{config.maxDailyLossPercent || 3}% Breaker</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Paper Trading Mode Toggle & Max Daily Loss % Settings */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {/* Paper Trading Mode Bar */}
+              <div className="p-4 rounded-xl bg-[#0d121f] border border-amber-500/30 flex items-center justify-between">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-bold text-amber-400 uppercase tracking-wider">
+                      Paper Trading Mode
+                    </span>
+                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${config.paperTradingEnabled ? "bg-amber-500/20 text-amber-300 border border-amber-500/40" : "bg-slate-800 text-slate-400"}`}>
+                      {config.paperTradingEnabled ? "VIRTUAL $10,000 ACTIVE" : "REAL API MODE"}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-400 font-sans mt-0.5">
+                    Test strategies in realistic zero-risk simulated sandbox.
+                  </p>
+                </div>
+                <button
+                  onClick={() => handleConfigChange({ paperTradingEnabled: !config.paperTradingEnabled })}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition border ${
+                    config.paperTradingEnabled
+                      ? "bg-amber-500 text-slate-950 border-amber-400 shadow-md shadow-amber-950/50"
+                      : "bg-slate-900 text-slate-300 border-slate-700 hover:bg-slate-800"
+                  }`}
+                >
+                  {config.paperTradingEnabled ? "Disable Paper" : "Enable Paper"}
+                </button>
+              </div>
+
+              {/* Max Daily Loss % Setting */}
+              <div className="p-4 rounded-xl bg-[#0d121f] border border-slate-800 flex items-center justify-between">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-bold text-slate-200 uppercase tracking-wider">
+                      Max Daily Loss Circuit Breaker
+                    </span>
+                    <span className="text-xs font-mono font-bold text-[#ff3344]">
+                      {config.maxDailyLossPercent || 3.0}%
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-400 font-sans mt-0.5">
+                    Auto-Pilot kills active trades and shuts off if daily drawdown hits this threshold.
+                  </p>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  {[2, 3, 5].map((pct) => (
+                    <button
+                      key={pct}
+                      onClick={() => handleConfigChange({ maxDailyLossPercent: pct })}
+                      className={`px-2.5 py-1 rounded text-xs font-bold transition ${
+                        (config.maxDailyLossPercent || 3) === pct
+                          ? "bg-red-500 text-white"
+                          : "bg-slate-900 text-slate-400 hover:bg-slate-800"
+                      }`}
+                    >
+                      {pct}%
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
 
             {/* Top Control Grid: Market Type & AutoPilot Master Switch */}

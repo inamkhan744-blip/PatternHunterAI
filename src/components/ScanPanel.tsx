@@ -3,7 +3,9 @@ import type { ScanResult } from "../types";
 import { formatPrice } from "../lib/patterns";
 import { FREE_LIMIT } from "../lib/scanLimit";
 
-const CHECKOUT_URL = "https://gumroad.com/l/your-plan";
+import { GUMROAD_CHECKOUT_URL } from "./ProModal";
+
+const CHECKOUT_URL = GUMROAD_CHECKOUT_URL;
 
 interface Props {
   open: boolean;

@@ -18,6 +18,7 @@ import { scanSMC, calculateHTFTrend, type SMCData, type HTFTrendResult } from ".
 import { evaluateConfluence, type ConfluenceResult } from "../lib/ConfluenceEngine";
 import SniperChecklistModal from "./SniperChecklistModal";
 import LiquidationHeatmap, { generateLiquidationLevels, type HeatmapOverviewData } from "./LiquidationHeatmap";
+import { gridTradingBot, GridBotState } from "../lib/GridBot";
 
 interface Props {
   candles: Candle[];
@@ -30,6 +31,7 @@ interface Props {
   showSMC?: boolean;
   fomoLocked?: boolean;
   fomoRemainingSeconds?: number;
+  showGridLines?: boolean;
 }
 
 // Helper to determine price format precision and minMove based on sample price
@@ -87,6 +89,16 @@ export default function CandlestickChart({
   // Liquidation Heatmap toggle & detail modal state
   const [showLiquidationHeatmap, setShowLiquidationHeatmap] = useState(true);
   const [heatmapModalOpen, setHeatmapModalOpen] = useState(false);
+
+  // Grid bot state for chart overlay
+  const [gridState, setGridState] = useState<GridBotState>(gridTradingBot.getState());
+  const [showGridOverlay, setShowGridOverlay] = useState(true);
+
+  useEffect(() => {
+    return gridTradingBot.subscribe((s) => {
+      setGridState(s);
+    });
+  }, []);
 
   // Detect SMC data (Order Blocks & Fair Value Gaps)
   const smcData: SMCData = useMemo(() => {
@@ -154,8 +166,9 @@ export default function CandlestickChart({
 
     const hasSMC = showSMC && (smcData.orderBlocks.length > 0 || smcData.fvgs.length > 0);
     const hasHeatmap = showLiquidationHeatmap && liquidationData.levels.length > 0 && lastClose > 0;
+    const hasGrid = showGridOverlay && gridState.isActive && gridState.grids.length > 0 && (!gridState.config || gridState.config.symbol === (symbol || "BTCUSDT"));
 
-    if (!hasSMC && !hasHeatmap) {
+    if (!hasSMC && !hasHeatmap && !hasGrid) {
       ctx.restore();
       return;
     }
@@ -259,6 +272,37 @@ export default function CandlestickChart({
       }
     }
 
+    // Draw Grid Lines if Grid Bot is active
+    if (hasGrid) {
+      const grids = gridState.grids;
+      for (let i = 0; i < grids.length; i++) {
+        const gridPrice = grids[i];
+        const y = activeSeries.priceToCoordinate(gridPrice);
+        if (y === null || y < 0 || y > rect.height) continue;
+
+        const isSell = gridPrice > lastClose;
+        const color = isSell ? "rgba(239, 68, 68, 0.7)" : "rgba(34, 197, 94, 0.7)";
+
+        ctx.save();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([5, 4]);
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(plotWidth, y);
+        ctx.stroke();
+
+        // Label
+        ctx.font = "bold 10px 'JetBrains Mono', monospace";
+        ctx.fillStyle = isSell ? "#fca5a5" : "#86efac";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "bottom";
+        const gridLabel = `GRID #${i + 1} [${isSell ? "SELL" : "BUY"}] $${gridPrice}`;
+        ctx.fillText(gridLabel, 10, y - 2);
+        ctx.restore();
+      }
+    }
+
     // Draw Liquidation Heatmap Horizontal Bars across right area
     if (showLiquidationHeatmap && liquidationData.levels.length > 0) {
       const maxVol = Math.max(...liquidationData.levels.map((l) => l.estimatedVolumeMillions), 1);
@@ -318,7 +362,7 @@ export default function CandlestickChart({
     }
 
     ctx.restore();
-  }, [chartType, showSMC, smcData, showLiquidationHeatmap, liquidationData, lastClose]);
+  }, [chartType, showSMC, smcData, showLiquidationHeatmap, liquidationData, lastClose, showGridOverlay, gridState, symbol]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -763,6 +807,24 @@ export default function CandlestickChart({
               <span>Bearish OB/FVG</span>
             </div>
           </div>
+
+          {/* Grid Lines Toggle Button */}
+          {gridState.isActive && (
+            <button
+              onClick={() => setShowGridOverlay((v) => !v)}
+              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold transition border ${
+                showGridOverlay
+                  ? "bg-cyan-500/20 text-cyan-300 border-cyan-500/50 shadow-sm shadow-cyan-950/40"
+                  : "bg-slate-800 text-slate-400 border-slate-700 hover:text-white"
+              }`}
+              title="Toggle Grid Lines Overlay"
+            >
+              <span>Grids</span>
+              {showGridOverlay && (
+                <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
+              )}
+            </button>
+          )}
 
           {/* Liquidation Heatmap Toggle Button */}
           <button

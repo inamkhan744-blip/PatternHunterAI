@@ -1,6 +1,7 @@
 import { X, Check, Crown, ExternalLink } from "lucide-react";
 
-const CHECKOUT_URL = "https://gumroad.com/l/your-plan";
+export const GUMROAD_CHECKOUT_URL = "https://inamkhan08.gumroad.com/l/idbxpj";
+const CHECKOUT_URL = GUMROAD_CHECKOUT_URL;
 
 interface Props {
   open: boolean;

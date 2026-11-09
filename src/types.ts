@@ -80,7 +80,7 @@ export interface WatchlistItem {
   binance_symbol: string;
 }
 
-export type AppTab = "chart" | "scanner" | "watchlist" | "history" | "alerts" | "depth" | "trades" | "heatmap" | "confluence" | "backtest" | "chat" | "portfolio" | "journal";
+export type AppTab = "chart" | "scanner" | "watchlist" | "history" | "alerts" | "arbitrage" | "backtest" | "chat" | "portfolio" | "depth" | "trades" | "heatmap" | "confluence" | "journal";
 
 export interface MarketStats {
   high24h: number;

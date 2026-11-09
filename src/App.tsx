@@ -56,6 +56,9 @@ import { useAuth } from "./lib/auth";
 import AIChat from "./components/AIChat";
 import Portfolio from "./components/Portfolio";
 import AuthModal from "./components/AuthModal";
+import ArbitrageTab from "./components/ArbitrageTab";
+import SwarmTerminal from "./components/SwarmTerminal";
+import Backtesting from "./components/Backtesting";
 import type { Candle, Coin, DetectedPattern, ScanResult, Timeframe, WatchlistItem, AppTab, MarketStats, PatternWithConfidence } from "./types";
 
 const TIMEFRAMES: { value: Timeframe; label: string }[] = [
@@ -69,6 +72,8 @@ const TIMEFRAMES: { value: Timeframe; label: string }[] = [
 
 const TABS: { key: AppTab; label: string; icon: typeof ChartIcon }[] = [
   { key: "chart", label: "Chart", icon: ChartIcon },
+  { key: "arbitrage", label: "Arbitrage", icon: ArrowUpRight },
+  { key: "backtest", label: "Backtest Lab", icon: BarChart3 },
   { key: "scanner", label: "Scanner", icon: List },
   { key: "watchlist", label: "Watchlist", icon: Star },
   { key: "history", label: "History", icon: HistoryIcon },
@@ -122,6 +127,7 @@ export default function App() {
   const [historyRefresh, setHistoryRefresh] = useState(0);
   const [autoTradeOpen, setAutoTradeOpen] = useState(false);
   const [currentAtr, setCurrentAtr] = useState<number>(0);
+  const [swarmOpen, setSwarmOpen] = useState(false);
 
   const { user } = useAuth();
   const [authModalOpen, setAuthModalOpen] = useState(false);
@@ -844,13 +850,22 @@ export default function App() {
               <div className="flex items-center gap-3 ml-auto">
                 {lastPrice && (
                   <div className="flex items-baseline gap-2">
-                    <span className="text-lg font-bold tracking-tight">{formatPrice(lastPrice)}</span>
-                    <span className={`text-sm font-medium flex items-center ${statsChange >= 0 ? "text-green-400" : "text-red-400"}`}>
+                    <span className="text-lg font-bold tracking-tight font-mono">{formatPrice(lastPrice)}</span>
+                    <span className={`text-sm font-medium flex items-center font-mono ${statsChange >= 0 ? "text-[#00ff66]" : "text-[#ff3344]"}`}>
                       {statsChange >= 0 ? <ArrowUpRight className="w-3.5 h-3.5" /> : <ArrowDownRight className="w-3.5 h-3.5" />}
                       {statsChange >= 0 ? "+" : ""}{statsChange.toFixed(2)}%
                     </span>
                   </div>
                 )}
+                {/* AI Swarm Debater Button on the Chart */}
+                <button
+                  onClick={() => setSwarmOpen(true)}
+                  className="px-3 py-1.5 rounded-lg bg-gradient-to-r from-emerald-500 to-green-600 hover:from-emerald-400 hover:to-green-500 text-slate-950 font-black text-xs uppercase tracking-wider flex items-center gap-1.5 shadow-md shadow-emerald-950/40 transition"
+                  title="Launch 3-Agent AI Swarm Debate"
+                >
+                  <Sparkles className="w-3.5 h-3.5 fill-slate-950" />
+                  <span>AI Swarm</span>
+                </button>
                 <button
                   onClick={() => loadData(selectedCoin.binanceSymbol, timeframe)}
                   disabled={loading}
@@ -1010,6 +1025,14 @@ export default function App() {
             />
           )}
 
+          {activeTab === "arbitrage" && (
+            <ArbitrageTab />
+          )}
+
+          {activeTab === "backtest" && (
+            <Backtesting coin={selectedCoin} timeframe={timeframe} />
+          )}
+
           {activeTab === "portfolio" && (
             <Portfolio />
           )}
@@ -1073,6 +1096,20 @@ export default function App() {
         currentSymbol={selectedCoin.binanceSymbol}
         currentPrice={lastPrice}
         currentAtr={currentAtr || ((lastPrice ?? 100) * 0.02)}
+      />
+      <SwarmTerminal
+        open={swarmOpen}
+        onClose={() => setSwarmOpen(false)}
+        symbol={selectedCoin.binanceSymbol}
+        price={lastPrice}
+        rsi={rsiValue}
+        trend={trendValue}
+        patternName={pattern?.name}
+        patternDirection={pattern?.direction}
+        fearGreed={fearGreedValue}
+        onExecuteTrade={(_dir, _lev) => {
+          setAutoTradeOpen(true);
+        }}
       />
       <AuthModal
         open={authModalOpen}

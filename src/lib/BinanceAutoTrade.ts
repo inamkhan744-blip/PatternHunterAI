@@ -3,7 +3,12 @@
  * Supports both Binance Spot API (api.binance.com) and Binance Futures API (fapi.binance.com)
  * Comprehensive risk management: 1-3 Max Open Trades, 1.5x ATR SL, 1:1 Trailing SL,
  * Profit Vault (50% to Spot), Liquidation Price warning, 2-loss Circuit Breaker, Emergency Kill Switch.
+ * Enterprise Security: AES-256 encrypted keys and Telegram Bot alerts.
  */
+
+import { getDecryptedApiKeys, storeEncryptedApiKeys } from "./CryptoSecurity";
+import { notifyTradeOpened, notifyTradeClosed } from "./TelegramService";
+import { checkTradeExecutionAllowance, incrementDailyTradeCount } from "./SubscriptionManager";
 
 export type MarketType = "Spot" | "Futures";
 export type TradeDirection = "LONG" | "SHORT";
@@ -87,11 +92,6 @@ export const FUTURES_API_BASE = "https://fapi.binance.com";
 
 /**
  * Calculates position size auto-compounded based on risk percent, account balance, and leverage.
- * Position size in base asset units (e.g., BTC, ETH).
- * Formula:
- * Capital risked = accountBalance * (riskPercent / 100)
- * Position value = accountBalance * (riskPercent / 100) * leverage
- * Quantity = Position value / entryPrice
  */
 export function calculatePositionSize(
   riskPercent: number,
@@ -103,11 +103,9 @@ export function calculatePositionSize(
     return { quantity: 0, positionValue: 0, marginRequired: 0 };
   }
 
-  // Constrain leverage 1x - 10x
   const effectiveLeverage = Math.max(1, Math.min(10, leverage));
   const clampedRisk = Math.max(0.1, Math.min(100, riskPercent));
 
-  // Risk allocated capital compounded with leverage
   const marginRequired = accountBalance * (clampedRisk / 100);
   const positionValue = marginRequired * effectiveLeverage;
   const quantity = positionValue / entryPrice;
@@ -120,16 +118,13 @@ export function calculatePositionSize(
 }
 
 /**
- * Calculates theoretical Liquidation Price for Binance USDT-M Futures (Isolated / Cross).
- * Maintenance margin rate (MMR) is approx 0.5% (0.005) to 1% for standard crypto pairs at <= 10x.
- * For LONG: LiqPrice = EntryPrice * (1 - 1/Leverage + MMR)
- * For SHORT: LiqPrice = EntryPrice * (1 + 1/Leverage - MMR)
+ * Calculates theoretical Liquidation Price for Binance USDT-M Futures.
  */
 export function calculateLiquidationPrice(
   entryPrice: number,
   leverage: number,
   direction: TradeDirection,
-  mmr: number = 0.005 // 0.5% maintenance margin
+  mmr: number = 0.005
 ): LiquidationInfo {
   if (entryPrice <= 0 || leverage <= 0) {
     return { liquidationPrice: 0, distancePercent: 0, isWarning: false };
@@ -139,11 +134,9 @@ export function calculateLiquidationPrice(
   let liqPrice = 0;
 
   if (direction === "LONG") {
-    // Price falls until equity matches maintenance margin
     liqPrice = entryPrice * (1 - (1 / lev) + mmr);
     liqPrice = Math.max(0, liqPrice);
   } else {
-    // Price rises until equity matches maintenance margin
     liqPrice = entryPrice * (1 + (1 / lev) - mmr);
   }
 
@@ -158,8 +151,6 @@ export function calculateLiquidationPrice(
 
 /**
  * Evaluates whether Stop Loss is dangerously close to or beyond Liquidation Price.
- * If distance between Stop Loss and Liquidation Price is < 2.0%, or if SL is past liquidation,
- * trigger a critical warning.
  */
 export function checkLiquidationProximity(
   stopLossPrice: number,
@@ -175,7 +166,6 @@ export function checkLiquidationProximity(
   let distanceToLiqPct = 0;
 
   if (direction === "LONG") {
-    // In LONG: Liq is below entry. SL should be ABOVE Liq price.
     if (stopLossPrice <= liquidationPrice) {
       return {
         isTooClose: true,
@@ -185,7 +175,6 @@ export function checkLiquidationProximity(
     }
     distanceToLiqPct = ((stopLossPrice - liquidationPrice) / stopLossPrice) * 100;
   } else {
-    // In SHORT: Liq is above entry. SL should be BELOW Liq price.
     if (stopLossPrice >= liquidationPrice) {
       return {
         isTooClose: true,
@@ -213,7 +202,6 @@ export function checkLiquidationProximity(
 
 /**
  * Calculates ATR-based Stop Loss and Take Profit.
- * Standard Fortress Rule: SL at 1.5x ATR.
  */
 export function calculateAtrStopLoss(
   entryPrice: number,
@@ -244,8 +232,7 @@ export function calculateAtrStopLoss(
 }
 
 /**
- * Trailing Stop Loss Logic:
- * If trade reaches 1:1 Risk-to-Reward (R:R), automatically moves SL to break-even (Entry Price).
+ * Trailing Stop Loss Logic: Moves SL to break-even at 1:1 RR.
  */
 export function evaluateTrailingStopLoss(
   currentPrice: number,
@@ -262,7 +249,6 @@ export function evaluateTrailingStopLoss(
 
   if (trade.direction === "LONG") {
     const currentReward = currentPrice - trade.entryPrice;
-    // Hit 1:1 RR when currentReward >= initialRisk
     if (currentReward >= initialRisk && trade.stopLossPrice < trade.entryPrice) {
       return {
         shouldUpdateSl: true,
@@ -271,7 +257,6 @@ export function evaluateTrailingStopLoss(
       };
     }
   } else {
-    // SHORT
     const currentReward = trade.entryPrice - currentPrice;
     if (currentReward >= initialRisk && trade.stopLossPrice > trade.entryPrice) {
       return {
@@ -320,23 +305,42 @@ export class BinanceAutoTradeEngine {
 
   // --- Persistence ---
   public loadConfig(): AutoTradeConfig {
+    let baseConfig = { ...DEFAULT_CONFIG };
     try {
       const stored = localStorage.getItem(STORAGE_KEY_CONFIG);
       if (stored) {
-        return { ...DEFAULT_CONFIG, ...JSON.parse(stored) };
+        baseConfig = { ...DEFAULT_CONFIG, ...JSON.parse(stored) };
       }
     } catch {
       // fallback
     }
-    return { ...DEFAULT_CONFIG };
+
+    // Load encrypted API keys if available
+    const decryptedKeys = getDecryptedApiKeys();
+    if (decryptedKeys.apiKey) baseConfig.apiKey = decryptedKeys.apiKey;
+    if (decryptedKeys.apiSecret) baseConfig.apiSecret = decryptedKeys.apiSecret;
+
+    return baseConfig;
   }
 
-  public saveConfig(config: Partial<AutoTradeConfig>): AutoTradeConfig {
-    this.config = { ...this.config, ...config };
-    // Enforce constraints
+  public saveConfig(configUpdates: Partial<AutoTradeConfig>): AutoTradeConfig {
+    // If API keys were supplied in update, encrypt them via AES-256
+    const hasKeyUpdate = configUpdates.apiKey !== undefined || configUpdates.apiSecret !== undefined;
+    const currentApiKey = configUpdates.apiKey !== undefined ? configUpdates.apiKey : this.config.apiKey;
+    const currentApiSecret = configUpdates.apiSecret !== undefined ? configUpdates.apiSecret : this.config.apiSecret;
+
+    if (hasKeyUpdate) {
+      storeEncryptedApiKeys(currentApiKey, currentApiSecret);
+    }
+
+    this.config = { ...this.config, ...configUpdates };
     this.config.leverage = Math.max(1, Math.min(10, this.config.leverage));
     this.config.maxOpenTrades = Math.max(1, Math.min(3, this.config.maxOpenTrades));
-    localStorage.setItem(STORAGE_KEY_CONFIG, JSON.stringify(this.config));
+
+    // Store config without raw keys in plain storage
+    const safeStorageConfig = { ...this.config, apiKey: "", apiSecret: "" };
+    localStorage.setItem(STORAGE_KEY_CONFIG, JSON.stringify(safeStorageConfig));
+
     return this.config;
   }
 
@@ -413,15 +417,9 @@ export class BinanceAutoTradeEngine {
     return type === "Futures" ? FUTURES_API_BASE : SPOT_API_BASE;
   }
 
-  /**
-   * Fetches account balance in USDT.
-   * Spot: /api/v3/account
-   * Futures: /fapi/v2/account or /fapi/v2/balance
-   */
   public async fetchAccountBalance(marketType?: MarketType): Promise<{ usdtBalance: number; freeBalance: number }> {
     const type = marketType ?? this.config.marketType;
     if (!this.config.apiKey || !this.config.apiSecret) {
-      // Return simulated sandbox balance if no credentials configured
       return { usdtBalance: 10000, freeBalance: 10000 };
     }
 
@@ -456,14 +454,10 @@ export class BinanceAutoTradeEngine {
         return { usdtBalance: freeBalance + lockedBalance, freeBalance };
       }
     } catch {
-      // Return demo balance on network/credential error
       return { usdtBalance: 10000, freeBalance: 10000 };
     }
   }
 
-  /**
-   * Sets leverage for Binance Futures pair.
-   */
   public async setFuturesLeverage(symbol: string, leverage: number): Promise<boolean> {
     if (this.config.marketType !== "Futures" || !this.config.apiKey || !this.config.apiSecret) {
       return true;
@@ -490,15 +484,6 @@ export class BinanceAutoTradeEngine {
 
   // --- Trade Execution ---
 
-  /**
-   * Fortress Auto-Trade Execution Entry:
-   * 1. Checks legal disclaimer agreement
-   * 2. Checks circuit breaker
-   * 3. Enforces max open trades (1-3)
-   * 4. Calculates position size auto-compounding with leverage
-   * 5. Enforces LIMIT entry orders to eliminate slippage
-   * 6. Validates ATR stop loss & liquidation proximity warning
-   */
   public async executeTrade(params: {
     symbol: string;
     entryPrice: number;
@@ -506,11 +491,22 @@ export class BinanceAutoTradeEngine {
     direction?: TradeDirection;
     marketType?: MarketType;
     accountBalance?: number;
+    userEmail?: string | null;
+    isPro?: boolean;
   }): Promise<{ success: boolean; trade?: ManagedTrade; error?: string }> {
     const marketType = params.marketType ?? this.config.marketType;
     const direction = params.direction ?? (marketType === "Spot" ? "LONG" : this.config.direction);
 
-    // Rule 4: Legal Disclaimer
+    // Subscription & Daily Limits Check
+    const allowance = checkTradeExecutionAllowance(params.userEmail, params.isPro);
+    if (!allowance.allowed) {
+      return {
+        success: false,
+        error: allowance.reason || "Daily trade allowance reached.",
+      };
+    }
+
+    // Legal Disclaimer Check
     if (!this.config.disclaimerAgreed) {
       return {
         success: false,
@@ -518,7 +514,7 @@ export class BinanceAutoTradeEngine {
       };
     }
 
-    // Rule 3: Circuit Breaker Check
+    // Circuit Breaker Check
     if (this.circuitBreaker.isTripped) {
       return {
         success: false,
@@ -526,7 +522,7 @@ export class BinanceAutoTradeEngine {
       };
     }
 
-    // Rule 2: Max Open Trades limit (1-3)
+    // Max Open Trades limit (1-3)
     const openTrades = this.getOpenTrades();
     if (openTrades.length >= this.config.maxOpenTrades) {
       return {
@@ -612,15 +608,27 @@ export class BinanceAutoTradeEngine {
     this.trades.unshift(trade);
     this.saveTrades();
 
+    // Increment daily usage
+    incrementDailyTradeCount();
+
+    // Telegram Bot Alert
+    notifyTradeOpened({
+      symbol: trade.symbol,
+      direction: trade.direction,
+      entryPrice: trade.entryPrice,
+      quantity: trade.quantity,
+      leverage: trade.leverage,
+      marketType: trade.marketType,
+      stopLossPrice: trade.stopLossPrice,
+      takeProfitPrice: trade.takeProfitPrice,
+    }).catch(() => {});
+
     return {
       success: true,
       trade,
     };
   }
 
-  /**
-   * Places a LIMIT order to eliminate slippage.
-   */
   private async placeBinanceLimitOrder(params: {
     symbol: string;
     side: "BUY" | "SELL";
@@ -663,21 +671,12 @@ export class BinanceAutoTradeEngine {
     }
   }
 
-  /**
-   * Evaluates and updates open trades against current price:
-   * - Checks Stop Loss hit
-   * - Checks Take Profit hit
-   * - Checks Trailing SL (moves to break-even at 1:1 RR)
-   * - Handles Profit Vault (50% of realized profits moved to Spot)
-   * - Handles Circuit Breaker (trips if 2 consecutive losses occur)
-   */
   public evaluateOpenTrades(currentPrice: number, symbol: string): ManagedTrade[] {
     const updatedTrades: ManagedTrade[] = [];
 
     for (const trade of this.trades) {
       if (trade.status !== "OPEN" || trade.symbol !== symbol) continue;
 
-      // 1. Check Trailing SL break-even update
       if (this.config.trailingSlEnabled && !trade.trailingSlTriggered) {
         const trailingEval = evaluateTrailingStopLoss(currentPrice, trade);
         if (trailingEval.shouldUpdateSl) {
@@ -687,7 +686,6 @@ export class BinanceAutoTradeEngine {
         }
       }
 
-      // 2. Check Exit Conditions (SL / TP)
       let exitTriggered = false;
       let exitType: "TP" | "SL" | null = null;
 
@@ -700,7 +698,6 @@ export class BinanceAutoTradeEngine {
           exitType = "TP";
         }
       } else {
-        // SHORT
         if (currentPrice >= trade.stopLossPrice) {
           exitTriggered = true;
           exitType = "SL";
@@ -723,10 +720,6 @@ export class BinanceAutoTradeEngine {
     return updatedTrades;
   }
 
-  /**
-   * Closes a trade, computes realized PnL, executes Profit Vault (50% to Spot)
-   * and tracks consecutive losses for the Circuit Breaker.
-   */
   public closeTrade(tradeId: string, exitPrice: number, exitReason: "TP" | "SL" | "MANUAL"): ManagedTrade | null {
     const trade = this.trades.find((t) => t.id === tradeId);
     if (!trade || trade.status !== "OPEN") return null;
@@ -734,7 +727,6 @@ export class BinanceAutoTradeEngine {
     trade.status = "CLOSED";
     trade.closePrice = exitPrice;
 
-    // Calculate PnL
     const priceDiff = trade.direction === "LONG"
       ? exitPrice - trade.entryPrice
       : trade.entryPrice - exitPrice;
@@ -743,20 +735,17 @@ export class BinanceAutoTradeEngine {
     const realizedPnl = trade.marketType === "Futures" ? rawPnl * trade.leverage : rawPnl;
     trade.realizedPnl = Number(realizedPnl.toFixed(2));
 
-    // Rule 2: Profit Vault - Move 50% of realized profits to Spot
     if (this.config.profitVaultEnabled && realizedPnl > 0) {
       const vaultCut = Number((realizedPnl * 0.5).toFixed(2));
       trade.profitVaultAmount = vaultCut;
       this.profitVaultTotal += vaultCut;
       localStorage.setItem(STORAGE_KEY_VAULT, String(this.profitVaultTotal.toFixed(2)));
 
-      // If live Binance Futures, execute transfer to Spot: /sapi/v1/futures/transfer
       if (trade.marketType === "Futures" && this.config.apiKey && this.config.apiSecret) {
         this.transferProfitToSpotWallet(vaultCut).catch(() => {});
       }
     }
 
-    // Rule 3: Circuit Breaker - If 2 consecutive losses occur, disable Auto-Pilot
     if (realizedPnl < 0) {
       this.circuitBreaker.consecutiveLosses += 1;
       if (this.circuitBreaker.consecutiveLosses >= 2) {
@@ -768,22 +757,29 @@ export class BinanceAutoTradeEngine {
       }
       this.saveCircuitBreaker();
     } else if (realizedPnl > 0) {
-      // Winning trade resets consecutive loss counter
       this.circuitBreaker.consecutiveLosses = 0;
       this.saveCircuitBreaker();
     }
 
     this.saveTrades();
+
+    // Telegram Bot Alert on Trade Closed
+    notifyTradeClosed({
+      symbol: trade.symbol,
+      direction: trade.direction,
+      entryPrice: trade.entryPrice,
+      closePrice: trade.closePrice,
+      realizedPnl: trade.realizedPnl,
+      profitVaultAmount: trade.profitVaultAmount,
+      exitReason,
+    }).catch(() => {});
+
     return trade;
   }
 
-  /**
-   * Transfers funds from Futures to Spot wallet (/sapi/v1/futures/transfer).
-   */
   public async transferProfitToSpotWallet(amount: number): Promise<boolean> {
     if (!this.config.apiKey || !this.config.apiSecret || amount <= 0) return false;
     const timestamp = Date.now();
-    // type 2: UM Futures to Spot
     const query = `asset=USDT&amount=${amount}&type=2&timestamp=${timestamp}`;
     const signature = await signQuery(query, this.config.apiSecret);
 
@@ -802,11 +798,6 @@ export class BinanceAutoTradeEngine {
     }
   }
 
-  /**
-   * Rule 3: KILL SWITCH / EMERGENCY STOP
-   * Massive red 'EMERGENCY STOP' button:
-   * Cancel ALL open orders (Spot and Futures) and close all positions immediately.
-   */
   public async emergencyStop(): Promise<{
     cancelledOrdersCount: number;
     closedPositionsCount: number;
@@ -818,13 +809,10 @@ export class BinanceAutoTradeEngine {
     let cancelledOrdersCount = 0;
     let closedPositionsCount = 0;
 
-    // Immediately disable Auto-Pilot
     this.config.autoPilotEnabled = false;
     this.saveConfig({ autoPilotEnabled: false });
 
-    // Cancel all open orders on Binance Spot and Futures via API if credentials exist
     if (this.config.apiKey && this.config.apiSecret) {
-      // Futures: Cancel all open orders for all symbols
       try {
         const timestamp = Date.now();
         const openFuturesTrades = this.trades.filter((t) => t.status === "OPEN" && t.marketType === "Futures");
@@ -843,7 +831,6 @@ export class BinanceAutoTradeEngine {
         futuresSuccess = false;
       }
 
-      // Spot: Cancel open orders
       try {
         const timestamp = Date.now();
         const openSpotTrades = this.trades.filter((t) => t.status === "OPEN" && t.marketType === "Spot");
@@ -863,11 +850,10 @@ export class BinanceAutoTradeEngine {
       }
     }
 
-    // Close all open managed positions immediately
     for (const trade of this.trades) {
       if (trade.status === "OPEN") {
         trade.status = "CLOSED";
-        trade.closePrice = trade.entryPrice; // Marked closed at entry in emergency
+        trade.closePrice = trade.entryPrice;
         trade.realizedPnl = 0;
         closedPositionsCount++;
       }

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import {
   Shield,
   Zap,
@@ -14,10 +14,11 @@ import {
   Power,
   X,
   Target,
-  Percent,
+  Send,
+  Lock,
+  Crown,
   Layers,
   ArrowRightLeft,
-  Lock,
 } from "lucide-react";
 import {
   autoTradeEngine,
@@ -26,13 +27,29 @@ import {
   checkLiquidationProximity,
   calculateAtrStopLoss,
   MarketType,
-  TradeDirection,
   AutoTradeConfig,
   ManagedTrade,
   CircuitBreakerState,
 } from "../lib/BinanceAutoTrade";
 import { formatPrice } from "../lib/patterns";
 import RiskDisclaimerModal from "./RiskDisclaimerModal";
+import { useAuth } from "../lib/auth";
+import {
+  isUserAdmin,
+  isUserPro,
+  getProDailyTradeLimit,
+  setProDailyTradeLimit,
+  getDailyTradeCount,
+  checkTradeExecutionAllowance,
+  ProDailyTradeLimit,
+  FREE_DAILY_MANUAL_TRADE_LIMIT,
+} from "../lib/SubscriptionManager";
+import {
+  loadTelegramConfig,
+  saveTelegramConfig,
+  sendTelegramAlert,
+  TelegramConfig,
+} from "../lib/TelegramService";
 
 interface Props {
   open: boolean;
@@ -49,6 +66,10 @@ export default function AutoTradeModal({
   currentPrice,
   currentAtr,
 }: Props) {
+  const { user } = useAuth();
+  const isAdmin = useMemo(() => isUserAdmin(user?.email), [user?.email]);
+  const isPro = useMemo(() => isUserPro(user?.email, false), [user?.email]);
+
   const [config, setConfig] = useState<AutoTradeConfig>(autoTradeEngine.getConfig());
   const [circuitBreaker, setCircuitBreaker] = useState<CircuitBreakerState>(autoTradeEngine.getCircuitBreaker());
   const [openTrades, setOpenTrades] = useState<ManagedTrade[]>(autoTradeEngine.getOpenTrades());
@@ -59,6 +80,14 @@ export default function AutoTradeModal({
   const [statusMessage, setStatusMessage] = useState<{ type: "success" | "error" | "info"; text: string } | null>(null);
   const [emergencyLoading, setEmergencyLoading] = useState(false);
 
+  // Pro & Limit States
+  const [proTradeLimit, setLimitState] = useState<ProDailyTradeLimit>(getProDailyTradeLimit());
+  const [dailyTradeCount, setDailyTradeCount] = useState<number>(getDailyTradeCount());
+
+  // Telegram State
+  const [telegramConfig, setTgConfig] = useState<TelegramConfig>(loadTelegramConfig());
+  const [telegramTesting, setTelegramTesting] = useState(false);
+
   // Sync state on modal open
   useEffect(() => {
     if (open) {
@@ -66,6 +95,9 @@ export default function AutoTradeModal({
       setConfig(cfg);
       setCircuitBreaker(autoTradeEngine.getCircuitBreaker());
       setOpenTrades(autoTradeEngine.getOpenTrades());
+      setTgConfig(loadTelegramConfig());
+      setLimitState(getProDailyTradeLimit());
+      setDailyTradeCount(getDailyTradeCount());
       loadBalance(cfg.marketType);
     }
   }, [open]);
@@ -77,6 +109,7 @@ export default function AutoTradeModal({
       autoTradeEngine.evaluateOpenTrades(currentPrice, currentSymbol);
       setOpenTrades(autoTradeEngine.getOpenTrades());
       setCircuitBreaker(autoTradeEngine.getCircuitBreaker());
+      setDailyTradeCount(getDailyTradeCount());
     }, 3000);
     return () => clearInterval(interval);
   }, [open, currentPrice, currentSymbol]);
@@ -100,6 +133,13 @@ export default function AutoTradeModal({
   };
 
   const handleToggleAutoPilot = () => {
+    if (!isPro && !isAdmin) {
+      setStatusMessage({
+        type: "error",
+        text: "Auto-Pilot is locked for Free users. Upgrade to Pro or authenticate with admin bypass.",
+      });
+      return;
+    }
     if (!config.disclaimerAgreed) {
       setDisclaimerOpen(true);
       return;
@@ -136,16 +176,49 @@ export default function AutoTradeModal({
     });
   };
 
+  const handleTelegramChange = (updates: Partial<TelegramConfig>) => {
+    const updated = saveTelegramConfig(updates);
+    setTgConfig(updated);
+  };
+
+  const handleTestTelegram = async () => {
+    setTelegramTesting(true);
+    try {
+      const res = await sendTelegramAlert("🚀 <b>[FORTRESS TEST]</b> Telegram Bot Integration Active and Verified!");
+      if (res.success) {
+        setStatusMessage({ type: "success", text: "Test Telegram notification sent successfully!" });
+      } else {
+        setStatusMessage({ type: "error", text: `Telegram Alert failed: ${res.error}` });
+      }
+    } finally {
+      setTelegramTesting(false);
+    }
+  };
+
+  const handleDailyLimitChange = (val: ProDailyTradeLimit) => {
+    setProDailyTradeLimit(val);
+    setLimitState(val);
+    setStatusMessage({ type: "info", text: `Pro daily trade limit set to ${val} trades/day.` });
+  };
+
   // Immediate trade execution (Limit Order)
   const handleExecuteNow = async () => {
     if (!currentPrice) {
       setStatusMessage({ type: "error", text: "Current market price is unavailable." });
       return;
     }
+
+    const check = checkTradeExecutionAllowance(user?.email, isPro);
+    if (!check.allowed) {
+      setStatusMessage({ type: "error", text: check.reason || "Daily trade limit reached." });
+      return;
+    }
+
     if (!config.disclaimerAgreed) {
       setDisclaimerOpen(true);
       return;
     }
+
     setExecuting(true);
     setStatusMessage(null);
     try {
@@ -156,6 +229,8 @@ export default function AutoTradeModal({
         direction: config.marketType === "Futures" ? config.direction : "LONG",
         marketType: config.marketType,
         accountBalance,
+        userEmail: user?.email,
+        isPro,
       });
 
       if (result.success && result.trade) {
@@ -164,6 +239,7 @@ export default function AutoTradeModal({
           text: `LIMIT Order placed: ${result.trade.marketType} ${result.trade.direction} ${result.trade.quantity} ${result.trade.symbol} @ ${formatPrice(result.trade.entryPrice)}`,
         });
         setOpenTrades(autoTradeEngine.getOpenTrades());
+        setDailyTradeCount(getDailyTradeCount());
       } else {
         setStatusMessage({
           type: "error",
@@ -175,7 +251,6 @@ export default function AutoTradeModal({
     }
   };
 
-  // Rule 3: Massive Emergency Stop Kill Switch
   const handleEmergencyStop = async () => {
     if (!confirm("🚨 ACTIVATE KILL SWITCH? This will immediately cancel ALL open orders on Binance Spot and Futures and close all active positions!")) {
       return;
@@ -224,30 +299,47 @@ export default function AutoTradeModal({
 
   return (
     <>
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-md animate-in fade-in duration-200">
-        <div className="relative w-full max-w-4xl bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[92vh] text-white">
-          {/* Top Bar */}
-          <div className="px-6 py-4 border-b border-slate-800 bg-slate-950/60 flex items-center justify-between">
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/85 backdrop-blur-md animate-in fade-in duration-200">
+        <div className="relative w-full max-w-4xl bg-[#090d16] border border-cyan-500/30 rounded-2xl shadow-2xl shadow-cyan-950/50 overflow-hidden flex flex-col max-h-[92vh] text-white font-mono">
+          {/* Top Bar - Bloomberg Terminal Style */}
+          <div className="px-6 py-4 border-b border-slate-800 bg-[#060910] flex items-center justify-between">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-amber-500 via-orange-500 to-red-600 flex items-center justify-center shadow-lg shadow-amber-950/50">
                 <Shield className="w-5 h-5 text-white" />
               </div>
               <div>
                 <div className="flex items-center gap-2">
-                  <h2 className="text-base font-bold text-white tracking-wide">
-                    Fortress Auto-Trade Engine
+                  <h2 className="text-sm font-bold text-white tracking-wider uppercase">
+                    FORTRESS HEDGE FUND // EXECUTION TERMINAL
                   </h2>
-                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-400 border border-cyan-500/30">
-                    Binance Spot & Futures
-                  </span>
+                  {isAdmin ? (
+                    <span className="text-[10px] font-black px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 flex items-center gap-1">
+                      <Crown className="w-3 h-3 text-amber-400" /> ADMIN BYPASS ACTIVE
+                    </span>
+                  ) : isPro ? (
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-400 border border-cyan-500/40">
+                      PRO TIER ACTIVE
+                    </span>
+                  ) : (
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-700/60 text-slate-400 border border-slate-600">
+                      FREE TIER
+                    </span>
+                  )}
                 </div>
-                <p className="text-xs text-slate-400">
-                  Quantitative Risk Management & Algorithm Execution
+                <p className="text-[11px] text-slate-400 font-sans">
+                  AES-256 Vault-Secured Binance Engine & Telegram Signal Dispatch
                 </p>
               </div>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-3">
+              {/* Daily Trade Limit status */}
+              <div className="text-right hidden sm:block">
+                <span className="text-[10px] text-slate-500 block uppercase">Daily Trades Executed</span>
+                <span className="text-xs font-bold text-cyan-400">
+                  {dailyTradeCount} / {isAdmin ? "UNLIMITED" : isPro ? proTradeLimit : FREE_DAILY_MANUAL_TRADE_LIMIT}
+                </span>
+              </div>
               <button
                 onClick={onClose}
                 className="text-slate-400 hover:text-white p-2 rounded-lg hover:bg-slate-800 transition"
@@ -262,15 +354,15 @@ export default function AutoTradeModal({
             <div
               className={`px-6 py-2.5 text-xs font-semibold flex items-center justify-between border-b ${
                 statusMessage.type === "success"
-                  ? "bg-green-500/15 border-green-500/30 text-green-300"
+                  ? "bg-green-500/15 border-green-500/30 text-[#00ff66]"
                   : statusMessage.type === "error"
-                  ? "bg-red-500/15 border-red-500/30 text-red-300"
+                  ? "bg-red-500/15 border-red-500/30 text-[#ff3344]"
                   : "bg-cyan-500/15 border-cyan-500/30 text-cyan-300"
               }`}
             >
               <div className="flex items-center gap-2">
-                {statusMessage.type === "success" && <CheckCircle className="w-4 h-4 text-green-400 shrink-0" />}
-                {statusMessage.type === "error" && <XCircle className="w-4 h-4 text-red-400 shrink-0" />}
+                {statusMessage.type === "success" && <CheckCircle className="w-4 h-4 text-[#00ff66] shrink-0" />}
+                {statusMessage.type === "error" && <XCircle className="w-4 h-4 text-[#ff3344] shrink-0" />}
                 {statusMessage.type === "info" && <Zap className="w-4 h-4 text-cyan-400 shrink-0" />}
                 <span>{statusMessage.text}</span>
               </div>
@@ -286,7 +378,7 @@ export default function AutoTradeModal({
           {/* Circuit Breaker Alert Banner */}
           {circuitBreaker.isTripped && (
             <div className="px-6 py-3 bg-red-950/80 border-b border-red-500 flex items-center justify-between">
-              <div className="flex items-center gap-2 text-red-400 text-xs font-bold">
+              <div className="flex items-center gap-2 text-[#ff3344] text-xs font-bold">
                 <Flame className="w-4 h-4 animate-bounce" />
                 <span>
                   CIRCUIT BREAKER TRIPPED ({circuitBreaker.consecutiveLosses} consecutive losses). Auto-Pilot halted to prevent drawdown.
@@ -303,10 +395,42 @@ export default function AutoTradeModal({
 
           {/* Main Scrollable Body */}
           <div className="flex-1 p-6 overflow-y-auto space-y-6">
+            {/* Pro User Controls / Free Limitations Bar */}
+            <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 flex flex-wrap items-center justify-between gap-3 text-xs">
+              <div className="flex items-center gap-2">
+                <span className="text-slate-400">Execution Quota:</span>
+                <span className="font-bold text-white">
+                  {dailyTradeCount} of {isAdmin ? "∞" : isPro ? proTradeLimit : FREE_DAILY_MANUAL_TRADE_LIMIT} trades used today
+                </span>
+              </div>
+
+              {/* Pro Dropdown for Daily Trade Limit */}
+              {isPro || isAdmin ? (
+                <div className="flex items-center gap-2">
+                  <span className="text-slate-400">Daily Trade Limit:</span>
+                  <select
+                    value={proTradeLimit}
+                    onChange={(e) => handleDailyLimitChange(Number(e.target.value) as ProDailyTradeLimit)}
+                    className="bg-slate-950 border border-cyan-500/40 rounded-lg px-2.5 py-1 text-cyan-300 font-bold outline-none focus:border-cyan-400"
+                  >
+                    <option value={1}>1 Trade / Day</option>
+                    <option value={5}>5 Trades / Day</option>
+                    <option value={10}>10 Trades / Day</option>
+                    <option value={100}>100 Trades / Day (Enterprise)</option>
+                  </select>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 text-slate-500 text-[11px]">
+                  <Lock className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Free users limited to 3 manual trades/day. Auto-Pilot & Telegram locked.</span>
+                </div>
+              )}
+            </div>
+
             {/* Top Control Grid: Market Type & AutoPilot Master Switch */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               {/* Market Selection */}
-              <div className="p-4 rounded-xl bg-slate-800/60 border border-slate-700/80 space-y-3">
+              <div className="p-4 rounded-xl bg-[#0d121f] border border-slate-800 space-y-3">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-semibold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
                     <ArrowRightLeft className="w-3.5 h-3.5 text-cyan-400" />
@@ -338,7 +462,7 @@ export default function AutoTradeModal({
                     Futures API
                   </button>
                 </div>
-                <p className="text-[11px] text-slate-500">
+                <p className="text-[11px] text-slate-500 font-sans">
                   {config.marketType === "Futures"
                     ? "Supports Long & Short derivatives with 1x-10x margin."
                     : "Standard asset exchange with no margin or liquidation risk."}
@@ -346,7 +470,7 @@ export default function AutoTradeModal({
               </div>
 
               {/* Futures Direction & Leverage Controls */}
-              <div className="p-4 rounded-xl bg-slate-800/60 border border-slate-700/80 space-y-3">
+              <div className="p-4 rounded-xl bg-[#0d121f] border border-slate-800 space-y-3">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-semibold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
                     <Sliders className="w-3.5 h-3.5 text-amber-400" />
@@ -361,13 +485,12 @@ export default function AutoTradeModal({
 
                 {config.marketType === "Futures" ? (
                   <>
-                    {/* Direction Toggle */}
                     <div className="grid grid-cols-2 gap-2">
                       <button
                         onClick={() => handleConfigChange({ direction: "LONG" })}
                         className={`flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-xs font-bold border transition ${
                           config.direction === "LONG"
-                            ? "bg-green-500 text-slate-950 border-green-400"
+                            ? "bg-[#00ff66] text-slate-950 border-green-400"
                             : "bg-slate-900 text-slate-400 border-slate-700 hover:bg-slate-700"
                         }`}
                       >
@@ -378,7 +501,7 @@ export default function AutoTradeModal({
                         onClick={() => handleConfigChange({ direction: "SHORT" })}
                         className={`flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-xs font-bold border transition ${
                           config.direction === "SHORT"
-                            ? "bg-red-500 text-white border-red-400"
+                            ? "bg-[#ff3344] text-white border-red-400"
                             : "bg-slate-900 text-slate-400 border-slate-700 hover:bg-slate-700"
                         }`}
                       >
@@ -387,7 +510,6 @@ export default function AutoTradeModal({
                       </button>
                     </div>
 
-                    {/* Leverage Slider (1x to 10x) */}
                     <div>
                       <div className="flex justify-between text-[11px] text-slate-400 mb-1">
                         <span>Leverage (1x - 10x)</span>
@@ -405,14 +527,22 @@ export default function AutoTradeModal({
                     </div>
                   </>
                 ) : (
-                  <div className="h-full flex items-center justify-center text-xs text-slate-500 text-center py-4">
+                  <div className="h-full flex items-center justify-center text-xs text-slate-500 text-center py-4 font-sans">
                     Spot trading operates in 1x Long-only mode without borrowing.
                   </div>
                 )}
               </div>
 
-              {/* Master Auto-Pilot Toggle */}
-              <div className="p-4 rounded-xl bg-slate-800/60 border border-slate-700/80 flex flex-col justify-between space-y-3">
+              {/* Master Auto-Pilot Toggle (Locked for Free Users) */}
+              <div className="p-4 rounded-xl bg-[#0d121f] border border-slate-800 flex flex-col justify-between space-y-3 relative overflow-hidden">
+                {!isPro && !isAdmin && (
+                  <div className="absolute inset-0 bg-slate-950/75 backdrop-blur-[2px] z-10 flex flex-col items-center justify-center p-4 text-center">
+                    <Lock className="w-6 h-6 text-amber-400 mb-1" />
+                    <span className="text-xs font-bold text-amber-300 uppercase">Auto-Pilot Locked</span>
+                    <span className="text-[10px] text-slate-400 mt-1 font-sans">Available exclusively for Pro Subscribers & Admin</span>
+                  </div>
+                )}
+
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-semibold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
                     <Power className="w-3.5 h-3.5 text-green-400" />
@@ -421,7 +551,7 @@ export default function AutoTradeModal({
                   <span
                     className={`text-[10px] font-bold px-2 py-0.5 rounded ${
                       config.autoPilotEnabled
-                        ? "bg-green-500/20 text-green-400 border border-green-500/40"
+                        ? "bg-green-500/20 text-[#00ff66] border border-green-500/40"
                         : "bg-slate-700 text-slate-400"
                     }`}
                   >
@@ -429,16 +559,17 @@ export default function AutoTradeModal({
                   </span>
                 </div>
 
-                <p className="text-xs text-slate-400 leading-relaxed">
+                <p className="text-xs text-slate-400 leading-relaxed font-sans">
                   Automates limit order entries on pattern confirmations while obeying ATR stops and the 2-loss circuit breaker.
                 </p>
 
                 <button
                   onClick={handleToggleAutoPilot}
+                  disabled={!isPro && !isAdmin}
                   className={`w-full py-2.5 rounded-xl font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-2 transition ${
                     config.autoPilotEnabled
-                      ? "bg-red-500/20 text-red-400 border border-red-500/50 hover:bg-red-500/30"
-                      : "bg-gradient-to-r from-green-500 to-emerald-600 hover:from-green-400 hover:to-emerald-500 text-slate-950 shadow-lg shadow-green-950/40"
+                      ? "bg-red-500/20 text-[#ff3344] border border-red-500/50 hover:bg-red-500/30"
+                      : "bg-gradient-to-r from-emerald-500 to-green-600 hover:from-emerald-400 hover:to-green-500 text-slate-950 shadow-lg shadow-green-950/40"
                   }`}
                 >
                   <Power className="w-4 h-4" />
@@ -447,8 +578,63 @@ export default function AutoTradeModal({
               </div>
             </div>
 
+            {/* Telegram Bot Alert Integration - HIDDEN FOR FREE USERS */}
+            {(isPro || isAdmin) && (
+              <div className="p-5 rounded-xl bg-[#0b101c] border border-cyan-500/30 space-y-4">
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <h3 className="text-xs font-bold text-cyan-400 uppercase tracking-wider flex items-center gap-2">
+                    <Send className="w-4 h-4 text-cyan-400" />
+                    Telegram Bot Alert Dispatch (Pro Enterprise)
+                  </h3>
+                  <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                    <span>Enable Telegram Broadcasts</span>
+                    <input
+                      type="checkbox"
+                      checked={telegramConfig.enabled}
+                      onChange={(e) => handleTelegramChange({ enabled: e.target.checked })}
+                      className="w-4 h-4 accent-cyan-500"
+                    />
+                  </label>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-[10px] text-slate-400 block mb-1 uppercase">Telegram Bot Token</label>
+                    <input
+                      type="password"
+                      placeholder="e.g. 123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ"
+                      value={telegramConfig.botToken}
+                      onChange={(e) => handleTelegramChange({ botToken: e.target.value })}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white placeholder:text-slate-700 outline-none focus:border-cyan-500 font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-slate-400 block mb-1 uppercase">Telegram Chat ID / Channel ID</label>
+                    <input
+                      type="text"
+                      placeholder="e.g. 987654321 or -100123456789"
+                      value={telegramConfig.chatId}
+                      onChange={(e) => handleTelegramChange({ chatId: e.target.value })}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white placeholder:text-slate-700 outline-none focus:border-cyan-500 font-mono"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex justify-end">
+                  <button
+                    onClick={handleTestTelegram}
+                    disabled={telegramTesting || !telegramConfig.botToken || !telegramConfig.chatId}
+                    className="px-4 py-1.5 rounded-lg bg-cyan-600/30 hover:bg-cyan-600/50 text-cyan-300 border border-cyan-500/40 text-xs font-bold transition flex items-center gap-1.5 disabled:opacity-40"
+                  >
+                    {telegramTesting ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
+                    Send Test Telegram Alert
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* Fortress Risk & Order Management Parameters */}
-            <div className="p-5 rounded-xl bg-slate-800/40 border border-slate-700 space-y-4">
+            <div className="p-5 rounded-xl bg-[#0d121f] border border-slate-800 space-y-4">
               <h3 className="text-xs font-bold text-cyan-400 uppercase tracking-wider flex items-center gap-2">
                 <Layers className="w-4 h-4" />
                 Fortress Risk Controls & Position Parameters
@@ -456,7 +642,7 @@ export default function AutoTradeModal({
 
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                 {/* Max Open Trades (1-3) */}
-                <div className="bg-slate-900/80 p-3 rounded-lg border border-slate-800">
+                <div className="bg-slate-950/80 p-3 rounded-lg border border-slate-800">
                   <div className="flex items-center justify-between mb-1.5">
                     <label className="text-[11px] font-medium text-slate-400">
                       Max Open Trades
@@ -473,18 +659,18 @@ export default function AutoTradeModal({
                         className={`flex-1 py-1.5 rounded text-xs font-bold transition ${
                           config.maxOpenTrades === val
                             ? "bg-cyan-500 text-slate-950"
-                            : "bg-slate-800 text-slate-400 hover:bg-slate-700"
+                            : "bg-slate-900 text-slate-400 hover:bg-slate-800"
                         }`}
                       >
                         {val}
                       </button>
                     ))}
                   </div>
-                  <p className="text-[10px] text-slate-500 mt-1.5">Enforces hard cap (1–3 concurrent trades).</p>
+                  <p className="text-[10px] text-slate-500 mt-1.5 font-sans">Enforces hard cap (1–3 concurrent trades).</p>
                 </div>
 
                 {/* Risk % per trade */}
-                <div className="bg-slate-900/80 p-3 rounded-lg border border-slate-800">
+                <div className="bg-slate-950/80 p-3 rounded-lg border border-slate-800">
                   <div className="flex items-center justify-between mb-1.5">
                     <label className="text-[11px] font-medium text-slate-400">
                       Risk Per Trade
@@ -500,31 +686,30 @@ export default function AutoTradeModal({
                     step="0.5"
                     value={config.riskPercent}
                     onChange={(e) => handleConfigChange({ riskPercent: parseFloat(e.target.value) })}
-                    className="w-full accent-amber-500 h-1.5 bg-slate-800 rounded-lg cursor-pointer"
+                    className="w-full accent-amber-500 h-1.5 bg-slate-900 rounded-lg cursor-pointer"
                   />
-                  <p className="text-[10px] text-slate-500 mt-1.5">Compounds position value with leverage.</p>
+                  <p className="text-[10px] text-slate-500 mt-1.5 font-sans">Compounds position value with leverage.</p>
                 </div>
 
                 {/* ATR Stop Loss */}
-                <div className="bg-slate-900/80 p-3 rounded-lg border border-slate-800">
+                <div className="bg-slate-950/80 p-3 rounded-lg border border-slate-800">
                   <div className="flex items-center justify-between mb-1.5">
                     <label className="text-[11px] font-medium text-slate-400">
                       ATR Stop Loss
                     </label>
-                    <span className="text-xs font-bold text-red-400">
+                    <span className="text-xs font-bold text-[#ff3344]">
                       {config.atrMultiplier}x ATR
                     </span>
                   </div>
                   <div className="flex items-center justify-between text-xs py-1 text-slate-300 font-mono">
                     <span>Target SL:</span>
-                    <span className="text-red-400 font-bold">1.5x ATR</span>
+                    <span className="text-[#ff3344] font-bold">1.5x ATR</span>
                   </div>
-                  <p className="text-[10px] text-slate-500 mt-1">Adaptive volatility-based stop boundary.</p>
+                  <p className="text-[10px] text-slate-500 mt-1 font-sans">Adaptive volatility-based stop boundary.</p>
                 </div>
 
                 {/* Profit Vault & Trailing SL Switches */}
-                <div className="bg-slate-900/80 p-3 rounded-lg border border-slate-800 flex flex-col justify-between">
-                  {/* Profit Vault 50% */}
+                <div className="bg-slate-950/80 p-3 rounded-lg border border-slate-800 flex flex-col justify-between">
                   <label className="flex items-center justify-between cursor-pointer">
                     <span className="text-[11px] text-slate-300 font-medium">Profit Vault (50%)</span>
                     <input
@@ -534,7 +719,6 @@ export default function AutoTradeModal({
                       className="w-4 h-4 rounded text-cyan-500 bg-slate-950 border-slate-700"
                     />
                   </label>
-                  {/* Trailing SL at 1:1 RR */}
                   <label className="flex items-center justify-between cursor-pointer mt-2">
                     <span className="text-[11px] text-slate-300 font-medium">BE Trailing at 1:1 RR</span>
                     <input
@@ -544,15 +728,14 @@ export default function AutoTradeModal({
                       className="w-4 h-4 rounded text-cyan-500 bg-slate-950 border-slate-700"
                     />
                   </label>
-                  <p className="text-[10px] text-slate-500 mt-1.5">Vault sends 50% profit to Spot; moves SL to BE at 1:1 RR.</p>
+                  <p className="text-[10px] text-slate-500 mt-1.5 font-sans">Vault sweeps 50% profit to Spot; moves SL to BE at 1:1 RR.</p>
                 </div>
               </div>
             </div>
 
             {/* Calculations & Liquidation Safety Warning */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {/* Order Sizing Preview */}
-              <div className="p-4 rounded-xl bg-slate-800/40 border border-slate-700 space-y-3">
+              <div className="p-4 rounded-xl bg-[#0d121f] border border-slate-800 space-y-3">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
                     <Target className="w-3.5 h-3.5 text-cyan-400" />
@@ -565,19 +748,19 @@ export default function AutoTradeModal({
 
                 {positionPreview && (
                   <div className="grid grid-cols-3 gap-2">
-                    <div className="bg-slate-900/80 p-2.5 rounded-lg">
+                    <div className="bg-slate-950/80 p-2.5 rounded-lg border border-slate-800">
                       <span className="text-[10px] text-slate-500 block uppercase">Quantity</span>
                       <span className="text-xs font-bold text-cyan-400 font-mono">
                         {positionPreview.quantity} {currentSymbol.replace("USDT", "")}
                       </span>
                     </div>
-                    <div className="bg-slate-900/80 p-2.5 rounded-lg">
+                    <div className="bg-slate-950/80 p-2.5 rounded-lg border border-slate-800">
                       <span className="text-[10px] text-slate-500 block uppercase">Notional</span>
                       <span className="text-xs font-bold text-white font-mono">
                         ${positionPreview.positionValue.toLocaleString()}
                       </span>
                     </div>
-                    <div className="bg-slate-900/80 p-2.5 rounded-lg">
+                    <div className="bg-slate-950/80 p-2.5 rounded-lg border border-slate-800">
                       <span className="text-[10px] text-slate-500 block uppercase">Margin</span>
                       <span className="text-xs font-bold text-amber-400 font-mono">
                         ${positionPreview.marginRequired.toLocaleString()}
@@ -586,14 +769,13 @@ export default function AutoTradeModal({
                   </div>
                 )}
 
-                <div className="text-[11px] text-slate-400 flex items-center justify-between pt-1">
+                <div className="text-[11px] text-slate-400 flex items-center justify-between pt-1 font-mono">
                   <span>Entry Mechanism:</span>
-                  <span className="font-bold text-green-400">LIMIT ORDER (Zero Slippage)</span>
+                  <span className="font-bold text-[#00ff66]">LIMIT ORDER (Zero Slippage)</span>
                 </div>
               </div>
 
-              {/* Liquidation & Stop Loss Monitor */}
-              <div className="p-4 rounded-xl bg-slate-800/40 border border-slate-700 space-y-3">
+              <div className="p-4 rounded-xl bg-[#0d121f] border border-slate-800 space-y-3">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
                     <Shield className="w-3.5 h-3.5 text-red-400" />
@@ -607,13 +789,13 @@ export default function AutoTradeModal({
                 </div>
 
                 <div className="grid grid-cols-2 gap-2">
-                  <div className="bg-slate-900/80 p-2.5 rounded-lg">
+                  <div className="bg-slate-950/80 p-2.5 rounded-lg border border-slate-800">
                     <span className="text-[10px] text-slate-500 block uppercase">1.5x ATR SL</span>
-                    <span className="text-xs font-bold text-red-400 font-mono">
+                    <span className="text-xs font-bold text-[#ff3344] font-mono">
                       {atrPreview ? formatPrice(atrPreview.stopLossPrice) : "—"}
                     </span>
                   </div>
-                  <div className="bg-slate-900/80 p-2.5 rounded-lg">
+                  <div className="bg-slate-950/80 p-2.5 rounded-lg border border-slate-800">
                     <span className="text-[10px] text-slate-500 block uppercase">
                       {config.marketType === "Futures" ? "Liquidation Price" : "Risk Level"}
                     </span>
@@ -623,10 +805,9 @@ export default function AutoTradeModal({
                   </div>
                 </div>
 
-                {/* Prominent Liquidation Proximity Warning */}
                 {liquidationPreview?.proximity.isTooClose && (
                   <div className="p-2.5 rounded-lg bg-red-950/90 border border-red-500/80 flex items-start gap-2">
-                    <AlertTriangle className="w-4 h-4 text-red-400 shrink-0 mt-0.5 animate-pulse" />
+                    <AlertTriangle className="w-4 h-4 text-[#ff3344] shrink-0 mt-0.5 animate-pulse" />
                     <p className="text-[11px] font-bold text-red-300 leading-snug">
                       {liquidationPreview.proximity.warningMessage}
                     </p>
@@ -649,7 +830,7 @@ export default function AutoTradeModal({
               </div>
 
               {openTrades.length === 0 ? (
-                <div className="p-6 rounded-xl bg-slate-950/60 border border-slate-800 text-center text-xs text-slate-500">
+                <div className="p-6 rounded-xl bg-slate-950/60 border border-slate-800 text-center text-xs text-slate-500 font-sans">
                   No active trades currently open. New trades will enter via LIMIT order upon pattern verification.
                 </div>
               ) : (
@@ -663,8 +844,8 @@ export default function AutoTradeModal({
                         <span
                           className={`font-bold px-2 py-0.5 rounded text-[10px] ${
                             trade.direction === "LONG"
-                              ? "bg-green-500/20 text-green-400"
-                              : "bg-red-500/20 text-red-400"
+                              ? "bg-green-500/20 text-[#00ff66]"
+                              : "bg-red-500/20 text-[#ff3344]"
                           }`}
                         >
                           {trade.direction} {trade.leverage}x
@@ -680,14 +861,14 @@ export default function AutoTradeModal({
                         </div>
                         <div>
                           <span className="text-[10px] text-slate-500 block">Current SL</span>
-                          <span className={trade.trailingSlTriggered ? "text-cyan-400 font-bold" : "text-red-400"}>
+                          <span className={trade.trailingSlTriggered ? "text-cyan-400 font-bold" : "text-[#ff3344]"}>
                             {formatPrice(trade.stopLossPrice)}
                             {trade.trailingSlTriggered && " (BE)"}
                           </span>
                         </div>
                         <div>
                           <span className="text-[10px] text-slate-500 block">TP Target</span>
-                          <span className="text-green-400">{formatPrice(trade.takeProfitPrice)}</span>
+                          <span className="text-[#00ff66]">{formatPrice(trade.takeProfitPrice)}</span>
                         </div>
                       </div>
 
@@ -708,15 +889,15 @@ export default function AutoTradeModal({
               )}
             </div>
 
-            {/* API Credentials Input (Optional / Expandable) */}
-            <div className="p-4 rounded-xl bg-slate-950/50 border border-slate-800 space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold text-slate-400 flex items-center gap-1.5">
+            {/* API Credentials Input with AES-256 Protection */}
+            <div className="p-4 rounded-xl bg-[#0b101c] border border-cyan-500/20 space-y-3">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <span className="text-xs font-semibold text-slate-300 flex items-center gap-1.5 uppercase">
                   <Key className="w-3.5 h-3.5 text-amber-400" />
-                  Binance API Keys (Live Execution)
+                  Binance API Keys (AES-256 Encrypted Storage)
                 </span>
-                <span className="text-[10px] text-slate-500">
-                  Leave blank for Sandbox Simulation
+                <span className="text-[10px] text-[#00ff66] font-bold">
+                  ● AES-256 ENCRYPTION ACTIVE
                 </span>
               </div>
 
@@ -726,22 +907,24 @@ export default function AutoTradeModal({
                   placeholder="Binance API Key"
                   value={config.apiKey}
                   onChange={(e) => handleConfigChange({ apiKey: e.target.value })}
-                  className="bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white placeholder:text-slate-600 outline-none focus:border-cyan-500"
+                  className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white placeholder:text-slate-600 outline-none focus:border-cyan-500 font-mono"
                 />
                 <input
                   type="password"
                   placeholder="Binance API Secret"
                   value={config.apiSecret}
                   onChange={(e) => handleConfigChange({ apiSecret: e.target.value })}
-                  className="bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white placeholder:text-slate-600 outline-none focus:border-cyan-500"
+                  className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white placeholder:text-slate-600 outline-none focus:border-cyan-500 font-mono"
                 />
               </div>
+              <p className="text-[10px] text-slate-500 font-sans">
+                Keys are encrypted client-side using AES-256 prior to persisting to browser storage. Leave empty to use simulation sandbox mode.
+              </p>
             </div>
           </div>
 
           {/* Bottom Action Footer with Massive Emergency Stop */}
-          <div className="px-6 py-4 bg-slate-950 border-t border-slate-800 flex flex-col sm:flex-row items-center justify-between gap-3">
-            {/* Rule 3: MASSIVE RED 'EMERGENCY STOP' KILL SWITCH BUTTON */}
+          <div className="px-6 py-4 bg-[#060910] border-t border-slate-800 flex flex-col sm:flex-row items-center justify-between gap-3">
             <button
               onClick={handleEmergencyStop}
               disabled={emergencyLoading}
@@ -752,7 +935,6 @@ export default function AutoTradeModal({
             </button>
 
             <div className="flex items-center gap-3 w-full sm:w-auto">
-              {/* Trigger Single Trade Button */}
               <button
                 onClick={handleExecuteNow}
                 disabled={executing || !currentPrice}
@@ -777,7 +959,6 @@ export default function AutoTradeModal({
         </div>
       </div>
 
-      {/* Risk Disclaimer Modal */}
       <RiskDisclaimerModal
         open={disclaimerOpen}
         onClose={() => setDisclaimerOpen(false)}

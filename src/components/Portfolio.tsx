@@ -1,10 +1,12 @@
 import { useEffect, useState, useCallback, useMemo } from "react";
-import { Wallet, Plus, Trash2, Loader2, TrendingUp, TrendingDown, RefreshCw, ArrowUpRight, ArrowDownRight } from "lucide-react";
+import { Wallet, Plus, Trash2, Loader2, TrendingUp, TrendingDown, RefreshCw, ArrowUpRight, ArrowDownRight, FileText, Download } from "lucide-react";
 import { COINS, PRO_COINS } from "../constants";
 import { fetchCandles } from "../lib/binance";
 import { formatPrice } from "../lib/patterns";
 import { supabase } from "../lib/supabase";
 import { useAuth } from "../lib/auth";
+import { autoTradeEngine } from "../lib/BinanceAutoTrade";
+import { generateTaxReportPDF } from "../lib/TaxExportService";
 import type { PortfolioHolding } from "../types";
 
 const ALL_COINS = [...COINS, ...PRO_COINS];
@@ -99,6 +101,24 @@ export default function Portfolio() {
   const totalPnl = totalValue - totalCost;
   const totalPnlPercent = totalCost > 0 ? (totalPnl / totalCost) * 100 : 0;
 
+  const handleExportTaxPDF = useCallback(() => {
+    const allTrades = autoTradeEngine.getAllTrades();
+    const closedTrades = allTrades.filter((t) => t.status === "CLOSED");
+    const realizedPnl = closedTrades.reduce((acc, t) => acc + (t.realizedPnl ?? 0), 0);
+    const feesPaid = closedTrades.reduce((acc, t) => acc + ((t.positionValue || (t.entryPrice * t.quantity)) * 0.0004), 0);
+    const fundingEarned = autoTradeEngine.getProfitVaultTotal() * 0.4; // Estimated 40% funding component
+    const netIncome = realizedPnl - feesPaid + fundingEarned;
+
+    generateTaxReportPDF({
+      userEmail: user?.email || undefined,
+      totalRealizedPnl: realizedPnl,
+      totalFeesPaid: feesPaid,
+      totalFundingFeesEarned: fundingEarned,
+      netTaxableIncome: netIncome,
+      trades: closedTrades,
+    });
+  }, [user?.email]);
+
   const addHolding = useCallback(async () => {
     if (!user) return;
     const qty = parseFloat(quantity);
@@ -166,16 +186,28 @@ export default function Portfolio() {
           </h2>
           <p className="text-xs text-slate-500 mt-0.5">Track your holdings and see real-time P/L</p>
         </div>
-        {holdings.length > 0 && (
+        <div className="flex items-center gap-2">
+          {/* Tax Export Service Trigger Button */}
           <button
-            onClick={fetchPrices}
-            disabled={refreshing}
-            className="flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-sm font-medium transition-colors disabled:opacity-50"
+            onClick={handleExportTaxPDF}
+            className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-[#00ff66]/10 hover:bg-[#00ff66]/20 border border-[#00ff66]/40 text-[#00ff66] text-xs font-black uppercase tracking-wider transition-all shadow-md"
+            title="Download Audited Tax Report (PDF)"
           >
-            <RefreshCw className={`w-4 h-4 ${refreshing ? "animate-spin" : ""}`} />
-            <span className="hidden sm:inline">Refresh Prices</span>
+            <Download className="w-3.5 h-3.5" />
+            <span>Export Tax PDF</span>
           </button>
-        )}
+
+          {holdings.length > 0 && (
+            <button
+              onClick={fetchPrices}
+              disabled={refreshing}
+              className="flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-sm font-medium transition-colors disabled:opacity-50"
+            >
+              <RefreshCw className={`w-4 h-4 ${refreshing ? "animate-spin" : ""}`} />
+              <span className="hidden sm:inline">Refresh Prices</span>
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Summary cards */}

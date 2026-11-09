@@ -15,6 +15,8 @@ export interface SwarmAgentMessage {
   timestamp: string;
 }
 
+import { getGeminiApiKey } from "./ModelManager";
+
 export interface SwarmDebateResult {
   symbol: string;
   price: number;
@@ -25,6 +27,7 @@ export interface SwarmDebateResult {
   recommendedLeverage: number;
   recommendedPositionPct: number;
   messages: SwarmAgentMessage[];
+  apiKeyUsed?: boolean;
 }
 
 export function simulateSwarmDebate(params: {
@@ -152,6 +155,9 @@ export function simulateSwarmDebate(params: {
     message: verdictMessage,
   };
 
+  // Inspect localStorage for Gemini key
+  const hasGeminiKey = Boolean(getGeminiApiKey());
+
   return {
     symbol,
     price,
@@ -162,5 +168,6 @@ export function simulateSwarmDebate(params: {
     recommendedLeverage,
     recommendedPositionPct,
     messages: [bullMessage, bearMessage, riskMessage],
+    apiKeyUsed: hasGeminiKey,
   };
 }

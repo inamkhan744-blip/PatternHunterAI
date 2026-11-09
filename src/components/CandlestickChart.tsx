@@ -32,6 +32,23 @@ interface Props {
   fomoRemainingSeconds?: number;
 }
 
+// Helper to determine price format precision and minMove based on sample price
+function getPriceFormatOptions(price: number): { type: "price"; precision: number; minMove: number } {
+  if (price <= 0 || !Number.isFinite(price)) {
+    return { type: "price", precision: 2, minMove: 0.01 };
+  }
+  if (price >= 1) {
+    return { type: "price", precision: 2, minMove: 0.01 };
+  } else if (price >= 0.01) {
+    return { type: "price", precision: 4, minMove: 0.0001 };
+  } else if (price >= 0.0001) {
+    return { type: "price", precision: 6, minMove: 0.000001 };
+  } else {
+    // Very small coin prices like SHIB, PEPE, BONK ($0.0000123)
+    return { type: "price", precision: 8, minMove: 0.00000001 };
+  }
+}
+
 export default function CandlestickChart({
   candles,
   pattern,
@@ -317,7 +334,10 @@ export default function CandlestickChart({
         horzLines: { color: "rgba(148, 163, 184, 0.08)" },
       },
       crosshair: { mode: CrosshairMode.Normal },
-      rightPriceScale: { borderColor: "rgba(148, 163, 184, 0.2)", autoScale: true },
+      rightPriceScale: {
+        borderColor: "rgba(148, 163, 184, 0.2)",
+        autoScale: true,
+      },
       timeScale: {
         borderColor: "rgba(148, 163, 184, 0.2)",
         timeVisible: true,
@@ -460,15 +480,30 @@ export default function CandlestickChart({
       return;
     }
 
+    // Dynamic price formatting based on coin price scale
+    const samplePrice = candles[candles.length - 1]?.close || candles[0]?.close || 1;
+    const priceFormatOptions = getPriceFormatOptions(samplePrice);
+
+    // Apply autoScale and dynamic price format to price scales and series
+    try {
+      chart.priceScale("right").applyOptions({ autoScale: true });
+    } catch { /* */ }
+
     try {
       if (chartType === "line") {
         candleSeries.applyOptions({ visible: false });
-        lineChartSeriesRef.current?.applyOptions({ visible: true });
+        lineChartSeriesRef.current?.applyOptions({
+          visible: true,
+          priceFormat: priceFormatOptions,
+        });
         lineChartSeriesRef.current?.setData(
           candles.map((c) => ({ time: c.time as Time, value: c.close }))
         );
       } else {
-        candleSeries.applyOptions({ visible: true });
+        candleSeries.applyOptions({
+          visible: true,
+          priceFormat: priceFormatOptions,
+        });
         lineChartSeriesRef.current?.applyOptions({ visible: false });
         candleSeries.setData(
           candles.map((c) => ({
@@ -642,6 +677,7 @@ export default function CandlestickChart({
     requestAnimationFrame(() => {
       try { chart.timeScale().fitContent(); } catch { /* */ }
       try { rsiChartRef.current?.timeScale().fitContent(); } catch { /* */ }
+      try { chart.priceScale("right").applyOptions({ autoScale: true }); } catch { /* */ }
       drawSMCOverlay();
     });
   }, [candles, pattern, showIndicators, chartType, drawSMCOverlay]);

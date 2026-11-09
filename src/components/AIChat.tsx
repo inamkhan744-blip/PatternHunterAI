@@ -136,7 +136,11 @@ export default function AIChat({
   }, [loading, messages, coin, price, rsi, trend, pattern, onShowCoin]);
 
   const toggleVoice = useCallback(() => {
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const win = window as unknown as {
+      SpeechRecognition?: new () => unknown;
+      webkitSpeechRecognition?: new () => unknown;
+    };
+    const SR = win.SpeechRecognition || win.webkitSpeechRecognition;
     if (!SR) {
       setError("Voice recognition not supported in this browser.");
       return;
@@ -148,7 +152,16 @@ export default function AIChat({
       return;
     }
 
-    const recognition = new SR();
+    const recognition = new SR() as {
+      continuous: boolean;
+      interimResults: boolean;
+      lang: string;
+      onresult: ((event: { results: { 0: { 0: { transcript: string } } } }) => void) | null;
+      onerror: (() => void) | null;
+      onend: (() => void) | null;
+      start: () => void;
+      stop: () => void;
+    };
     recognition.continuous = false;
     recognition.interimResults = false;
     recognition.lang = "en-US";

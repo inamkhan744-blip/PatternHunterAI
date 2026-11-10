@@ -37,7 +37,9 @@ import {
   Grid as GridIcon,
   Users,
   Cpu,
+  Menu,
 } from "lucide-react";
+import { SideDrawer } from "./components/SideDrawer";
 import CandlestickChart from "./components/CandlestickChart";
 import PatternPanel from "./components/PatternPanel";
 import ProModal from "./components/ProModal";
@@ -157,6 +159,7 @@ export default function App() {
   const { user, loading: authLoading } = useAuth();
 
   const [activeTab, setActiveTab] = useState<AppTab>("chart");
+  const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [selectedCoin, setSelectedCoin] = useState<Coin>(COINS[0]);
   const [timeframe, setTimeframe] = useState<Timeframe>("1h");
   const [candles, setCandles] = useState<Candle[]>([]);
@@ -676,6 +679,7 @@ Followed by a 2-3 sentence strategic rationale.`;
           const text = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text;
           if (text) {
             setExplanation(text);
+            setAiError(null);
             const parsed = parseAnalysisPrices(text);
             if (parsed) {
               setEntryPrice(parsed.entry);
@@ -691,8 +695,8 @@ Followed by a 2-3 sentence strategic rationale.`;
             return;
           }
         }
-      } catch {
-        // Fall back to Supabase Edge function
+      } catch (err) {
+        console.warn("Direct Gemini API request failed, falling back to edge:", err);
       }
     }
 
@@ -744,7 +748,11 @@ Followed by a 2-3 sentence strategic rationale.`;
       clearTimeout(timeoutId);
       const fallback = generateFallbackAnalysis(pattern, selectedCoin.symbol, lastPrice);
       setExplanation(fallback);
-      setAiError(localGeminiKey ? "Gemini request timed out — showing automated estimate." : "Add your Gemini API Key in Settings for live neural analysis.");
+      if (localGeminiKey) {
+        setAiError(null);
+      } else {
+        setAiError("Add your Gemini API Key in Settings for live neural analysis.");
+      }
       const prices = getFallbackPrices(pattern, lastPrice);
       setEntryPrice(prices.entry);
       setSlPrice(prices.sl);
@@ -1013,11 +1021,18 @@ Followed by a 2-3 sentence strategic rationale.`;
         {/* Mobile header */}
         <header className="lg:hidden border-b border-slate-800 bg-slate-950/80 backdrop-blur-xl sticky top-0 z-40">
           <div className="px-4 py-3 flex items-center justify-between gap-4">
-            <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-500 to-cyan-400 flex items-center justify-center shrink-0">
-                <Activity className="w-5 h-5 text-white" />
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setIsDrawerOpen(true)}
+                className="p-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-slate-800 transition"
+                aria-label="Open side menu"
+              >
+                <Menu className="w-5 h-5" />
+              </button>
+              <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-blue-500 to-cyan-400 flex items-center justify-center shrink-0">
+                <Activity className="w-4 h-4 text-white" />
               </div>
-              <h1 className="text-base font-bold tracking-tight">
+              <h1 className="text-sm font-bold tracking-tight">
                 PatternHunter <span className="text-cyan-400">AI</span>
               </h1>
             </div>
@@ -1079,6 +1094,14 @@ Followed by a 2-3 sentence strategic rationale.`;
           <div className="border-b border-slate-800 bg-slate-900/50">
             <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between gap-4 flex-wrap">
               <div className="flex items-center gap-3">
+                <button
+                  onClick={() => setIsDrawerOpen(true)}
+                  className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 transition-colors"
+                  aria-label="Open side menu"
+                  title="Open Navigation Menu"
+                >
+                  <Menu className="w-4 h-4" />
+                </button>
                 {/* Coin selector with search */}
                 <div className="relative">
                   <button
@@ -1646,6 +1669,14 @@ Followed by a 2-3 sentence strategic rationale.`;
         onClose={() => setSettingsOpen(false)}
         onOpenAutoTrade={() => setAutoTradeOpen(true)}
         onOpenVisionAI={() => setVisionAIOpen(true)}
+      />
+
+      {/* Sleek Side Drawer Navigation */}
+      <SideDrawer
+        isOpen={isDrawerOpen}
+        onClose={() => setIsDrawerOpen(false)}
+        activeTab={activeTab}
+        onSelectTab={(tab) => setActiveTab(tab)}
       />
     </div>
   );

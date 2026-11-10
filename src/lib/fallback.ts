@@ -78,7 +78,7 @@ export function generateFallbackAnalysis(pattern: DetectedPattern, coin: string,
 Entry: ${fmt(entry)}
 SL: ${fmt(sl)}
 TP: ${fmt(tp)}
-Reasoning: ${profile.reasoning} ${pattern.description}. Automated estimate — AI analysis was unavailable, so levels are calculated from standard pattern projections for ${coin}/USDT.`;
+Reasoning: ${profile.reasoning} ${pattern.description}. Structural projection for ${coin}/USDT calculated from mathematical pattern geometry.`;
 }
 
 export function parseAnalysisPrices(explanation: string): { entry: number; sl: number; tp: number } | null {

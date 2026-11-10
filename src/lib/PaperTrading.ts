@@ -106,6 +106,15 @@ export class PaperTradingEngine {
     leverage?: number;
     riskPercent?: number;
   }): { success: boolean; trade?: PaperTrade; error?: string } {
+    // Check if an active open trade already exists for this symbol (Execution Lock)
+    const existingOpen = this.account.trades.find((t) => t.symbol === params.symbol && t.status === "OPEN");
+    if (existingOpen) {
+      return {
+        success: false,
+        error: `Trade blocked: Active paper position already exists for ${params.symbol}.`,
+      };
+    }
+
     const marketType = params.marketType ?? "Spot";
     const direction = params.direction ?? "LONG";
     const leverage = marketType === "Futures" ? Math.max(1, Math.min(10, params.leverage ?? 1)) : 1;

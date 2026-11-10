@@ -21,6 +21,21 @@ export default function RiskCalculator({ entryPrice: defaultEntry, direction: pr
     }
   }, [propDirection]);
 
+  // Recalculate default SL & TP whenever defaultEntry or direction changes
+  useEffect(() => {
+    const baseEntry = defaultEntry || parseFloat(entryPriceInput) || 65000;
+    if (defaultEntry) {
+      setEntryPriceInput(String(defaultEntry));
+    }
+    if (direction === "short") {
+      setStopLossInput(String(Number((baseEntry * 1.02).toFixed(2))));
+      setTakeProfitInput(String(Number((baseEntry * 0.96).toFixed(2))));
+    } else {
+      setStopLossInput(String(Number((baseEntry * 0.98).toFixed(2))));
+      setTakeProfitInput(String(Number((baseEntry * 1.04).toFixed(2))));
+    }
+  }, [defaultEntry, direction]);
+
   const parsedBalance = parseFloat(balance) || 10000;
   const parsedRisk = Math.min(Math.max(parseFloat(riskPct) || 1, 0.1), 10);
   const entry = parseFloat(entryPriceInput) || 1;

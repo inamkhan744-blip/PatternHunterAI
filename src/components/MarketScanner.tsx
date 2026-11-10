@@ -21,9 +21,10 @@ interface Props {
   onSelectCoin: (coin: Coin) => void;
   watchlistSymbols: Set<string>;
   onToggleWatch: (coin: Coin) => void;
+  isPro?: boolean;
 }
 
-export default function MarketScanner({ timeframe, onSelectCoin, watchlistSymbols, onToggleWatch }: Props) {
+export default function MarketScanner({ timeframe, onSelectCoin, watchlistSymbols, onToggleWatch, isPro }: Props) {
   const [rows, setRows] = useState<MarketRow[]>([]);
   const [scanning, setScanning] = useState(true);
   const [sortKey, setSortKey] = useState<SortKey>("change");

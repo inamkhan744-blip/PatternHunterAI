@@ -5,7 +5,15 @@ const corsHeaders = {
 };
 
 const GEMINI_TIMEOUT_MS = 20000;
-const GEMINI_MODELS = ["gemini-3.1-flash-lite", "gemini-2.0-flash"];
+const GEMINI_MODELS = ["gemini-1.5-flash", "gemini-2.0-flash"];
+
+function stripMarkdown(raw: string): string {
+  return raw
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/g, "")
+    .replace(/```json\n?|```/g, "")
+    .trim();
+}
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
@@ -98,7 +106,7 @@ Calculate Entry, SL, and TP based on the current price of $${price} and the ${di
 
     if (geminiText) {
       return new Response(
-        JSON.stringify({ explanation: geminiText }),
+        JSON.stringify({ explanation: stripMarkdown(geminiText) }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }

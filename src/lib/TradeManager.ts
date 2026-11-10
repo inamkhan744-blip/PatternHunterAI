@@ -7,6 +7,7 @@
  */
 
 import { MarketType, TradeDirection } from "./BinanceAutoTrade";
+import { pushNotificationService } from "./PushNotification";
 
 export interface ActiveTrade {
   id: string;
@@ -20,6 +21,13 @@ export interface ActiveTrade {
   notionalValue: number;
   stopLossPrice: number;
   takeProfitPrice: number;
+  initialStopLoss: number;
+  atrAtEntry?: number;
+  peakPrice?: number;
+  troughPrice?: number;
+  trailingStage?: "INITIAL" | "BREAK_EVEN" | "TRAILING_ATR";
+  slOrderId?: string;
+  tpOrderId?: string;
   source: "MANUAL" | "AUTO-PILOT";
   mode: "REAL" | "PAPER";
   openTime: number;
@@ -44,6 +52,7 @@ export interface ClosedTrade {
   mode: "REAL" | "PAPER";
   openTime: number;
   closeTime: number;
+  ocoStatus?: "SL_CANCELLED" | "TP_CANCELLED" | "NONE";
 }
 
 export interface TradeStats {
@@ -160,18 +169,23 @@ class TradeManager {
     quantity: number;
     stopLossPrice?: number;
     takeProfitPrice?: number;
+    atrAtEntry?: number;
     direction?: TradeDirection;
     marketType?: MarketType;
     leverage?: number;
     source?: "MANUAL" | "AUTO-PILOT";
     mode?: "REAL" | "PAPER";
     customId?: string;
+    slOrderId?: string;
+    tpOrderId?: string;
   }): ActiveTrade {
     const direction = params.direction ?? "LONG";
     const marketType = params.marketType ?? "Spot";
     const leverage = marketType === "Futures" ? (params.leverage ?? 1) : 1;
     const currentPrice = params.currentPrice ?? params.entryPrice;
     const notionalValue = Number((params.entryPrice * params.quantity).toFixed(2));
+    const sl = params.stopLossPrice ?? (direction === "LONG" ? params.entryPrice * 0.97 : params.entryPrice * 1.03);
+    const tp = params.takeProfitPrice ?? (direction === "LONG" ? params.entryPrice * 1.06 : params.entryPrice * 0.94);
 
     const pnl = this.calculatePnl(params.entryPrice, currentPrice, params.quantity, direction, leverage, marketType);
 
@@ -185,8 +199,15 @@ class TradeManager {
       currentPrice,
       quantity: params.quantity,
       notionalValue,
-      stopLossPrice: params.stopLossPrice ?? (direction === "LONG" ? params.entryPrice * 0.97 : params.entryPrice * 1.03),
-      takeProfitPrice: params.takeProfitPrice ?? (direction === "LONG" ? params.entryPrice * 1.06 : params.entryPrice * 0.94),
+      stopLossPrice: sl,
+      takeProfitPrice: tp,
+      initialStopLoss: sl,
+      atrAtEntry: params.atrAtEntry ?? params.entryPrice * 0.015,
+      peakPrice: params.entryPrice,
+      troughPrice: params.entryPrice,
+      trailingStage: "INITIAL",
+      slOrderId: params.slOrderId,
+      tpOrderId: params.tpOrderId,
       source: params.source ?? "MANUAL",
       mode: params.mode ?? "REAL",
       openTime: Date.now(),
@@ -208,6 +229,57 @@ class TradeManager {
       if (trade.symbol !== symbol) return trade;
       changed = true;
 
+      // Update peak / trough prices
+      let updatedPeak = trade.peakPrice ?? trade.entryPrice;
+      let updatedTrough = trade.troughPrice ?? trade.entryPrice;
+      if (trade.direction === "LONG") {
+        updatedPeak = Math.max(updatedPeak, currentPrice);
+      } else {
+        updatedTrough = Math.min(updatedTrough, currentPrice);
+      }
+
+      // Trailing Stop Loss Logic:
+      // Once price reaches 1:1 RR, move SL to break-even (entry price).
+      // Then trail SL by 1.5x ATR from peak (for LONG) or trough (for SHORT).
+      let currentSl = trade.stopLossPrice;
+      let trailingStage = trade.trailingStage ?? "INITIAL";
+      const initialRisk = Math.abs(trade.entryPrice - trade.initialStopLoss);
+      const safeAtr = trade.atrAtEntry && trade.atrAtEntry > 0 ? trade.atrAtEntry : trade.entryPrice * 0.015;
+      const trailDistance = 1.5 * safeAtr;
+
+      if (trade.direction === "LONG") {
+        const reward = currentPrice - trade.entryPrice;
+        if (initialRisk > 0 && reward >= initialRisk) {
+          const dynamicTrail = updatedPeak - trailDistance;
+          const targetSl = Math.max(trade.entryPrice, dynamicTrail);
+          if (targetSl > currentSl) {
+            currentSl = Number(targetSl.toFixed(4));
+            trailingStage = targetSl > trade.entryPrice ? "TRAILING_ATR" : "BREAK_EVEN";
+            pushNotificationService.notifyTrailingStopMoved({
+              symbol: trade.symbol,
+              newStopLoss: currentSl,
+              stage: trailingStage,
+            }).catch(() => {});
+          }
+        }
+      } else {
+        // SHORT
+        const reward = trade.entryPrice - currentPrice;
+        if (initialRisk > 0 && reward >= initialRisk) {
+          const dynamicTrail = updatedTrough + trailDistance;
+          const targetSl = Math.min(trade.entryPrice, dynamicTrail);
+          if (targetSl < currentSl) {
+            currentSl = Number(targetSl.toFixed(4));
+            trailingStage = targetSl < trade.entryPrice ? "TRAILING_ATR" : "BREAK_EVEN";
+            pushNotificationService.notifyTrailingStopMoved({
+              symbol: trade.symbol,
+              newStopLoss: currentSl,
+              stage: trailingStage,
+            }).catch(() => {});
+          }
+        }
+      }
+
       const pnl = this.calculatePnl(
         trade.entryPrice,
         currentPrice,
@@ -220,20 +292,24 @@ class TradeManager {
       // Check automated SL / TP triggers
       let reason: "TP" | "SL" | null = null;
       if (trade.direction === "LONG") {
-        if (currentPrice <= trade.stopLossPrice) reason = "SL";
+        if (currentPrice <= currentSl) reason = "SL";
         else if (currentPrice >= trade.takeProfitPrice) reason = "TP";
       } else {
-        if (currentPrice >= trade.stopLossPrice) reason = "SL";
+        if (currentPrice >= currentSl) reason = "SL";
         else if (currentPrice <= trade.takeProfitPrice) reason = "TP";
       }
 
       if (reason) {
-        toClose.push({ trade, reason });
+        toClose.push({ trade: { ...trade, stopLossPrice: currentSl }, reason });
       }
 
       return {
         ...trade,
         currentPrice,
+        stopLossPrice: currentSl,
+        peakPrice: updatedPeak,
+        troughPrice: updatedTrough,
+        trailingStage,
         unrealizedPnl: pnl.pnl,
         unrealizedPnlPercent: pnl.pnlPercent,
       };
@@ -266,6 +342,14 @@ class TradeManager {
       trade.marketType
     );
 
+    // OCO Execution note: if Take Profit was hit, cancel corresponding Stop Loss
+    let ocoStatus: "SL_CANCELLED" | "TP_CANCELLED" | "NONE" = "NONE";
+    if (exitReason === "TP") {
+      ocoStatus = "SL_CANCELLED";
+    } else if (exitReason === "SL") {
+      ocoStatus = "TP_CANCELLED";
+    }
+
     const closed: ClosedTrade = {
       id: trade.id,
       symbol: trade.symbol,
@@ -283,7 +367,17 @@ class TradeManager {
       mode: trade.mode,
       openTime: trade.openTime,
       closeTime: Date.now(),
+      ocoStatus,
     };
+
+    if (exitReason === "TP" || exitReason === "SL") {
+      pushNotificationService.notifyOcoTriggered({
+        symbol: trade.symbol,
+        exitReason,
+        exitPrice: closePrice,
+        pnl: pnl.pnl,
+      }).catch(() => {});
+    }
 
     this.activeTrades = this.activeTrades.filter((t) => t.id !== tradeId);
     this.tradeHistory = [closed, ...this.tradeHistory];

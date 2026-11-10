@@ -16,8 +16,14 @@ import {
   Check,
   AlertCircle,
   Crown,
+  Webhook,
+  Copy,
+  Play,
+  RotateCw,
 } from "lucide-react";
 import { usePWAInstall } from "../lib/pwa";
+import { pushNotificationService } from "../lib/PushNotification";
+import { webhookService } from "../lib/WebhookService";
 import { storeEncryptedApiKeys } from "../lib/CryptoSecurity";
 import { loadTelegramConfig, saveTelegramConfig } from "../lib/TelegramService";
 import { autoTradeEngine } from "../lib/BinanceAutoTrade";
@@ -61,6 +67,7 @@ export default function SettingsModal({
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [hapticFeedback, setHapticFeedback] = useState(true);
+  const [pushPermission, setPushPermission] = useState<NotificationPermission>(() => pushNotificationService.getPermission());
 
   // Multi-Exchange tab state
   const [selectedExchange, setSelectedExchange] = useState<ExchangeId>(() => getActiveExchange());
@@ -85,6 +92,13 @@ export default function SettingsModal({
   const [toast, setToast] = useState<ToastState | null>(null);
   const [saveSuccess, setSaveSuccess] = useState(false);
 
+  // TradingView Webhook State
+  const [webhookUrl, setWebhookUrl] = useState<string>("");
+  const [copiedUrl, setCopiedUrl] = useState(false);
+  const [copiedPayload, setCopiedPayload] = useState(false);
+  const [testAction, setTestAction] = useState<"BUY" | "SELL">("BUY");
+  const [testSymbol, setTestSymbol] = useState("BTCUSDT");
+
   // Load stored credentials when opening modal or changing exchange
   useEffect(() => {
     if (!open) return;
@@ -97,10 +111,71 @@ export default function SettingsModal({
     setTelegramTokenState(tg.botToken || "");
     setTelegramChatIdState(tg.chatId || "");
 
+    setWebhookUrl(webhookService.getWebhookUrl());
+
     setPingResult(null);
+    setPushPermission(pushNotificationService.getPermission());
     setToast(null);
     setSaveSuccess(false);
   }, [open, selectedExchange]);
+
+  const handleRequestPushPermission = async () => {
+    const res = await pushNotificationService.requestPermission();
+    setPushPermission(res);
+    if (res === "granted") {
+      setToast({ type: "success", message: "Push notifications granted! You'll now receive trade alerts in the background." });
+    } else {
+      setToast({ type: "error", message: "Push notification permission denied in browser." });
+    }
+  };
+
+  const handleSendTestPush = async () => {
+    if (pushPermission !== "granted") {
+      await handleRequestPushPermission();
+    }
+    await pushNotificationService.sendNotification({
+      title: "⚡ Fortress Alert: Trade Execution Test",
+      body: "LONG BTCUSDT filled at $65,240. Trailing Stop Loss & OCO are actively protecting your position.",
+    });
+    setToast({ type: "success", message: "Test push notification dispatched to your device!" });
+  };
+
+  const handleCopyWebhookUrl = () => {
+    navigator.clipboard.writeText(webhookUrl);
+    setCopiedUrl(true);
+    setToast({ type: "success", message: "Webhook URL copied to clipboard!" });
+    setTimeout(() => setCopiedUrl(false), 2000);
+  };
+
+  const handleCopySamplePayload = () => {
+    const payload = webhookService.getSampleJsonPayload(testSymbol, testAction.toLowerCase() as "buy" | "sell");
+    navigator.clipboard.writeText(payload);
+    setCopiedPayload(true);
+    setToast({ type: "success", message: "Sample JSON payload copied to clipboard!" });
+    setTimeout(() => setCopiedPayload(false), 2000);
+  };
+
+  const handleRegenerateWebhookToken = () => {
+    const confirmed = window.confirm("Regenerate Webhook token? You will need to update your TradingView alert webhook URL.");
+    if (confirmed) {
+      webhookService.regenerateToken();
+      setWebhookUrl(webhookService.getWebhookUrl());
+      setToast({ type: "success", message: "New Webhook token generated!" });
+    }
+  };
+
+  const handleSimulateWebhook = () => {
+    webhookService.dispatchSignal({
+      direction: testAction,
+      symbol: testSymbol.toUpperCase(),
+      source: "TradingView Webhook Test",
+      rawPayload: webhookService.getSampleJsonPayload(testSymbol, testAction.toLowerCase() as "buy" | "sell"),
+    });
+    setToast({
+      type: "success",
+      message: `Simulated TradingView Webhook [${testAction} ${testSymbol.toUpperCase()}] dispatched!`,
+    });
+  };
 
   // Toast auto-clear
   useEffect(() => {
@@ -433,6 +508,107 @@ export default function SettingsModal({
             </div>
           </div>
 
+          {/* TradingView Webhook Integration Section (Bloomberg Terminal Aesthetic) */}
+          <div className="p-4 rounded-xl bg-[#080d1a] border border-amber-500/40 shadow-lg shadow-amber-950/20 space-y-4 font-mono">
+            <div className="flex items-center justify-between border-b border-amber-500/20 pb-2">
+              <div className="flex items-center gap-2">
+                <Webhook className="w-4 h-4 text-amber-400" />
+                <span className="text-xs font-bold text-amber-300 uppercase tracking-wider">
+                  TradingView Webhook Integration
+                </span>
+              </div>
+              <span className="text-[10px] text-amber-400/90 bg-amber-950/50 px-2 py-0.5 rounded border border-amber-500/30 font-bold">
+                AUTO-EXECUTION
+              </span>
+            </div>
+
+            <p className="text-[11px] text-slate-300 leading-relaxed font-sans">
+              Connect TradingView alerts to trigger instant trade execution. Paste this unique Webhook URL into your TradingView alert settings.
+            </p>
+
+            {/* Unique Webhook URL field */}
+            <div>
+              <label className="text-[11px] font-bold text-slate-300 block mb-1">
+                Unique Webhook Endpoint URL
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  readOnly
+                  value={webhookUrl}
+                  className="flex-1 px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-amber-300 font-mono select-all focus:outline-none"
+                />
+                <button
+                  type="button"
+                  onClick={handleCopyWebhookUrl}
+                  className="px-3 py-2 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-300 text-xs font-bold flex items-center gap-1 transition"
+                  title="Copy Webhook URL"
+                >
+                  {copiedUrl ? <Check className="w-4 h-4 text-[#00ff66]" /> : <Copy className="w-4 h-4" />}
+                  <span>{copiedUrl ? "Copied" : "Copy"}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleRegenerateWebhookToken}
+                  className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-400 hover:text-white transition"
+                  title="Regenerate Secret Webhook Token"
+                >
+                  <RotateCw className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            {/* Payload Template & Test Trigger */}
+            <div className="pt-2 border-t border-slate-800/80 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold text-slate-300">
+                  TradingView Alert Message (JSON Body):
+                </span>
+                <button
+                  type="button"
+                  onClick={handleCopySamplePayload}
+                  className="text-[10px] text-cyan-400 hover:text-cyan-300 flex items-center gap-1 font-bold"
+                >
+                  {copiedPayload ? <Check className="w-3 h-3 text-[#00ff66]" /> : <Copy className="w-3 h-3" />}
+                  <span>{copiedPayload ? "Copied Payload" : "Copy Payload"}</span>
+                </button>
+              </div>
+
+              <pre className="p-2.5 rounded-lg bg-slate-950 border border-slate-800 text-[11px] text-emerald-400 overflow-x-auto leading-relaxed">
+                {webhookService.getSampleJsonPayload(testSymbol, testAction.toLowerCase() as "buy" | "sell")}
+              </pre>
+
+              {/* Simulation test bar */}
+              <div className="flex items-center gap-2 pt-1">
+                <select
+                  value={testAction}
+                  onChange={(e) => setTestAction(e.target.value as "BUY" | "SELL")}
+                  className="px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-xs font-bold text-white focus:outline-none"
+                >
+                  <option value="BUY">BUY / LONG</option>
+                  <option value="SELL">SELL / SHORT</option>
+                </select>
+
+                <input
+                  type="text"
+                  value={testSymbol}
+                  onChange={(e) => setTestSymbol(e.target.value.toUpperCase())}
+                  placeholder="BTCUSDT"
+                  className="w-24 px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-xs font-bold text-white uppercase focus:outline-none"
+                />
+
+                <button
+                  type="button"
+                  onClick={handleSimulateWebhook}
+                  className="flex-1 py-1.5 px-3 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/50 text-amber-300 font-bold text-xs flex items-center justify-center gap-1.5 transition"
+                >
+                  <Play className="w-3.5 h-3.5 text-amber-400 fill-amber-400" />
+                  <span>Test Signal Trigger</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
           {/* PWA Installation Card */}
           <div className="p-4 rounded-xl bg-gradient-to-br from-cyan-950/40 via-slate-900/60 to-blue-950/30 border border-cyan-500/30 space-y-3">
             <div className="flex items-center justify-between">
@@ -516,18 +692,45 @@ export default function SettingsModal({
             </span>
 
             <div className="space-y-3 text-xs">
-              <label className="flex items-center justify-between cursor-pointer">
-                <div className="flex items-center gap-2">
-                  <Bell className="w-3.5 h-3.5 text-slate-400" />
-                  <span className="text-slate-300">Push Notifications & Alerts</span>
+              <div className="p-3 rounded-lg bg-slate-950 border border-slate-800 space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Bell className="w-4 h-4 text-cyan-400" />
+                    <div>
+                      <span className="text-slate-200 font-bold block">PWA Push Notifications</span>
+                      <span className="text-[10px] text-slate-400">Background trade execution & pattern alerts</span>
+                    </div>
+                  </div>
+                  <span className={`text-[10px] font-mono px-2 py-0.5 rounded border uppercase font-bold ${
+                    pushPermission === "granted"
+                      ? "bg-emerald-500/20 text-[#00ff66] border-emerald-500/40"
+                      : "bg-amber-500/20 text-amber-300 border-amber-500/40"
+                  }`}>
+                    {pushPermission === "granted" ? "ACTIVE" : pushPermission.toUpperCase()}
+                  </span>
                 </div>
-                <input
-                  type="checkbox"
-                  checked={notificationsEnabled}
-                  onChange={(e) => setNotificationsEnabled(e.target.checked)}
-                  className="w-4 h-4 accent-cyan-500"
-                />
-              </label>
+
+                <div className="flex items-center gap-2 pt-1">
+                  {pushPermission !== "granted" ? (
+                    <button
+                      type="button"
+                      onClick={handleRequestPushPermission}
+                      className="flex-1 py-1.5 px-3 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-xs transition"
+                    >
+                      Enable Push Notifications
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={handleSendTestPush}
+                      className="flex-1 py-1.5 px-3 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-cyan-300 font-bold text-xs flex items-center justify-center gap-1.5 transition font-mono"
+                    >
+                      <Bell className="w-3.5 h-3.5 text-cyan-400" />
+                      <span>Send Test Push Notification</span>
+                    </button>
+                  )}
+                </div>
+              </div>
 
               <label className="flex items-center justify-between cursor-pointer">
                 <div className="flex items-center gap-2">

@@ -81,7 +81,7 @@ async function runTests() {
   assert(atrShort.stopLossPrice === 51500, "SHORT SL is Entry + 1.5x ATR = 51500");
   assert(atrShort.takeProfitPrice === 47000, "SHORT TP is Entry - 3000 = 47000");
 
-  // 5. evaluateTrailingStopLoss (Break-Even at 1:1 RR)
+  // 5. evaluateTrailingStopLoss (Break-Even at 1:1 RR + 1.5x ATR Trailing)
   const mockTrade: ManagedTrade = {
     id: "trade-1",
     symbol: "BTCUSDT",
@@ -95,7 +95,9 @@ async function runTests() {
     takeProfitPrice: 53000,
     initialStopLoss: 48500,
     trailingSlTriggered: false,
-    atrAtEntry: 1000,
+    trailingStage: "INITIAL",
+    peakPrice: 50000,
+    atrAtEntry: 1000, // 1.5x ATR = 1500
     openTime: Date.now(),
     status: "OPEN",
     orderType: "LIMIT",
@@ -109,6 +111,56 @@ async function runTests() {
   const trailYes = evaluateTrailingStopLoss(51500, mockTrade);
   assert(trailYes.shouldUpdateSl === true, "Trailing SL triggers at 1:1 RR target");
   assert(trailYes.newStopLoss === 50000, "Trailing SL sets stop loss to break-even (50000)");
+  assert(trailYes.newTrailingStage === "BREAK_EVEN", "Trailing stage set to BREAK_EVEN");
+
+  // Price surges further to 53000 (peak = 53000, 1.5x ATR trail = 53000 - 1500 = 51500)
+  const mockTradeAtBreakEven: ManagedTrade = {
+    ...mockTrade,
+    stopLossPrice: 50000,
+    trailingStage: "BREAK_EVEN",
+    peakPrice: 51500,
+  };
+  const trailAtr = evaluateTrailingStopLoss(53000, mockTradeAtBreakEven);
+  assert(trailAtr.shouldUpdateSl === true, "Trailing SL triggers 1.5x ATR trailing as price rallies");
+  assert(trailAtr.newStopLoss === 51500, `Trailing SL moves to peak - 1.5x ATR (53000 - 1500 = 51500), got ${trailAtr.newStopLoss}`);
+  assert(trailAtr.newTrailingStage === "TRAILING_ATR", "Trailing stage set to TRAILING_ATR");
+
+  // SHORT Trailing Stop Loss Test
+  const mockShortTrade: ManagedTrade = {
+    id: "trade-short-1",
+    symbol: "BTCUSDT",
+    marketType: "Futures",
+    direction: "SHORT",
+    leverage: 5,
+    entryPrice: 50000,
+    quantity: 0.1,
+    positionValue: 5000,
+    stopLossPrice: 51500, // Initial risk = 1500
+    takeProfitPrice: 47000,
+    initialStopLoss: 51500,
+    trailingSlTriggered: false,
+    trailingStage: "INITIAL",
+    troughPrice: 50000,
+    atrAtEntry: 1000,
+    openTime: Date.now(),
+    status: "OPEN",
+    orderType: "LIMIT",
+  };
+  // Price drops to 48500 (reward 1500 >= initial risk 1500)
+  const shortTrailBe = evaluateTrailingStopLoss(48500, mockShortTrade);
+  assert(shortTrailBe.shouldUpdateSl === true, "SHORT Trailing SL triggers break-even at 1:1 RR");
+  assert(shortTrailBe.newStopLoss === 50000, "SHORT Trailing SL moves to break-even 50000");
+
+  // SHORT drops further to 47000 (trough = 47000, 1.5x ATR trail = 47000 + 1500 = 48500)
+  const mockShortAtBe: ManagedTrade = {
+    ...mockShortTrade,
+    stopLossPrice: 50000,
+    trailingStage: "BREAK_EVEN",
+    troughPrice: 48500,
+  };
+  const shortTrailAtr = evaluateTrailingStopLoss(47000, mockShortAtBe);
+  assert(shortTrailAtr.shouldUpdateSl === true, "SHORT Trailing SL trails by 1.5x ATR from trough");
+  assert(shortTrailAtr.newStopLoss === 48500, `SHORT Trailing SL moves to trough + 1.5x ATR (47000 + 1500 = 48500), got ${shortTrailAtr.newStopLoss}`);
 
   // 6. Circuit Breaker & Profit Vault in BinanceAutoTradeEngine
   const engine = new BinanceAutoTradeEngine();
@@ -119,6 +171,22 @@ async function runTests() {
   (engine as unknown as { trades: ManagedTrade[] }).trades.push({ ...mockTrade, id: "mock-trade-1" });
   const closedLoss1 = engine.closeTrade("mock-trade-1", 48500, "SL");
   assert(closedLoss1 !== null && engine.getCircuitBreaker().consecutiveLosses >= 0, "Engine circuit breaker initialized");
+
+  // 6b. OCO Order Cancellation Handling Test
+  let cancelledOrderId = "";
+  (engine as unknown as { cancelExchangeOrder: (s: string, o: string) => Promise<boolean> }).cancelExchangeOrder = async (sym: string, oId: string) => {
+    cancelledOrderId = oId;
+    return true;
+  };
+  const mockOcoTrade: ManagedTrade = {
+    ...mockTrade,
+    id: "trade-oco-test",
+    slOrderId: "SL-ORDER-999",
+    tpOrderId: "TP-ORDER-888",
+  };
+  (engine as unknown as { trades: ManagedTrade[] }).trades.push(mockOcoTrade);
+  engine.closeTrade("trade-oco-test", 53000, "TP");
+  assert(cancelledOrderId === "SL-ORDER-999", "OCO logic cancelled Stop Loss order (SL-ORDER-999) when Take Profit was hit");
 
   // 7. Post-Loss Cooldown (30 minutes)
   engine.clearPostLossCooldown();

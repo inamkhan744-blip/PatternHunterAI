@@ -132,6 +132,62 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
       }
     }
 
+    // Case 1.5: Pattern Explanation
+    if (action === "explain") {
+      const { patternName, direction, description, coin, price, recentCandles } = payload;
+      if (!patternName || !coin || price === undefined) {
+        return new Response(
+          JSON.stringify({ error: "Missing required fields: patternName, coin, price" }),
+          { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      const candleSummary = Array.isArray(recentCandles)
+        ? recentCandles.slice(-15).map((c: { close: number }) => (typeof c.close === "number" ? c.close.toFixed(2) : String(c.close))).join(", ")
+        : "N/A";
+
+      const prompt = `You are a Senior Quantitative Analyst & Pattern Specialist.
+A technical pattern has been detected on ${coin}/USDT.
+Pattern: ${patternName}
+Direction: ${direction}
+Description: ${description}
+Current Price: $${price}
+Recent Close Prices: ${candleSummary}
+
+Produce a JSON response strictly matching this schema with NO markdown code fences:
+{
+  "explanation": "Pattern found: ${patternName} at $${Number(price).toFixed(2)}. ${direction === "bearish" ? "Expect a reversal to the downside." : "Expect a reversal to the upside."}\\nEntry: $<entry>\\nSL: $<sl>\\nTP: $<tp>\\nReasoning: <concise institutional rationale>",
+  "entry": <calculated numeric entry price>,
+  "sl": <calculated numeric stop loss price>,
+  "tp": <calculated numeric take profit price>,
+  "reasoning": "<1-2 sentences explaining why this pattern has institutional edge and the invalidation conditions>"
+}`;
+
+      try {
+        const { text, model } = await callGemini(
+          [{ parts: [{ text: prompt }] }],
+          {
+            temperature: 0.2,
+            maxOutputTokens: 600,
+            responseMimeType: "application/json",
+          }
+        );
+
+        const cleaned = text.replace(/```json\n?|```/g, "").trim();
+        const parsed = JSON.parse(cleaned);
+
+        return new Response(
+          JSON.stringify({ success: true, data: parsed, modelUsed: model }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      } catch (err) {
+        return new Response(
+          JSON.stringify({ unavailable: true, error: err instanceof Error ? err.message : "Pattern explanation failed" }),
+          { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+    }
+
     // Case 2: Vision Analysis
     if (action === "vision") {
       const { imageBase64, mimeType = "image/png", activeSymbol = "BTCUSDT" } = payload;

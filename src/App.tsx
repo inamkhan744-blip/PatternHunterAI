@@ -80,11 +80,13 @@ import CopyTradingTab from "./components/CopyTradingTab";
 import StrategyBuilder from "./components/StrategyBuilder";
 import { gridTradingBot } from "./lib/GridBot";
 import { dcaBotEngine } from "./lib/DCABot";
+import { webhookService, type TradingViewSignal } from "./lib/WebhookService";
 import { isUserAdmin, isUserPro } from "./lib/SubscriptionManager";
 import { autoTradeEngine } from "./lib/BinanceAutoTrade";
 import { getActiveExchange, setActiveExchange, SUPPORTED_EXCHANGES, type ExchangeId } from "./lib/MultiExchange";
 import { paperTradingEngine } from "./lib/PaperTrading";
 import { tradeManager } from "./lib/TradeManager";
+import { pushNotificationService } from "./lib/PushNotification";
 import { evaluateConfluence } from "./lib/ConfluenceEngine";
 import { scanSMC, calculateHTFTrend, type HTFTrendResult } from "./lib/SMCScanner";
 import { subscribeTicker } from "./lib/websocket";
@@ -344,8 +346,23 @@ export default function App() {
     try {
       const data = await fetchCandles(binanceSymbol, 200, tf);
       setCandles(data);
-      setPattern(detectPattern(data));
-      setAllPatterns(detectAllPatterns(data));
+      const foundPattern = detectPattern(data);
+      setPattern(foundPattern);
+      const allFound = detectAllPatterns(data);
+      setAllPatterns(allFound);
+
+      // Trigger Push Notification if pattern detected
+      if (foundPattern && data.length > 0) {
+        const currentClose = data[data.length - 1].close;
+        const topConfidence = allFound.length > 0 ? allFound[0].confidence : undefined;
+        pushNotificationService.notifyPatternDetected({
+          symbol: binanceSymbol,
+          patternName: foundPattern.name,
+          direction: foundPattern.direction,
+          price: currentClose,
+          confidence: topConfidence,
+        }).catch(() => {});
+      }
 
       if (data.length >= 15) {
         const atrSeries = atr(data, 14);
@@ -507,6 +524,98 @@ export default function App() {
     };
   }, [user, selectedCoin.binanceSymbol]);
 
+  // TradingView Webhook Signal Execution Listener
+  useEffect(() => {
+    if (!user) return;
+
+    const unsub = webhookService.subscribe(async (signal: TradingViewSignal) => {
+      const config = autoTradeEngine.getConfig();
+      const currentPrice = signal.price ?? lastPrice ?? 60000;
+      const targetSymbol = signal.symbol || selectedCoin.binanceSymbol;
+      const atrVal = currentAtr || currentPrice * 0.02;
+      const direction = signal.direction === "BUY" ? "LONG" : "SHORT";
+
+      console.log(`[TradingView Webhook Received] ${signal.direction} for ${targetSymbol} at $${currentPrice}`);
+
+      // Check if paper trading or live execution
+      if (!config.apiKey || !config.apiSecret) {
+        const pResult = paperTradingEngine.executeOrder({
+          symbol: targetSymbol,
+          entryPrice: currentPrice,
+          atrValue: atrVal,
+          direction,
+          marketType: config.marketType,
+          leverage: config.leverage,
+          riskPercent: config.riskPercent,
+        });
+
+        if (pResult.success && pResult.trade) {
+          tradeManager.addTrade({
+            symbol: pResult.trade.symbol,
+            entryPrice: pResult.trade.entryPrice,
+            currentPrice,
+            quantity: pResult.trade.quantity,
+            stopLossPrice: pResult.trade.stopLossPrice,
+            takeProfitPrice: pResult.trade.takeProfitPrice,
+            direction: pResult.trade.direction,
+            marketType: pResult.trade.marketType,
+            leverage: pResult.trade.leverage,
+            source: "AUTO-PILOT",
+            mode: "PAPER",
+            customId: pResult.trade.id,
+          });
+          pushNotificationService.notifyTradeExecution({
+            symbol: pResult.trade.symbol,
+            direction: pResult.trade.direction,
+            entryPrice: pResult.trade.entryPrice,
+            source: "TradingView Webhook",
+            mode: "PAPER",
+          }).catch(() => {});
+        }
+      } else {
+        try {
+          const res = await autoTradeEngine.executeTrade({
+            symbol: targetSymbol,
+            entryPrice: currentPrice,
+            atrValue: atrVal,
+            direction,
+            marketType: config.marketType,
+            userEmail: user?.email,
+            isPro: effectiveIsPro || isAdmin,
+          });
+
+          if (res.success && res.trade) {
+            tradeManager.addTrade({
+              symbol: res.trade.symbol,
+              entryPrice: res.trade.entryPrice,
+              currentPrice,
+              quantity: res.trade.quantity,
+              stopLossPrice: res.trade.stopLossPrice,
+              takeProfitPrice: res.trade.takeProfitPrice,
+              direction: res.trade.direction,
+              marketType: res.trade.marketType,
+              leverage: res.trade.leverage,
+              source: "AUTO-PILOT",
+              mode: "REAL",
+              customId: res.trade.id,
+            });
+            pushNotificationService.notifyTradeExecution({
+              symbol: res.trade.symbol,
+              direction: res.trade.direction,
+              entryPrice: res.trade.entryPrice,
+              source: "TradingView Webhook",
+              mode: "REAL",
+            }).catch(() => {});
+          }
+        } catch (err) {
+          console.error("TradingView auto-execution failed:", err);
+        }
+      }
+    });
+
+    return () => unsub();
+  }, [user, lastPrice, selectedCoin.binanceSymbol, currentAtr, effectiveIsPro, isAdmin]);
+
   // Real-time WebSocket Price Subscription & Auto-Pilot Execution Loop
   useEffect(() => {
     if (!user) return;
@@ -574,6 +683,13 @@ export default function App() {
               mode: "PAPER",
               customId: pResult.trade.id,
             });
+            pushNotificationService.notifyTradeExecution({
+              symbol: pResult.trade.symbol,
+              direction: pResult.trade.direction,
+              entryPrice: pResult.trade.entryPrice,
+              source: "Auto-Pilot Confluence",
+              mode: "PAPER",
+            }).catch(() => {});
           }
         } else {
           autoTradeEngine.executeTrade({
@@ -600,6 +716,13 @@ export default function App() {
                 mode: "REAL",
                 customId: res.trade.id,
               });
+              pushNotificationService.notifyTradeExecution({
+                symbol: res.trade.symbol,
+                direction: res.trade.direction,
+                entryPrice: res.trade.entryPrice,
+                source: "Auto-Pilot Confluence",
+                mode: "REAL",
+              }).catch(() => {});
             }
           }).catch(() => {});
         }
@@ -647,8 +770,11 @@ export default function App() {
     setAiError(null);
 
     try {
-      const { data, error: invokeError } = await supabase.functions.invoke("explain-pattern", {
+      // First try 'ai-chat' with action: 'explain'
+      let responseData: unknown = null;
+      const { data: aiChatData, error: aiChatError } = await supabase.functions.invoke("ai-chat", {
         body: {
+          action: "explain",
           patternName: pattern.name,
           direction: pattern.direction,
           description: pattern.description,
@@ -658,12 +784,28 @@ export default function App() {
         },
       });
 
-      if (invokeError || data?.unavailable) {
-        throw invokeError || new Error(data?.error || "Edge unavailable");
+      if (!aiChatError && aiChatData && !aiChatData.unavailable) {
+        responseData = aiChatData;
+      } else {
+        // Fallback to 'explain-pattern' function
+        const { data: explainData, error: explainError } = await supabase.functions.invoke("explain-pattern", {
+          body: {
+            patternName: pattern.name,
+            direction: pattern.direction,
+            description: pattern.description,
+            coin: selectedCoin.symbol,
+            price: lastPrice,
+            recentCandles: candles.slice(-20),
+          },
+        });
+        if (explainError || explainData?.unavailable) {
+          throw explainError || new Error(explainData?.error || "All AI edges unavailable");
+        }
+        responseData = explainData;
       }
 
       // Backend may return direct format { explanation } or wrapped format { success: true, data: { ...parsedAI } | string, modelUsed: "..." }
-      const resolvedData = data?.data !== undefined ? data.data : data;
+      const resolvedData = (responseData as { data?: unknown })?.data !== undefined ? (responseData as { data: unknown }).data : responseData;
 
       let text = "";
       let entryVal: number | null = null;
@@ -673,18 +815,19 @@ export default function App() {
       if (typeof resolvedData === "string") {
         text = resolvedData;
       } else if (resolvedData && typeof resolvedData === "object") {
-        if (typeof resolvedData.explanation === "string") {
-          text = resolvedData.explanation;
-        } else if (typeof resolvedData.text === "string") {
-          text = resolvedData.text;
-        } else if (typeof resolvedData.response === "string") {
-          text = resolvedData.response;
+        const obj = resolvedData as Record<string, unknown>;
+        if (typeof obj.explanation === "string") {
+          text = obj.explanation;
+        } else if (typeof obj.text === "string") {
+          text = obj.text;
+        } else if (typeof obj.response === "string") {
+          text = obj.response;
         } else {
           // If parsedAI object contains structured fields
-          const entryStr = resolvedData.entry !== undefined ? `$${resolvedData.entry}` : null;
-          const slStr = resolvedData.sl !== undefined ? `$${resolvedData.sl}` : resolvedData.stopLoss !== undefined ? `$${resolvedData.stopLoss}` : null;
-          const tpStr = resolvedData.tp !== undefined ? `$${resolvedData.tp}` : resolvedData.takeProfit !== undefined ? `$${resolvedData.takeProfit}` : null;
-          const reasoningStr = resolvedData.reasoning || resolvedData.analysis || resolvedData.summary || resolvedData.keyTakeaway || "";
+          const entryStr = obj.entry !== undefined ? `$${obj.entry}` : null;
+          const slStr = obj.sl !== undefined ? `$${obj.sl}` : obj.stopLoss !== undefined ? `$${obj.stopLoss}` : null;
+          const tpStr = obj.tp !== undefined ? `$${obj.tp}` : obj.takeProfit !== undefined ? `$${obj.takeProfit}` : null;
+          const reasoningStr = String(obj.reasoning || obj.analysis || obj.summary || obj.keyTakeaway || "");
 
           const lines: string[] = [
             `Pattern found: ${pattern.name} at $${lastPrice.toFixed(2)}. ${pattern.direction === "bearish" ? "Expect a reversal to the downside." : "Expect a reversal to the upside."}`
@@ -698,25 +841,25 @@ export default function App() {
         }
 
         // Direct numeric values if returned in parsedAI
-        if (typeof resolvedData.entry === "number") entryVal = resolvedData.entry;
-        else if (typeof resolvedData.entryPrice === "number") entryVal = resolvedData.entryPrice;
+        if (typeof obj.entry === "number") entryVal = obj.entry;
+        else if (typeof obj.entryPrice === "number") entryVal = obj.entryPrice;
 
-        if (typeof resolvedData.sl === "number") slVal = resolvedData.sl;
-        else if (typeof resolvedData.stopLoss === "number") slVal = resolvedData.stopLoss;
-        else if (typeof resolvedData.stopLossPrice === "number") slVal = resolvedData.stopLossPrice;
+        if (typeof obj.sl === "number") slVal = obj.sl;
+        else if (typeof obj.stopLoss === "number") slVal = obj.stopLoss;
+        else if (typeof obj.stopLossPrice === "number") slVal = obj.stopLossPrice;
 
-        if (typeof resolvedData.tp === "number") tpVal = resolvedData.tp;
-        else if (typeof resolvedData.takeProfit === "number") tpVal = resolvedData.takeProfit;
-        else if (typeof resolvedData.takeProfitPrice === "number") tpVal = resolvedData.takeProfitPrice;
-      } else if (typeof data?.explanation === "string") {
-        text = data.explanation;
+        if (typeof obj.tp === "number") tpVal = obj.tp;
+        else if (typeof obj.takeProfit === "number") tpVal = obj.takeProfit;
+        else if (typeof obj.takeProfitPrice === "number") tpVal = obj.takeProfitPrice;
       }
 
       if (!text && !entryVal) {
-        throw new Error(data?.error || "AI returned empty analysis");
+        throw new Error("AI returned empty analysis");
       }
 
+      // Successfully resolved real AI analysis - no error and no fallback message
       setExplanation(text);
+      setAiError(null);
       const parsed = parseAnalysisPrices(text);
       setEntryPrice(entryVal ?? parsed?.entry ?? getFallbackPrices(pattern, lastPrice).entry);
       setSlPrice(slVal ?? parsed?.sl ?? getFallbackPrices(pattern, lastPrice).sl);

@@ -4,19 +4,16 @@ import {
   Plus,
   Trash2,
   Loader2,
-  Check,
   AlertCircle,
   Volume2,
-  Globe,
   Radio,
   Send,
-  Zap,
 } from "lucide-react";
 import { fetchCandles } from "../lib/binance";
 import { formatPrice } from "../lib/patterns";
 import { COINS, PRO_COINS } from "../constants";
 import { playAudioAlert, type AudioSoundType } from "../lib/AudioAlerts";
-import { sendTelegramAlert, sendDiscordWebhook } from "../lib/TelegramService";
+import { sendDiscordWebhook } from "../lib/TelegramService";
 import type { Coin, PriceAlert } from "../types";
 
 const STORAGE_KEY = "ph_price_alerts";

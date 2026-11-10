@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
-import { Play, Square, Bot, TrendingUp, DollarSign, Activity, AlertCircle, Layers, CheckCircle2 } from "lucide-react";
+import { Play, Square, Bot, Activity, AlertCircle, Layers, CheckCircle2 } from "lucide-react";
 import { gridTradingBot, GridBotState, GridBotConfig } from "../lib/GridBot";
 import { formatPrice } from "../lib/patterns";
 import type { Coin } from "../types";

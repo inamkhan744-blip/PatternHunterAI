@@ -50,7 +50,7 @@ export interface UnifiedOrderResult {
   status: "FILLED" | "NEW" | "PARTIALLY_FILLED" | "CANCELED" | "REJECTED";
   executedQty: number;
   price: number;
-  rawResponse?: any;
+  rawResponse?: unknown;
 }
 
 export const SUPPORTED_EXCHANGES: ExchangeConfig[] = [
@@ -75,15 +75,15 @@ export const SUPPORTED_EXCHANGES: ExchangeConfig[] = [
     name: "Bybit",
     iconText: "BYB",
     color: "#F7A600",
-    description: "Leading derivative & inverse perpetual trading exchange (v5 Unified API)",
+    description: "Leading derivative & inverse perpetual exchange (Public Market Data & Paper Trading)",
     requiresPassphrase: false,
-    status: "LIVE_INTEGRATED",
+    status: "PUBLIC_MARKET_ONLY",
     capabilities: {
       marketData: true,
       paperTrading: true,
-      liveTrading: true,
-      balanceFetch: true,
-      orderManagement: true,
+      liveTrading: false,
+      balanceFetch: false,
+      orderManagement: false,
     },
   },
   {
@@ -91,15 +91,15 @@ export const SUPPORTED_EXCHANGES: ExchangeConfig[] = [
     name: "OKX",
     iconText: "OKX",
     color: "#FFFFFF",
-    description: "Institutional multi-currency margin & futures trading platform (v5 API)",
+    description: "Institutional multi-currency margin platform (Public Market Data & Paper Trading)",
     requiresPassphrase: true,
-    status: "LIVE_INTEGRATED",
+    status: "PUBLIC_MARKET_ONLY",
     capabilities: {
       marketData: true,
       paperTrading: true,
-      liveTrading: true,
-      balanceFetch: true,
-      orderManagement: true,
+      liveTrading: false,
+      balanceFetch: false,
+      orderManagement: false,
     },
   },
   {
@@ -107,15 +107,15 @@ export const SUPPORTED_EXCHANGES: ExchangeConfig[] = [
     name: "KuCoin",
     iconText: "KCS",
     color: "#24AE8F",
-    description: "Top altcoin exchange with deep liquidity and spot/margin pairs",
+    description: "Top altcoin exchange with deep liquidity (Public Market Data & Paper Trading)",
     requiresPassphrase: true,
-    status: "LIVE_INTEGRATED",
+    status: "PUBLIC_MARKET_ONLY",
     capabilities: {
       marketData: true,
       paperTrading: true,
-      liveTrading: true,
-      balanceFetch: true,
-      orderManagement: true,
+      liveTrading: false,
+      balanceFetch: false,
+      orderManagement: false,
     },
   },
 ];

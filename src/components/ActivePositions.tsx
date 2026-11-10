@@ -8,7 +8,6 @@ import {
   XCircle,
   ShieldCheck,
   CheckCircle,
-  Clock,
   ArrowUpRight,
   ArrowDownRight,
   Sparkles,

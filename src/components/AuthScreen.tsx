@@ -4,7 +4,6 @@ import {
   Mail,
   Lock,
   Loader2,
-  TrendingUp,
   Shield,
   Zap,
   CheckCircle,

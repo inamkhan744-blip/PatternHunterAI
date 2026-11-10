@@ -21,7 +21,8 @@ export default function TradingJournal() {
     rules_followed_count: 0,
     rules_broken_count: 0,
   });
-  const [loading, setLoading] = useState(true);
+  const [_loading, setLoading] = useState(true);
+  void _loading;
   const [showAddModal, setShowAddModal] = useState(false);
 
   const [coinSymbol, setCoinSymbol] = useState("BTC");

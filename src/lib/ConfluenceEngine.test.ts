@@ -37,9 +37,10 @@ async function runTests() {
         type: "bullish",
         top: 205,
         bottom: 195,
-        startIndex: 45,
+        startTime: 1000,
+        endTime: 2000,
         mitigated: false,
-      } as any,
+      },
     ],
     fvgs: [],
   };

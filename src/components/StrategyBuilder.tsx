@@ -1,5 +1,5 @@
 import { useState, useCallback } from "react";
-import { Cpu, Play, TrendingUp, TrendingDown, Award, AlertTriangle, ShieldCheck, Activity, Plus, Trash2, Sliders, CheckCircle2, RotateCcw } from "lucide-react";
+import { Cpu, Play, Activity, Plus, Trash2, Sliders } from "lucide-react";
 import { fetchCandles } from "../lib/binance";
 import { rsi, sma, ema } from "../lib/indicators";
 import { formatPrice } from "../lib/patterns";
@@ -191,7 +191,8 @@ export default function StrategyBuilder({ selectedCoin, timeframe }: Props) {
       let entryPrice = 0;
       let entryDate = "";
       let entrySide: ActionType = strategy.action;
-      let peakPnl = 0;
+      const _peakPnl = 0;
+      void _peakPnl;
       let maxDd = 0;
 
       const evaluateCondition = (

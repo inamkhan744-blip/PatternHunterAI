@@ -1,15 +1,8 @@
 import { useState, useMemo } from "react";
 import {
   Calendar as CalendarIcon,
-  TrendingUp,
-  TrendingDown,
-  DollarSign,
-  Activity,
-  CheckCircle2,
-  XCircle,
   BarChart2,
 } from "lucide-react";
-import { formatPrice } from "../lib/patterns";
 import { autoTradeEngine, ManagedTrade } from "../lib/BinanceAutoTrade";
 import { paperTradingEngine } from "../lib/PaperTrading";
 
@@ -43,7 +36,7 @@ export default function PnLCalendar() {
   }, [dataSource]);
 
   // Aggregate past 30 days
-  const { days, totalPnl, winRate, totalDaysTraded, bestDay, worstDay } = useMemo(() => {
+  const { days, totalPnl, winRate, bestDay, worstDay } = useMemo(() => {
     const dayMap = new Map<string, DayData>();
     const now = new Date();
 

@@ -75,9 +75,9 @@ export default function AutoTradeModal({
   const [config, setConfig] = useState<AutoTradeConfig>(autoTradeEngine.getConfig());
   const [circuitBreaker, setCircuitBreaker] = useState<CircuitBreakerState>(autoTradeEngine.getCircuitBreaker());
   const [openTrades, setOpenTrades] = useState<ManagedTrade[]>(autoTradeEngine.getOpenTrades());
-  const [paperTrades, setPaperTrades] = useState<PaperTrade[]>(paperTradingEngine.getOpenTrades());
+  const [, setPaperTrades] = useState<PaperTrade[]>(paperTradingEngine.getOpenTrades());
   const [accountBalance, setAccountBalance] = useState<number>(10000);
-  const [balanceLoading, setBalanceLoading] = useState(false);
+  const [, setBalanceLoading] = useState(false);
   const [disclaimerOpen, setDisclaimerOpen] = useState(false);
   const [executing, setExecuting] = useState(false);
   const [statusMessage, setStatusMessage] = useState<{ type: "success" | "error" | "info"; text: string } | null>(null);

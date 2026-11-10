@@ -10,8 +10,9 @@ interface Props {
   timeframe: Timeframe;
 }
 
-const CHUNK_SIZE = 200;
 const STEP = 50;
+const TRADING_FEE_PCT = 0.075; // Binance VIP0 spot / futures taker fee
+const SLIPPAGE_PCT = 0.05; // Average market slippage
 
 async function runBacktest(
   symbol: string,
@@ -38,10 +39,15 @@ async function runBacktest(
       }
 
       if (outcome) {
-        const exitPrice = outcome === "win" ? position.tp : position.sl;
-        const pnl = position.direction === "bullish"
+        const rawExitPrice = outcome === "win" ? position.tp : position.sl;
+        const exitPrice = position.direction === "bullish"
+          ? rawExitPrice * (1 - SLIPPAGE_PCT / 100)
+          : rawExitPrice * (1 + SLIPPAGE_PCT / 100);
+        const grossPnl = position.direction === "bullish"
           ? exitPrice - position.entry
           : position.entry - exitPrice;
+        const fees = (position.entry + exitPrice) * (TRADING_FEE_PCT / 100);
+        const pnl = grossPnl - fees;
         const pnlPercent = (pnl / position.entry) * 100;
         const candlesHeld = i - position.idx;
 

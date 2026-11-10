@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import React from "react";
 import { AlertTriangle, Clock, ShieldAlert, X, HeartHandshake } from "lucide-react";
 
 interface Props {

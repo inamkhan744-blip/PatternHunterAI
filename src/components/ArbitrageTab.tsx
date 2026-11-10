@@ -5,14 +5,10 @@ import {
   RefreshCw,
   Zap,
   ShieldCheck,
-  AlertCircle,
-  ExternalLink,
-  Layers,
   ArrowRightLeft,
-  DollarSign,
   CheckCircle,
 } from "lucide-react";
-import { FUTURES_API_BASE, SPOT_API_BASE, signQuery } from "../lib/BinanceAutoTrade";
+import { FUTURES_API_BASE } from "../lib/BinanceAutoTrade";
 import { getDecryptedApiKeys } from "../lib/CryptoSecurity";
 import { formatPrice } from "../lib/patterns";
 
@@ -29,7 +25,7 @@ export interface FundingRateItem {
 export default function ArbitrageTab() {
   const [items, setItems] = useState<FundingRateItem[]>([]);
   const [loading, setLoading] = useState(true);
-  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [, setLastUpdated] = useState<Date | null>(null);
   const [executingSymbol, setExecutingSymbol] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<{ type: "success" | "error" | "info"; text: string } | null>(null);
   const [filterHighYield, setFilterHighYield] = useState(true);
@@ -135,6 +131,9 @@ export default function ArbitrageTab() {
             </h2>
             <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-500/20 text-[#00ff66] border border-emerald-500/40">
               DELTA-NEUTRAL CASH & CARRY
+            </span>
+            <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-amber-500/20 text-amber-400 border border-amber-500/40">
+              SIMULATION ONLY
             </span>
           </div>
           <p className="text-xs text-slate-400 font-sans mt-1">

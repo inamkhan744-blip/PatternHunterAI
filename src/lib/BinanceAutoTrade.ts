@@ -12,6 +12,7 @@ import { checkTradeExecutionAllowance, incrementDailyTradeCount } from "./Subscr
 import { simulateSwarmDebate } from "./AgentSwarm";
 import { fetchCandles } from "./binance";
 import { rsi } from "./indicators";
+import { supabase } from "./supabase";
 
 export type MarketType = "Spot" | "Futures";
 export type TradeDirection = "LONG" | "SHORT";
@@ -119,12 +120,14 @@ export async function proxyBinanceFetch(options: {
   // If Supabase proxy endpoint is reachable in browser, use edge proxy
   if (isBrowser && supabaseUrl && supabaseAnonKey && !supabaseUrl.includes("placeholder")) {
     try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const authToken = sessionData?.session?.access_token || supabaseAnonKey;
       const proxyEndpoint = `${supabaseUrl}/functions/v1/binance-proxy`;
       const res = await fetch(proxyEndpoint, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${supabaseAnonKey}`,
+          Authorization: `Bearer ${authToken}`,
           ...(apiKey ? { "X-MBX-APIKEY": apiKey } : {}),
         },
         body: JSON.stringify({
@@ -910,9 +913,11 @@ export class BinanceAutoTradeEngine {
       }
     }
 
-    // Execute LIMIT order on Binance API (or simulate if demo)
-    let orderId = `FORTRESS-${Date.now()}`;
-    if (this.config.apiKey && this.config.apiSecret) {
+    // Execute real order on Binance API if live credentials exist
+    let orderId = "";
+    const hasLiveCreds = Boolean(this.config.apiKey?.trim() && this.config.apiSecret?.trim());
+
+    if (hasLiveCreds) {
       if (marketType === "Futures") {
         await this.setFuturesLeverage(params.symbol, leverage);
       }
@@ -923,9 +928,27 @@ export class BinanceAutoTradeEngine {
         price: params.entryPrice,
         marketType,
       });
-      if (apiResult.orderId) {
-        orderId = String(apiResult.orderId);
+
+      if (!apiResult.orderId) {
+        return {
+          success: false,
+          error: apiResult.error || "Binance order rejected by exchange.",
+        };
       }
+      orderId = String(apiResult.orderId);
+
+      // Place exchange-native Stop Loss order
+      if (marketType === "Futures") {
+        await this.placeFuturesStopLossOrder({
+          symbol: params.symbol,
+          side: direction === "LONG" ? "SELL" : "BUY",
+          stopPrice: stopLossPrice,
+          quantity: sizing.quantity,
+        }).catch(() => {});
+      }
+    } else {
+      // Paper or sandbox simulation
+      orderId = `SIM-${Date.now()}`;
     }
 
     const trade: ManagedTrade = {
@@ -1013,6 +1036,89 @@ export class BinanceAutoTradeEngine {
     }
   }
 
+  private async placeFuturesStopLossOrder(params: {
+    symbol: string;
+    side: "BUY" | "SELL";
+    stopPrice: number;
+    quantity: number;
+  }): Promise<{ orderId?: string | number; error?: string }> {
+    const timestamp = Date.now();
+    const query = [
+      `symbol=${params.symbol}`,
+      `side=${params.side}`,
+      `type=STOP_MARKET`,
+      `stopPrice=${params.stopPrice}`,
+      `closePosition=true`,
+      `timestamp=${timestamp}`,
+    ].join("&");
+
+    const signature = await signQuery(query, this.config.apiSecret);
+
+    try {
+      const res = await proxyBinanceFetch({
+        target: "futures",
+        path: "/fapi/v1/order",
+        method: "POST",
+        body: `${query}&signature=${signature}`,
+        apiKey: this.config.apiKey,
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        return { error: data.msg || "Stop Loss order placement failed" };
+      }
+      return { orderId: data.orderId };
+    } catch (e) {
+      return { error: e instanceof Error ? e.message : "Network error" };
+    }
+  }
+
+  public async closeExchangePosition(trade: ManagedTrade): Promise<boolean> {
+    if (!this.config.apiKey || !this.config.apiSecret) return true;
+
+    try {
+      const timestamp = Date.now();
+      if (trade.marketType === "Futures") {
+        const side = trade.direction === "LONG" ? "SELL" : "BUY";
+        const query = [
+          `symbol=${trade.symbol}`,
+          `side=${side}`,
+          `type=MARKET`,
+          `quantity=${trade.quantity}`,
+          `reduceOnly=true`,
+          `timestamp=${timestamp}`,
+        ].join("&");
+        const signature = await signQuery(query, this.config.apiSecret);
+        await proxyBinanceFetch({
+          target: "futures",
+          path: "/fapi/v1/order",
+          method: "POST",
+          body: `${query}&signature=${signature}`,
+          apiKey: this.config.apiKey,
+        });
+      } else {
+        const side = "SELL";
+        const query = [
+          `symbol=${trade.symbol}`,
+          `side=${side}`,
+          `type=MARKET`,
+          `quantity=${trade.quantity}`,
+          `timestamp=${timestamp}`,
+        ].join("&");
+        const signature = await signQuery(query, this.config.apiSecret);
+        await proxyBinanceFetch({
+          target: "spot",
+          path: "/api/v3/order",
+          method: "POST",
+          body: `${query}&signature=${signature}`,
+          apiKey: this.config.apiKey,
+        });
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   public evaluateOpenTrades(currentPrice: number, symbol: string): ManagedTrade[] {
     const updatedTrades: ManagedTrade[] = [];
 
@@ -1076,6 +1182,11 @@ export class BinanceAutoTradeEngine {
     const rawPnl = priceDiff * trade.quantity;
     const realizedPnl = trade.marketType === "Futures" ? rawPnl * trade.leverage : rawPnl;
     trade.realizedPnl = Number(realizedPnl.toFixed(2));
+
+    // Execute exchange-level close if live trade
+    if (this.config.apiKey && this.config.apiSecret) {
+      this.closeExchangePosition(trade).catch(() => {});
+    }
 
     if (this.config.profitVaultEnabled && realizedPnl > 0) {
       const vaultCut = Number((realizedPnl * 0.5).toFixed(2));

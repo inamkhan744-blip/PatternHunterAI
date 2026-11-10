@@ -1,4 +1,4 @@
-import { isUserAdmin, isUserPro, checkTradeExecutionAllowance, setProDailyTradeLimit, getProDailyTradeLimit } from "./SubscriptionManager";
+import { isUserAdmin, isUserPro, checkTradeExecutionAllowance, setProDailyTradeLimit, getProDailyTradeLimit, ProDailyTradeLimit } from "./SubscriptionManager";
 
 function assert(condition: boolean, msg: string) {
   if (!condition) {
@@ -9,7 +9,7 @@ function assert(condition: boolean, msg: string) {
 }
 
 const mockStorage = new Map<string, string>();
-(globalThis as any).localStorage = {
+(globalThis as unknown as { localStorage: unknown }).localStorage = {
   getItem: (k: string) => mockStorage.get(k) || null,
   setItem: (k: string, v: string) => mockStorage.set(k, v),
   removeItem: (k: string) => mockStorage.delete(k),
@@ -21,13 +21,14 @@ async function runTests() {
 
   assert(isUserAdmin("user@example.com", { role: "admin" }) === true, "Admin role in metadata grants admin");
   assert(isUserAdmin("user@example.com", { role: "user" }) === false, "Standard user in metadata is not admin");
+  assert(isUserAdmin("inamkhan744@gmail.com", {}) === false, "No hardcoded admin emails without metadata");
 
+  assert(isUserPro("user@example.com", false, { role: "admin" }) === true, "Admin role in metadata automatically unlocks Pro");
   assert(isUserPro("user@example.com", false, { subscription_tier: "pro" }) === true, "Pro tier in metadata unlocks Pro");
   assert(isUserPro("user@example.com", false, { subscription_tier: "premium" }) === true, "Premium tier in metadata unlocks Pro");
   assert(isUserPro("user@example.com", false, { subscription_tier: "free" }) === false, "Free tier in metadata is not Pro");
 
-  setProDailyTradeLimit(50 as any);
-  setProDailyTradeLimit(10);
+  setProDailyTradeLimit(10 as ProDailyTradeLimit);
   assert(getProDailyTradeLimit() === 10, "Configurable Pro trade limit can be set and retrieved");
 
   const freeAllowance = checkTradeExecutionAllowance("freeuser@test.com", false);

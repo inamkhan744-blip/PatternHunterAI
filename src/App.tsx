@@ -24,15 +24,11 @@ import {
   Sparkles,
   Wallet,
   LogOut,
-  User as UserIcon,
   Layers,
   Settings as SettingsIcon,
   Eye,
   Download,
   BookOpen,
-  Calendar as CalendarIcon,
-  Wifi,
-  ChevronUp,
   Power,
   Grid as GridIcon,
   Users,
@@ -90,7 +86,7 @@ import { getActiveExchange, setActiveExchange, SUPPORTED_EXCHANGES, type Exchang
 import { paperTradingEngine } from "./lib/PaperTrading";
 import { tradeManager } from "./lib/TradeManager";
 import { evaluateConfluence } from "./lib/ConfluenceEngine";
-import { scanSMC, calculateHTFTrend, type SMCData, type HTFTrendResult } from "./lib/SMCScanner";
+import { scanSMC, calculateHTFTrend, type HTFTrendResult } from "./lib/SMCScanner";
 import { subscribeTicker } from "./lib/websocket";
 import type { Candle, Coin, DetectedPattern, ScanResult, Timeframe, WatchlistItem, AppTab, MarketStats, PatternWithConfidence } from "./types";
 
@@ -203,12 +199,12 @@ export default function App() {
   const [visionAIOpen, setVisionAIOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
-  // Admin and Pro derivation: inamkhan744@gmail.com unlocks isAdmin & isPro
-  const isAdmin = useMemo(() => isUserAdmin(user?.email), [user?.email]);
+  // Admin and Pro derivation from server-side role & metadata
+  const isAdmin = useMemo(() => isUserAdmin(user?.email, user?.user_metadata), [user?.email, user?.user_metadata]);
   const effectiveIsPro = useMemo(() => {
     if (isAdmin) return true;
-    return isUserPro(user?.email, isPro);
-  }, [isAdmin, user?.email, isPro]);
+    return isUserPro(user?.email, isPro, user?.user_metadata);
+  }, [isAdmin, user?.email, isPro, user?.user_metadata]);
 
   // Multi-Exchange State
   const [currentExchange, setCurrentExchange] = useState<ExchangeId>(() => getActiveExchange());
@@ -1600,7 +1596,8 @@ export default function App() {
         patternName={pattern?.name}
         patternDirection={pattern?.direction}
         fearGreed={fearGreedValue}
-        onExecuteTrade={(_dir, _lev) => {
+        onExecuteTrade={(_direction, _leverage) => {
+          void _direction; void _leverage;
           setAutoTradeOpen(true);
         }}
       />

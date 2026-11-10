@@ -1,54 +1,109 @@
 import CryptoJS from "crypto-js";
 
 /**
- * Enterprise-grade AES-256 Encryption service for Binance API credentials.
- * Secures API Key and API Secret in local client storage.
+ * Enterprise-grade Authenticated Encryption service for API credentials.
+ * Supports AES-256 with dynamic salt, cryptographically secure IV, and HMAC integrity.
+ * Provides backward compatibility for existing stored credentials.
  */
 
-// Hardware/Client specific master seed combined with default salt
-const STORAGE_PEPPER = "fortress_quant_enterprise_hedge_fund_salt_2025";
 const STORAGE_KEY_ENCRYPTED_KEYS = "fortress_encrypted_api_credentials";
+const KEY_VERSION_PREFIX = "v2_aes_gcm::";
 
 export interface ApiCredentials {
   apiKey: string;
   apiSecret: string;
 }
 
-/**
- * Encrypts plain text using AES-256.
- */
-export function encryptData(plainText: string, secretKey: string = STORAGE_PEPPER): string {
+function getDerivedMasterKey(customSalt?: string): string {
+  const envKey = (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_ENCRYPTION_MASTER_KEY) || "";
+  if (envKey) return envKey;
+
+  const clientSeed = typeof window !== "undefined" ? window.location.origin + (window.navigator?.userAgent || "") : "node_environment";
+  const baseSalt = customSalt || "fortress_v2_quant_auth_engine";
+  return CryptoJS.SHA256(`${clientSeed}::${baseSalt}::fortress_quant_enterprise`).toString(CryptoJS.enc.Hex);
+}
+
+export function encryptData(plainText: string, secretKey?: string): string {
   if (!plainText) return "";
   try {
-    return CryptoJS.AES.encrypt(plainText, secretKey).toString();
+    const key = secretKey || getDerivedMasterKey();
+    const iv = CryptoJS.lib.WordArray.random(16);
+    const salt = CryptoJS.lib.WordArray.random(16);
+
+    const derived = CryptoJS.PBKDF2(key, salt, { keySize: 256 / 32, iterations: 1000 });
+
+    const encrypted = CryptoJS.AES.encrypt(plainText, derived, {
+      iv,
+      mode: CryptoJS.mode.CBC,
+      padding: CryptoJS.pad.Pkcs7,
+    });
+
+    const ivHex = iv.toString(CryptoJS.enc.Hex);
+    const saltHex = salt.toString(CryptoJS.enc.Hex);
+    const cipherHex = encrypted.ciphertext.toString(CryptoJS.enc.Hex);
+
+    const hmac = CryptoJS.HmacSHA256(`${saltHex}:${ivHex}:${cipherHex}`, key).toString(CryptoJS.enc.Hex);
+
+    return `${KEY_VERSION_PREFIX}${saltHex}:${ivHex}:${cipherHex}:${hmac}`;
   } catch (err) {
-    console.error("AES Encryption error:", err);
+    console.error("Authenticated encryption error:", err);
     return "";
   }
 }
 
-/**
- * Decrypts AES-256 cipher text.
- */
-export function decryptData(cipherText: string, secretKey: string = STORAGE_PEPPER): string {
-  if (!cipherText) return "";
+export function decryptData(cipherBundle: string, secretKey?: string): string {
+  if (!cipherBundle) return "";
   try {
-    const bytes = CryptoJS.AES.decrypt(cipherText, secretKey);
-    const originalText = bytes.toString(CryptoJS.enc.Utf8);
-    return originalText;
+    const key = secretKey || getDerivedMasterKey();
+
+    if (cipherBundle.startsWith(KEY_VERSION_PREFIX)) {
+      const payload = cipherBundle.slice(KEY_VERSION_PREFIX.length);
+      const parts = payload.split(":");
+      if (parts.length !== 4) return "";
+
+      const [saltHex, ivHex, cipherHex, expectedHmac] = parts;
+
+      const computedHmac = CryptoJS.HmacSHA256(`${saltHex}:${ivHex}:${cipherHex}`, key).toString(CryptoJS.enc.Hex);
+      if (computedHmac !== expectedHmac) {
+        console.error("Integrity check failed: Ciphertext has been tampered with or corrupted");
+        return "";
+      }
+
+      const salt = CryptoJS.enc.Hex.parse(saltHex);
+      const iv = CryptoJS.enc.Hex.parse(ivHex);
+      const ciphertext = CryptoJS.enc.Hex.parse(cipherHex);
+
+      const derived = CryptoJS.PBKDF2(key, salt, { keySize: 256 / 32, iterations: 1000 });
+      const decrypted = CryptoJS.AES.decrypt(
+        { ciphertext } as any,
+        derived,
+        { iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }
+      );
+
+      return decrypted.toString(CryptoJS.enc.Utf8);
+    }
+
+    const legacySalt = "fortress_quant_enterprise_hedge_fund_salt_2025";
+    const bytes = CryptoJS.AES.decrypt(cipherBundle, secretKey || legacySalt);
+    const legacyText = bytes.toString(CryptoJS.enc.Utf8);
+    if (legacyText) {
+      return legacyText;
+    }
+    return "";
   } catch (err) {
-    console.error("AES Decryption error:", err);
+    console.error("Authenticated decryption error:", err);
     return "";
   }
 }
 
-/**
- * Encrypts and securely stores Binance API credentials in localStorage.
- */
 export function storeEncryptedApiKeys(apiKey: string, apiSecret: string): void {
   if (typeof localStorage === "undefined") return;
   try {
-    const payload = JSON.stringify({ apiKey, apiSecret });
+    if (!apiKey.trim() && !apiSecret.trim()) {
+      clearApiKeys();
+      return;
+    }
+    const payload = JSON.stringify({ apiKey: apiKey.trim(), apiSecret: apiSecret.trim() });
     const encrypted = encryptData(payload);
     localStorage.setItem(STORAGE_KEY_ENCRYPTED_KEYS, encrypted);
   } catch (err) {
@@ -56,9 +111,6 @@ export function storeEncryptedApiKeys(apiKey: string, apiSecret: string): void {
   }
 }
 
-/**
- * Retrieves and decrypts Binance API credentials from localStorage.
- */
 export function getDecryptedApiKeys(): ApiCredentials {
   if (typeof localStorage === "undefined") {
     return { apiKey: "", apiSecret: "" };
@@ -83,9 +135,26 @@ export function getDecryptedApiKeys(): ApiCredentials {
   }
 }
 
-/**
- * Clears stored encrypted credentials from storage.
- */
 export function clearApiKeys(): void {
-  localStorage.removeItem(STORAGE_KEY_ENCRYPTED_KEYS);
+  if (typeof localStorage === "undefined") return;
+  try {
+    localStorage.removeItem(STORAGE_KEY_ENCRYPTED_KEYS);
+  } catch {
+    // ignore
+  }
+}
+
+export function rotateStoredApiKeys(oldKey?: string, newKey?: string): boolean {
+  if (typeof localStorage === "undefined") return false;
+  try {
+    const encrypted = localStorage.getItem(STORAGE_KEY_ENCRYPTED_KEYS);
+    if (!encrypted) return true;
+    const decrypted = decryptData(encrypted, oldKey);
+    if (!decrypted) return false;
+    const reEncrypted = encryptData(decrypted, newKey);
+    localStorage.setItem(STORAGE_KEY_ENCRYPTED_KEYS, reEncrypted);
+    return true;
+  } catch {
+    return false;
+  }
 }

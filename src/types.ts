@@ -10,6 +10,8 @@ export interface Candle {
 export type PatternType =
   | "double_top"
   | "double_bottom"
+  | "triple_top"
+  | "triple_bottom"
   | "ma_crossover_bull"
   | "ma_crossover_bear"
   | "head_and_shoulders"
@@ -18,9 +20,21 @@ export type PatternType =
   | "bear_flag"
   | "ascending_triangle"
   | "descending_triangle"
+  | "symmetrical_triangle"
   | "cup_and_handle"
   | "rising_wedge"
-  | "falling_wedge";
+  | "falling_wedge"
+  | "bullish_engulfing"
+  | "bearish_engulfing"
+  | "hammer"
+  | "shooting_star"
+  | "doji"
+  | "morning_star"
+  | "evening_star"
+  | "liquidity_sweep_bull"
+  | "liquidity_sweep_bear"
+  | "breakout_bull"
+  | "breakout_bear";
 
 export interface PatternPoint {
   time: number;
@@ -32,6 +46,19 @@ export interface PatternLine {
   color?: string;
 }
 
+export interface PatternTradeSetup {
+  entryPrice: number;
+  stopLossPrice: number;
+  takeProfit1: number;
+  takeProfit2: number;
+  takeProfit3: number;
+  riskRewardRatio: number;
+  confirmationStatus: "CONFIRMED" | "PENDING_CONFIRMATION" | "INVALIDATED";
+  invalidationLevel: number;
+  supportingReasons: string[];
+  invalidationConditions: string[];
+}
+
 export interface DetectedPattern {
   type: PatternType;
   name: string;
@@ -39,6 +66,7 @@ export interface DetectedPattern {
   points: PatternPoint[];
   lines?: PatternLine[];
   direction: "bullish" | "bearish";
+  tradeSetup?: PatternTradeSetup;
 }
 
 export interface Coin {
@@ -80,7 +108,28 @@ export interface WatchlistItem {
   binance_symbol: string;
 }
 
-export type AppTab = "chart" | "positions" | "grid" | "dca" | "copy" | "strategy" | "scanner" | "watchlist" | "history" | "alerts" | "arbitrage" | "backtest" | "chat" | "portfolio" | "depth" | "trades" | "heatmap" | "confluence" | "journal";
+export type AppTab =
+  | "chart"
+  | "positions"
+  | "grid"
+  | "dca"
+  | "copy"
+  | "strategy"
+  | "scanner"
+  | "watchlist"
+  | "history"
+  | "alerts"
+  | "arbitrage"
+  | "backtest"
+  | "chat"
+  | "portfolio"
+  | "depth"
+  | "trades"
+  | "heatmap"
+  | "confluence"
+  | "journal"
+  | "risk"
+  | "admin";
 
 export interface MarketStats {
   high24h: number;
@@ -161,6 +210,9 @@ export interface BacktestSummary {
   bestTrade: number;
   worstTrade: number;
   results: BacktestResult[];
+  profitFactor?: number;
+  sharpeRatio?: number;
+  maxDrawdownPercent?: number;
 }
 
 export interface ConfluenceSignal {
@@ -177,6 +229,9 @@ export interface ConfluenceResult {
   overallDirection: "bullish" | "bearish" | "neutral";
   score: number;
   agreement: number;
+  setupBias?: "Strong Buy" | "Buy" | "Neutral" | "Sell" | "Strong Sell" | "Bullish" | "Bearish";
+  evidence?: string[];
+  invalidationCriteria?: string[];
 }
 
 export interface PortfolioHolding {

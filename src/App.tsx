@@ -1256,6 +1256,25 @@ export default function App() {
                   <span>AI Swarm</span>
                 </button>
 
+                {/* Global Emergency STOP Kill Switch */}
+                <button
+                  onClick={async () => {
+                    const confirmed = window.confirm(
+                      "EMERGENCY KILL SWITCH ACTIVATED!\n\nThis will instantly halt Auto-Pilot, cancel all open orders, and close live/paper positions. Proceed?"
+                    );
+                    if (confirmed) {
+                      await autoTradeEngine.emergencyStop();
+                      setAutoPilotActive(false);
+                      alert("Emergency stop triggered. All auto-trading paused.");
+                    }
+                  }}
+                  className="px-2.5 py-1.5 rounded-lg bg-red-600/20 hover:bg-red-600/40 border border-red-500/60 text-[#ff3344] font-black text-xs uppercase tracking-wider flex items-center gap-1.5 transition font-mono shadow-sm shadow-red-950/40"
+                  title="Global Emergency Kill Switch — Halts Auto-Pilot & cancels open orders"
+                >
+                  <Power className="w-3.5 h-3.5 text-red-400" />
+                  <span>KILL SWITCH</span>
+                </button>
+
                 {/* ONE Prominent AUTO-PILOT Toggle Button in the Top Header */}
                 <button
                   onClick={handleHeaderToggleAutoPilot}

@@ -1,17 +1,8 @@
-/**
- * Multi-Exchange Architecture Service
- * Supports unified management and connectivity for tier-1 crypto exchanges:
- * - Binance (Spot & USDⓈ-M Futures)
- * - Bybit (v5 Unified Trading API)
- * - KuCoin (v1 / v2 Market & Trade API)
- * - OKX (v5 Unified Account API)
- *
- * Encrypts and securely stores user API credentials using AES-256 via CryptoSecurity.
- */
-
 import { encryptData, decryptData } from "./CryptoSecurity";
 
 export type ExchangeId = "binance" | "bybit" | "kucoin" | "okx";
+
+export type ExchangeIntegrationStatus = "LIVE_INTEGRATED" | "PUBLIC_MARKET_ONLY" | "UNAVAILABLE";
 
 export interface ExchangeConfig {
   id: ExchangeId;
@@ -20,13 +11,46 @@ export interface ExchangeConfig {
   color: string;
   description: string;
   requiresPassphrase?: boolean;
+  status: ExchangeIntegrationStatus;
+  capabilities: {
+    marketData: boolean;
+    paperTrading: boolean;
+    liveTrading: boolean;
+    balanceFetch: boolean;
+    orderManagement: boolean;
+  };
 }
 
 export interface ExchangeCredentials {
   apiKey: string;
   apiSecret: string;
-  passphrase?: string; // KuCoin & OKX require an API Passphrase
+  passphrase?: string;
   testnet?: boolean;
+}
+
+export interface UnifiedBalance {
+  asset: string;
+  free: number;
+  locked: number;
+  total: number;
+}
+
+export interface UnifiedOrderRequest {
+  symbol: string;
+  side: "BUY" | "SELL";
+  type: "MARKET" | "LIMIT";
+  quantity: number;
+  price?: number;
+  clientOrderId?: string;
+}
+
+export interface UnifiedOrderResult {
+  orderId: string;
+  symbol: string;
+  status: "FILLED" | "NEW" | "PARTIALLY_FILLED" | "CANCELED" | "REJECTED";
+  executedQty: number;
+  price: number;
+  rawResponse?: any;
 }
 
 export const SUPPORTED_EXCHANGES: ExchangeConfig[] = [
@@ -37,6 +61,14 @@ export const SUPPORTED_EXCHANGES: ExchangeConfig[] = [
     color: "#F3BA2F",
     description: "World's largest crypto exchange by volume (Spot & USDⓈ-M Futures)",
     requiresPassphrase: false,
+    status: "LIVE_INTEGRATED",
+    capabilities: {
+      marketData: true,
+      paperTrading: true,
+      liveTrading: true,
+      balanceFetch: true,
+      orderManagement: true,
+    },
   },
   {
     id: "bybit",
@@ -45,6 +77,14 @@ export const SUPPORTED_EXCHANGES: ExchangeConfig[] = [
     color: "#F7A600",
     description: "Leading derivative & inverse perpetual trading exchange (v5 Unified API)",
     requiresPassphrase: false,
+    status: "LIVE_INTEGRATED",
+    capabilities: {
+      marketData: true,
+      paperTrading: true,
+      liveTrading: true,
+      balanceFetch: true,
+      orderManagement: true,
+    },
   },
   {
     id: "okx",
@@ -53,6 +93,14 @@ export const SUPPORTED_EXCHANGES: ExchangeConfig[] = [
     color: "#FFFFFF",
     description: "Institutional multi-currency margin & futures trading platform (v5 API)",
     requiresPassphrase: true,
+    status: "LIVE_INTEGRATED",
+    capabilities: {
+      marketData: true,
+      paperTrading: true,
+      liveTrading: true,
+      balanceFetch: true,
+      orderManagement: true,
+    },
   },
   {
     id: "kucoin",
@@ -61,15 +109,20 @@ export const SUPPORTED_EXCHANGES: ExchangeConfig[] = [
     color: "#24AE8F",
     description: "Top altcoin exchange with deep liquidity and spot/margin pairs",
     requiresPassphrase: true,
+    status: "LIVE_INTEGRATED",
+    capabilities: {
+      marketData: true,
+      paperTrading: true,
+      liveTrading: true,
+      balanceFetch: true,
+      orderManagement: true,
+    },
   },
 ];
 
 const STORAGE_KEY_ACTIVE_EXCHANGE = "fortress_active_exchange";
 const STORAGE_KEY_EXCHANGE_KEYS_PREFIX = "fortress_exchange_creds_";
 
-/**
- * Gets currently active exchange
- */
 export function getActiveExchange(): ExchangeId {
   if (typeof localStorage === "undefined") return "binance";
   const stored = localStorage.getItem(STORAGE_KEY_ACTIVE_EXCHANGE);
@@ -79,18 +132,12 @@ export function getActiveExchange(): ExchangeId {
   return "binance";
 }
 
-/**
- * Sets active exchange
- */
 export function setActiveExchange(exchangeId: ExchangeId): void {
   if (typeof localStorage !== "undefined") {
     localStorage.setItem(STORAGE_KEY_ACTIVE_EXCHANGE, exchangeId);
   }
 }
 
-/**
- * Securely stores encrypted credentials for a specific exchange
- */
 export function saveExchangeCredentials(
   exchangeId: ExchangeId,
   credentials: ExchangeCredentials
@@ -101,9 +148,6 @@ export function saveExchangeCredentials(
   localStorage.setItem(`${STORAGE_KEY_EXCHANGE_KEYS_PREFIX}${exchangeId}`, encrypted);
 }
 
-/**
- * Decrypts and retrieves credentials for a specific exchange
- */
 export function getExchangeCredentials(exchangeId: ExchangeId): ExchangeCredentials {
   if (typeof localStorage === "undefined") return { apiKey: "", apiSecret: "" };
   const raw = localStorage.getItem(`${STORAGE_KEY_EXCHANGE_KEYS_PREFIX}${exchangeId}`);
@@ -118,17 +162,72 @@ export function getExchangeCredentials(exchangeId: ExchangeId): ExchangeCredenti
   }
 }
 
-/**
- * Checks if exchange has active credentials configured
- */
 export function isExchangeConnected(exchangeId: ExchangeId): boolean {
   const creds = getExchangeCredentials(exchangeId);
-  return Boolean(creds.apiKey.trim() && creds.apiSecret.trim());
+  return Boolean(creds.apiKey?.trim() && creds.apiSecret?.trim());
 }
 
-/**
- * Pings public endpoint of target exchange to test latency and connectivity
- */
+export class UnifiedExchangeAdapter {
+  private exchangeId: ExchangeId;
+
+  constructor(exchangeId: ExchangeId = getActiveExchange()) {
+    this.exchangeId = exchangeId;
+  }
+
+  public getExchangeId(): ExchangeId {
+    return this.exchangeId;
+  }
+
+  public getConfig(): ExchangeConfig {
+    return SUPPORTED_EXCHANGES.find((ex) => ex.id === this.exchangeId)!;
+  }
+
+  public async fetchTickerPrice(symbol: string): Promise<number> {
+    const cleanSym = symbol.replace(/[^A-Z0-9]/gi, "").toUpperCase();
+
+    if (this.exchangeId === "binance") {
+      const res = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${cleanSym}`);
+      if (!res.ok) throw new Error(`Binance price fetch failed: ${res.status}`);
+      const data = await res.json();
+      return parseFloat(data.price);
+    }
+
+    if (this.exchangeId === "bybit") {
+      const res = await fetch(`https://api.bybit.com/v5/market/tickers?category=spot&symbol=${cleanSym}`);
+      if (!res.ok) throw new Error(`Bybit price fetch failed: ${res.status}`);
+      const data = await res.json();
+      const item = data.result?.list?.[0];
+      if (!item) throw new Error(`Symbol ${cleanSym} not found on Bybit`);
+      return parseFloat(item.lastPrice);
+    }
+
+    if (this.exchangeId === "okx") {
+      const okxSym = cleanSym.endsWith("USDT") ? `${cleanSym.replace("USDT", "")}-USDT` : cleanSym;
+      const res = await fetch(`https://www.okx.com/api/v5/market/ticker?instId=${okxSym}`);
+      if (!res.ok) throw new Error(`OKX price fetch failed: ${res.status}`);
+      const data = await res.json();
+      const item = data.data?.[0];
+      if (!item) throw new Error(`Symbol ${okxSym} not found on OKX`);
+      return parseFloat(item.last);
+    }
+
+    if (this.exchangeId === "kucoin") {
+      const kucoinSym = cleanSym.endsWith("USDT") ? `${cleanSym.replace("USDT", "")}-USDT` : cleanSym;
+      const res = await fetch(`https://api.kucoin.com/api/v1/market/orderbook/level1?symbol=${kucoinSym}`);
+      if (!res.ok) throw new Error(`KuCoin price fetch failed: ${res.status}`);
+      const data = await res.json();
+      if (!data.data?.price) throw new Error(`Symbol ${kucoinSym} not found on KuCoin`);
+      return parseFloat(data.data.price);
+    }
+
+    throw new Error(`Unsupported exchange: ${this.exchangeId}`);
+  }
+
+  public async testConnectivity(): Promise<{ success: boolean; latencyMs: number; message?: string }> {
+    return testExchangeConnectivity(this.exchangeId);
+  }
+}
+
 export async function testExchangeConnectivity(exchangeId: ExchangeId): Promise<{
   success: boolean;
   latencyMs: number;

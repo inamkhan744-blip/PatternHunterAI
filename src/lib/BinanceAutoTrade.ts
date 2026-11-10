@@ -17,6 +17,8 @@ import { supabase } from "./supabase";
 
 export type MarketType = "Spot" | "Futures";
 export type TradeDirection = "LONG" | "SHORT";
+export type TradeDirectionMode = "BOTH" | "LONG_ONLY" | "SHORT_ONLY";
+export type AutoPilotState = "IDLE" | "WATCHING";
 
 export interface AutoTradeConfig {
   apiKey: string;
@@ -24,6 +26,7 @@ export interface AutoTradeConfig {
   marketType: MarketType;
   leverage: number; // 1 to 10
   direction: TradeDirection; // For futures
+  tradeDirectionMode: TradeDirectionMode; // Both (Dynamic), Long Only, Short Only
   riskPercent: number; // e.g. 1% to 5%
   maxOpenTrades: number; // 1 to 3
   profitVaultEnabled: boolean; // Move 50% realized profits to Spot
@@ -91,6 +94,7 @@ export const DEFAULT_CONFIG: AutoTradeConfig = {
   marketType: "Spot",
   leverage: 3, // Safe default within 1-10x
   direction: "LONG",
+  tradeDirectionMode: "BOTH",
   riskPercent: 1.5,
   maxOpenTrades: 2, // 1 to 3
   profitVaultEnabled: true,
@@ -417,6 +421,7 @@ export interface DailyTradeStats {
 export class BinanceAutoTradeEngine {
   private config: AutoTradeConfig;
   private trades: ManagedTrade[] = [];
+  private autoPilotState: AutoPilotState = "IDLE";
   private circuitBreaker: CircuitBreakerState = {
     consecutiveLosses: 0,
     isTripped: false,
@@ -436,6 +441,17 @@ export class BinanceAutoTradeEngine {
     this.profitVaultTotal = this.loadProfitVault();
     this.postLossCooldownUntil = this.loadPostLossCooldown();
     this.dailyStats = this.loadDailyStats();
+    if (this.config.autoPilotEnabled) {
+      this.autoPilotState = "WATCHING";
+    }
+  }
+
+  public getAutoPilotState(): AutoPilotState {
+    return this.autoPilotState;
+  }
+
+  public setAutoPilotState(state: AutoPilotState): void {
+    this.autoPilotState = state;
   }
 
   // --- Persistence ---
@@ -461,6 +477,17 @@ export class BinanceAutoTradeEngine {
   }
 
   public saveConfig(configUpdates: Partial<AutoTradeConfig>): AutoTradeConfig {
+    // Check if Auto-Pilot is being toggled ON
+    const wasAutoPilotEnabled = this.config.autoPilotEnabled;
+    const isEnablingAutoPilot = configUpdates.autoPilotEnabled === true && !wasAutoPilotEnabled;
+
+    if (isEnablingAutoPilot) {
+      this.autoPilotState = "WATCHING";
+      console.log("Auto-Pilot Armed. Waiting for a fresh Confluence Signal...");
+    } else if (configUpdates.autoPilotEnabled === false) {
+      this.autoPilotState = "IDLE";
+    }
+
     // If API keys were supplied in update, encrypt them via AES-256
     const hasKeyUpdate = configUpdates.apiKey !== undefined || configUpdates.apiSecret !== undefined;
     const currentApiKey = configUpdates.apiKey !== undefined ? configUpdates.apiKey : (this.config.apiKey || getDecryptedApiKeys().apiKey);
@@ -918,6 +945,32 @@ export class BinanceAutoTradeEngine {
       return {
         success: false,
         error: `Circuit Breaker is TRIPPED (${this.circuitBreaker.consecutiveLosses} consecutive losses). Auto-Pilot is disabled for capital protection.`,
+      };
+    }
+
+    // Check if an active position already exists for this specific symbol in engine
+    const existingPosition = this.trades.find((t) => t.symbol === params.symbol && t.status === "OPEN");
+    if (existingPosition) {
+      const msg = "Trade blocked: Active position exists for this symbol.";
+      console.log(msg);
+      return {
+        success: false,
+        error: msg,
+      };
+    }
+
+    // Enforce Trade Direction Mode (BOTH, LONG_ONLY, SHORT_ONLY)
+    const directionMode = this.config.tradeDirectionMode || "BOTH";
+    if (directionMode === "LONG_ONLY" && direction === "SHORT") {
+      return {
+        success: false,
+        error: "Trade blocked: Auto-Pilot trade direction mode is set to LONG ONLY.",
+      };
+    }
+    if (directionMode === "SHORT_ONLY" && direction === "LONG") {
+      return {
+        success: false,
+        error: "Trade blocked: Auto-Pilot trade direction mode is set to SHORT ONLY.",
       };
     }
 

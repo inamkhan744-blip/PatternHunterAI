@@ -26,6 +26,7 @@ import {
 } from "./BinanceAutoTrade";
 import { simulateSwarmDebate } from "./AgentSwarm";
 import { paperTradingEngine } from "./PaperTrading";
+import { tradeManager } from "./TradeManager";
 
 async function runTests() {
   console.log("Starting Fortress Binance Auto-Trade Engine Unit Tests...");
@@ -255,7 +256,41 @@ async function runTests() {
   assert(initialDrawdown.maxDailyLossPercent === 3.0, "Default max daily loss percent is 3.0%");
   assert(typeof initialDrawdown.drawdownPct === "number", "Drawdown percentage calculated");
 
-  // 12. Paper Trading Simulation Engine
+  // 12. Auto-Pilot State, Trade Direction Mode, and Execution Lock
+  engine.saveConfig({ autoPilotEnabled: true });
+  assert(engine.getAutoPilotState() === "WATCHING", "Auto-Pilot state transitions to WATCHING when enabled");
+
+  engine.saveConfig({ tradeDirectionMode: "LONG_ONLY" });
+  assert(engine.getConfig().tradeDirectionMode === "LONG_ONLY", "Trade direction mode saved as LONG_ONLY");
+
+  // Execution Lock in TradeManager
+  const testSymbol = "TESTUSDT";
+  // Clean any previous test trade
+  tradeManager.closeAllTrades("MANUAL");
+  assert(tradeManager.hasActivePosition(testSymbol) === false, "No active position initially for TESTUSDT");
+
+  const addedTrade = tradeManager.addTrade({
+    symbol: testSymbol,
+    entryPrice: 100,
+    quantity: 1,
+    direction: "SHORT",
+  });
+  assert(addedTrade !== null, "First trade for TESTUSDT was successfully added");
+  assert(tradeManager.hasActivePosition(testSymbol) === true, "hasActivePosition returns true after trade added");
+
+  // Attempt duplicate trade for same symbol should be blocked
+  const blockedTrade = tradeManager.addTrade({
+    symbol: testSymbol,
+    entryPrice: 100,
+    quantity: 1,
+    direction: "SHORT",
+  });
+  assert(blockedTrade === null, "Second trade for same symbol is blocked by Execution Lock");
+
+  // Cleanup test trade
+  tradeManager.closeAllTrades("MANUAL");
+
+  // 13. Paper Trading Simulation Engine
   paperTradingEngine.resetAccount(10000);
   const pAcc = paperTradingEngine.getAccount();
   assert(pAcc.balance === 10000, "Paper trading account starts with virtual $10,000");

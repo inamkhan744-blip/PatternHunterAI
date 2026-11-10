@@ -30,6 +30,7 @@ import {
   AutoTradeConfig,
   ManagedTrade,
   CircuitBreakerState,
+  TradeDirectionMode,
 } from "../lib/BinanceAutoTrade";
 import { paperTradingEngine, PaperTrade } from "../lib/PaperTrading";
 import { tradeManager } from "../lib/TradeManager";
@@ -725,6 +726,23 @@ export default function AutoTradeModal({
                 <div className="p-2.5 rounded-lg bg-slate-950/80 border border-slate-800 text-[11px] text-slate-400 font-sans flex items-center gap-2">
                   <Zap className="w-3.5 h-3.5 text-amber-400 shrink-0" />
                   <span>Use Top Header switch to toggle state anytime</span>
+                </div>
+
+                {/* Trade Direction Mode Dropdown */}
+                <div className="pt-2 border-t border-slate-800/80">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-[11px] text-slate-300 font-medium font-sans">Trade Direction Mode:</span>
+                    <span className="text-[10px] text-cyan-400 font-bold">{config.tradeDirectionMode || "BOTH"}</span>
+                  </div>
+                  <select
+                    value={config.tradeDirectionMode || "BOTH"}
+                    onChange={(e) => handleConfigChange({ tradeDirectionMode: e.target.value as TradeDirectionMode })}
+                    className="w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-cyan-300 font-bold outline-none focus:border-cyan-500"
+                  >
+                    <option value="BOTH">Both (Dynamic)</option>
+                    <option value="LONG_ONLY">Long Only</option>
+                    <option value="SHORT_ONLY">Short Only</option>
+                  </select>
                 </div>
               </div>
             </div>

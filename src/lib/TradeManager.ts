@@ -133,6 +133,10 @@ class TradeManager {
     return [...this.activeTrades];
   }
 
+  public hasActivePosition(symbol: string): boolean {
+    return this.activeTrades.some((t) => t.symbol === symbol);
+  }
+
   public getTradeHistory(): ClosedTrade[] {
     return [...this.tradeHistory];
   }
@@ -178,7 +182,13 @@ class TradeManager {
     customId?: string;
     slOrderId?: string;
     tpOrderId?: string;
-  }): ActiveTrade {
+  }): ActiveTrade | null {
+    // Strict Execution Lock: Check if an active position already exists for that specific symbol
+    if (this.hasActivePosition(params.symbol)) {
+      console.log("Trade blocked: Active position exists for this symbol.");
+      return null;
+    }
+
     const direction = params.direction ?? "LONG";
     const marketType = params.marketType ?? "Spot";
     const leverage = marketType === "Futures" ? (params.leverage ?? 1) : 1;

@@ -15,7 +15,7 @@ export interface SwarmAgentMessage {
   timestamp: string;
 }
 
-import { getGeminiApiKey, getSelectedModel } from "./ModelManager";
+import { supabase } from "./supabase";
 
 export interface SwarmDebateResult {
   symbol: string;
@@ -162,9 +162,6 @@ export function simulateSwarmDebate(params: SwarmDebateParams): SwarmDebateResul
     message: verdictMessage,
   };
 
-  // Inspect localStorage for Gemini key
-  const hasGeminiKey = Boolean(getGeminiApiKey());
-
   return {
     symbol,
     price,
@@ -175,85 +172,47 @@ export function simulateSwarmDebate(params: SwarmDebateParams): SwarmDebateResul
     recommendedLeverage,
     recommendedPositionPct,
     messages: [bullMessage, bearMessage, riskMessage],
-    apiKeyUsed: hasGeminiKey,
+    apiKeyUsed: false,
     isRealAI: false,
   };
 }
 
 /**
- * Real Gemini AI Swarm Generator:
- * Invokes Google Gemini API directly using the user's stored API Key.
- * Falls back to simulateSwarmDebate if the key is missing or on network/API failure.
+ * Real AI Swarm Generator:
+ * Invokes Supabase Edge Function 'ai-chat' with action: 'swarm'.
+ * Gracefully falls back to simulateSwarmDebate without requiring user-provided Gemini API key.
  */
 export async function runRealSwarmDebate(params: SwarmDebateParams): Promise<SwarmDebateResult> {
-  const geminiKey = getGeminiApiKey();
   const baseSim = simulateSwarmDebate(params);
 
-  if (!geminiKey) {
-    return baseSim;
-  }
-
-  const model = getSelectedModel() || "gemini-2.0-flash";
   const now = new Date();
   const timeStr = (offsetSec: number) => {
     const d = new Date(now.getTime() + offsetSec * 1000);
     return d.toISOString().substring(11, 19);
   };
 
-  const prompt = `You are an elite hedge fund investment committee debating an algorithmic trade setup.
-Asset: ${params.symbol}
-Current Price: $${params.price}
-RSI(14): ${params.rsi ?? 50}
-Trend: ${params.trend ?? "neutral"}
-Pattern: ${params.patternName ?? "Consolidation"} (${params.patternDirection ?? "neutral"})
-Fear & Greed Index: ${params.fearGreed ?? 50}
-ATR: ${params.atrValue ?? "N/A"}
-Spread %: ${params.spreadPct ?? "0.02%"}
-Preliminary Confluence Score: ${baseSim.confluenceScore}/100
-
-Produce a JSON response strictly matching this schema with NO markdown code fences:
-{
-  "bullThesis": "Concise high-conviction bullish argument from Bull Agent (max 3 sentences)",
-  "bullConfidence": 85,
-  "bearThesis": "Concise risk/supply warning from Bear Agent (max 3 sentences)",
-  "bearConfidence": 70,
-  "riskVerdict": "GO" or "NO-GO",
-  "riskThesis": "Concise risk assessment and sizing rationale from Risk Manager (max 3 sentences)",
-  "recommendedDirection": "LONG" or "SHORT" or "HOLD",
-  "recommendedLeverage": 3,
-  "recommendedPositionPct": 2.5
-}`;
-
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 12000);
-    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(geminiKey)}`;
-
-    const res = await fetch(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: {
-          temperature: 0.4,
-          maxOutputTokens: 600,
-          responseMimeType: "application/json",
-        },
-      }),
-      signal: controller.signal,
+    const { data, error } = await supabase.functions.invoke("ai-chat", {
+      body: {
+        action: "swarm",
+        symbol: params.symbol,
+        price: params.price,
+        rsi: params.rsi,
+        trend: params.trend,
+        patternName: params.patternName,
+        patternDirection: params.patternDirection,
+        fearGreed: params.fearGreed,
+        atrValue: params.atrValue,
+        spreadPct: params.spreadPct,
+        confluenceScore: baseSim.confluenceScore,
+      },
     });
-    clearTimeout(timeoutId);
 
-    if (!res.ok) {
+    if (error || !data || !data.data) {
       return baseSim;
     }
 
-    const data = await res.json();
-    const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!rawText) return baseSim;
-
-    const cleaned = rawText.replace(/```json\n?|```/g, "").trim();
-    const parsed = JSON.parse(cleaned);
+    const parsed = data.data;
 
     const bullMessage: SwarmAgentMessage = {
       agent: "Bull Agent",

@@ -4,8 +4,8 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
 };
 
-const GEMINI_TIMEOUT_MS = 15000;
-const GEMINI_MODELS = ["gemini-1.5-flash", "gemini-2.0-flash-001", "gemini-2.0-flash"];
+const GEMINI_TIMEOUT_MS = 20000;
+const GEMINI_MODELS = ["gemini-3.1-flash-lite", "gemini-2.0-flash"];
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
@@ -25,7 +25,7 @@ Deno.serve(async (req: Request) => {
     const geminiKey = Deno.env.get("GEMINI_API_KEY");
     if (!geminiKey) {
       return new Response(
-        JSON.stringify({ unavailable: true, error: "Gemini API key not configured." }),
+        JSON.stringify({ unavailable: true, error: "Backend GEMINI_API_KEY is not configured in Supabase secrets." }),
         { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
@@ -60,7 +60,7 @@ Calculate Entry, SL, and TP based on the current price of $${price} and the ${di
       const timeoutId = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
       try {
         const geminiRes = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
+          `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(geminiKey)}`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },

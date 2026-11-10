@@ -81,7 +81,6 @@ import CopyTradingTab from "./components/CopyTradingTab";
 import StrategyBuilder from "./components/StrategyBuilder";
 import { gridTradingBot } from "./lib/GridBot";
 import { isUserAdmin, isUserPro } from "./lib/SubscriptionManager";
-import { getGeminiApiKey, getSelectedModel } from "./lib/ModelManager";
 import { autoTradeEngine } from "./lib/BinanceAutoTrade";
 import { paperTradingEngine } from "./lib/PaperTrading";
 import { tradeManager } from "./lib/TradeManager";
@@ -213,8 +212,6 @@ export default function App() {
     return !cfg.apiKey || !cfg.apiSecret;
   });
   const [wsLatency, setWsLatency] = useState<number>(28);
-  const geminiConfigured = Boolean(getGeminiApiKey());
-  const selectedModelName = getSelectedModel() || "gemini-2.0-flash";
 
   // Collapsible panels state for Chart UI optimization
   const [lowerPanelsOpen, setLowerPanelsOpen] = useState(true);
@@ -642,92 +639,23 @@ export default function App() {
     setAiLoading(true);
     setAiError(null);
 
-    // 1. Direct local Gemini API Key usage if configured
-    const localGeminiKey = getGeminiApiKey();
-    const localModel = getSelectedModel() || "gemini-2.0-flash";
-
-    if (localGeminiKey) {
-      try {
-        const prompt = `You are a Wall Street quantitative crypto technician analyzing a live trade setup.
-Asset: ${selectedCoin.symbol}/USDT
-Current Price: $${lastPrice}
-Pattern: ${pattern.name} (${pattern.direction})
-Description: ${pattern.description}
-Recent Candle Closes: ${candles.slice(-10).map((c) => c.close).join(", ")}
-
-Provide a concise institutional breakdown. Include explicit price targets formatted as:
-Entry: $X.XX
-Stop Loss: $X.XX
-Target: $X.XX
-Followed by a 2-3 sentence strategic rationale.`;
-
-        const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(localModel)}:generateContent?key=${encodeURIComponent(localGeminiKey)}`;
-        const geminiRes = await fetch(endpoint, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: { temperature: 0.3, maxOutputTokens: 300 },
-          }),
-        });
-
-        if (geminiRes.ok) {
-          const geminiData = await geminiRes.json();
-          const text = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text;
-          if (text) {
-            setExplanation(text);
-            const parsed = parseAnalysisPrices(text);
-            if (parsed) {
-              setEntryPrice(parsed.entry);
-              setSlPrice(parsed.sl);
-              setTpPrice(parsed.tp);
-            } else {
-              const prices = getFallbackPrices(pattern, lastPrice);
-              setEntryPrice(prices.entry);
-              setSlPrice(prices.sl);
-              setTpPrice(prices.tp);
-            }
-            setAiLoading(false);
-            return;
-          }
-        }
-      } catch {
-        // Fall back to Supabase Edge function
-      }
-    }
-
-    // 2. Supabase Edge Function Fallback
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 12000);
     try {
-      const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-      const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
-      if (!supabaseUrl || supabaseUrl.includes("placeholder")) {
-        throw new Error("No edge URL");
-      }
-      const apiUrl = `${supabaseUrl}/functions/v1/explain-pattern`;
-      const res = await fetch(apiUrl, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${supabaseKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
+      const { data, error: invokeError } = await supabase.functions.invoke("explain-pattern", {
+        body: {
           patternName: pattern.name,
           direction: pattern.direction,
           description: pattern.description,
           coin: selectedCoin.symbol,
           price: lastPrice,
           recentCandles: candles.slice(-20),
-        }),
-        signal: controller.signal,
+        },
       });
-      clearTimeout(timeoutId);
-      const data = await res.json();
-      if (data.unavailable || !res.ok) {
-        throw new Error("Edge unavailable");
+
+      if (invokeError || data?.unavailable || !data?.explanation) {
+        throw new Error(invokeError?.message || data?.error || "Edge unavailable");
       }
-      const text = data.explanation ?? "No analysis available.";
+
+      const text = data.explanation;
       setExplanation(text);
       const parsed = parseAnalysisPrices(text);
       if (parsed) {
@@ -741,10 +669,9 @@ Followed by a 2-3 sentence strategic rationale.`;
         setTpPrice(prices.tp);
       }
     } catch {
-      clearTimeout(timeoutId);
       const fallback = generateFallbackAnalysis(pattern, selectedCoin.symbol, lastPrice);
       setExplanation(fallback);
-      setAiError(localGeminiKey ? "Gemini request timed out — showing automated estimate." : "Add your Gemini API Key in Settings for live neural analysis.");
+      setAiError("Live AI analysis unavailable — showing automated estimate.");
       const prices = getFallbackPrices(pattern, lastPrice);
       setEntryPrice(prices.entry);
       setSlPrice(prices.sl);
@@ -1266,16 +1193,11 @@ Followed by a 2-3 sentence strategic rationale.`;
 
                   {/* AI Status Badge */}
                   <span
-                    className={`px-2 py-1 rounded border flex items-center gap-1 cursor-pointer ${
-                      geminiConfigured
-                        ? "bg-cyan-500/10 text-cyan-300 border-cyan-500/40"
-                        : "bg-slate-800 text-slate-400 border-slate-700"
-                    }`}
-                    onClick={() => setSettingsOpen(true)}
-                    title={geminiConfigured ? `Direct Gemini Neural Engine Active (${selectedModelName}). Click to modify.` : "No direct key configured. Click Settings to enter your Gemini API Key."}
+                    className="px-2 py-1 rounded border border-cyan-500/40 bg-cyan-500/10 text-cyan-300 flex items-center gap-1 cursor-default font-mono"
+                    title="Backend Gemini Multimodal AI Edge Active"
                   >
                     <Sparkles className="w-3 h-3 text-cyan-400" />
-                    <span>{geminiConfigured ? `AI: ${selectedModelName}` : "AI: EDGE"}</span>
+                    <span>AI: EDGE</span>
                   </span>
                 </div>
 

@@ -1,27 +1,24 @@
-/**
- * Subscription Manager & Admin Bypass Engine
- *
- * Rules:
- * - Admin bypass: if user's email is inamkhan744@gmail.com, automatically unlock all Pro features for free.
- * - Free users:
- *    - Lock Auto-Pilot
- *    - Hide Telegram settings
- *    - Limit manual trades to 3 per day
- * - Pro users:
- *    - Configurable Daily Trade Limit (dropdown: 1, 5, 10, 100)
- *    - Unlocked Auto-Pilot
- *    - Full Telegram settings access
- */
+import { supabase } from "./supabase";
 
-export const ADMIN_BYPASS_EMAIL = "inamkhan744@gmail.com";
+export type UserRole = "user" | "staff" | "admin";
+export type SubscriptionTier = "free" | "pro" | "premium";
+
+export interface UserSubscriptionProfile {
+  role: UserRole;
+  tier: SubscriptionTier;
+  expiresAt: string | null;
+  dailyTradeLimit: number;
+}
+
 export const FREE_DAILY_MANUAL_TRADE_LIMIT = 3;
 export type ProDailyTradeLimit = 1 | 5 | 10 | 100;
 
 const STORAGE_KEY_PRO_TRADE_LIMIT = "fortress_pro_daily_trade_limit";
 const STORAGE_KEY_DAILY_USAGE = "fortress_daily_trade_tracker";
+const STORAGE_KEY_CACHED_PROFILE = "fortress_cached_user_profile";
 
 interface DailyTradeTracker {
-  date: string; // YYYY-MM-DD
+  date: string;
   count: number;
 }
 
@@ -30,20 +27,67 @@ function getTodayString(): string {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
 }
 
-export function isUserAdmin(email?: string | null): boolean {
+export function isUserAdmin(email?: string | null, userMetadata?: Record<string, any>): boolean {
+  if (userMetadata?.role === "admin") return true;
   if (!email || typeof email !== "string") return false;
-  return email.trim().toLowerCase() === ADMIN_BYPASS_EMAIL.toLowerCase();
+  const normalized = email.trim().toLowerCase();
+  return normalized === "inamkhan744@gmail.com";
 }
 
-export function isUserPro(email?: string | null, manualProState: boolean = false): boolean {
-  if (isUserAdmin(email)) {
-    return true;
-  }
+export function isUserPro(
+  email?: string | null,
+  manualProState: boolean = false,
+  userMetadata?: Record<string, any>
+): boolean {
+  if (isUserAdmin(email, userMetadata)) return true;
+  if (userMetadata?.subscription_tier === "pro" || userMetadata?.subscription_tier === "premium") return true;
   return Boolean(manualProState);
+}
+
+export async function fetchUserProfile(userId?: string): Promise<UserSubscriptionProfile> {
+  const defaultProfile: UserSubscriptionProfile = {
+    role: "user",
+    tier: "free",
+    expiresAt: null,
+    dailyTradeLimit: FREE_DAILY_MANUAL_TRADE_LIMIT,
+  };
+
+  if (!userId) return defaultProfile;
+
+  try {
+    const { data, error } = await supabase
+      .from("user_profiles")
+      .select("role, subscription_tier, subscription_expires_at, daily_trade_limit")
+      .eq("id", userId)
+      .maybeSingle();
+
+    if (error || !data) {
+      if (typeof localStorage !== "undefined") {
+        const cached = localStorage.getItem(STORAGE_KEY_CACHED_PROFILE);
+        if (cached) return JSON.parse(cached);
+      }
+      return defaultProfile;
+    }
+
+    const profile: UserSubscriptionProfile = {
+      role: (data.role as UserRole) || "user",
+      tier: (data.subscription_tier as SubscriptionTier) || "free",
+      expiresAt: data.subscription_expires_at || null,
+      dailyTradeLimit: data.daily_trade_limit || (data.subscription_tier === "free" ? FREE_DAILY_MANUAL_TRADE_LIMIT : 100),
+    };
+
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(STORAGE_KEY_CACHED_PROFILE, JSON.stringify(profile));
+    }
+    return profile;
+  } catch {
+    return defaultProfile;
+  }
 }
 
 export function getProDailyTradeLimit(): ProDailyTradeLimit {
   try {
+    if (typeof localStorage === "undefined") return 100;
     const raw = localStorage.getItem(STORAGE_KEY_PRO_TRADE_LIMIT);
     if (raw) {
       const val = parseInt(raw, 10);
@@ -58,11 +102,14 @@ export function getProDailyTradeLimit(): ProDailyTradeLimit {
 }
 
 export function setProDailyTradeLimit(limit: ProDailyTradeLimit): void {
-  localStorage.setItem(STORAGE_KEY_PRO_TRADE_LIMIT, limit.toString());
+  if (typeof localStorage !== "undefined") {
+    localStorage.setItem(STORAGE_KEY_PRO_TRADE_LIMIT, limit.toString());
+  }
 }
 
 export function getDailyTradeCount(): number {
   try {
+    if (typeof localStorage === "undefined") return 0;
     const raw = localStorage.getItem(STORAGE_KEY_DAILY_USAGE);
     if (raw) {
       const parsed: DailyTradeTracker = JSON.parse(raw);
@@ -80,11 +127,13 @@ export function incrementDailyTradeCount(): number {
   const today = getTodayString();
   let currentCount = 0;
   try {
-    const raw = localStorage.getItem(STORAGE_KEY_DAILY_USAGE);
-    if (raw) {
-      const parsed: DailyTradeTracker = JSON.parse(raw);
-      if (parsed.date === today) {
-        currentCount = parsed.count;
+    if (typeof localStorage !== "undefined") {
+      const raw = localStorage.getItem(STORAGE_KEY_DAILY_USAGE);
+      if (raw) {
+        const parsed: DailyTradeTracker = JSON.parse(raw);
+        if (parsed.date === today) {
+          currentCount = parsed.count;
+        }
       }
     }
   } catch {
@@ -92,14 +141,20 @@ export function incrementDailyTradeCount(): number {
   }
 
   const nextCount = currentCount + 1;
-  localStorage.setItem(
-    STORAGE_KEY_DAILY_USAGE,
-    JSON.stringify({ date: today, count: nextCount })
-  );
+  if (typeof localStorage !== "undefined") {
+    localStorage.setItem(
+      STORAGE_KEY_DAILY_USAGE,
+      JSON.stringify({ date: today, count: nextCount })
+    );
+  }
   return nextCount;
 }
 
-export function checkTradeExecutionAllowance(email?: string | null, isProManual: boolean = false): {
+export function checkTradeExecutionAllowance(
+  email?: string | null,
+  isProManual: boolean = false,
+  userMetadata?: Record<string, any>
+): {
   allowed: boolean;
   limit: number;
   current: number;
@@ -107,8 +162,8 @@ export function checkTradeExecutionAllowance(email?: string | null, isProManual:
   isPro: boolean;
   isAdmin: boolean;
 } {
-  const admin = isUserAdmin(email);
-  const pro = isUserPro(email, isProManual);
+  const admin = isUserAdmin(email, userMetadata);
+  const pro = isUserPro(email, isProManual, userMetadata);
   const current = getDailyTradeCount();
 
   if (admin) {
@@ -130,7 +185,7 @@ export function checkTradeExecutionAllowance(email?: string | null, isProManual:
       current,
       reason: pro
         ? `Pro daily trade limit reached (${current}/${limit}). Increase limit in Settings or wait until UTC midnight.`
-        : `Free tier limit of ${FREE_DAILY_MANUAL_TRADE_LIMIT} trades per day reached (${current}/${FREE_DAILY_MANUAL_TRADE_LIMIT}). Upgrade to Pro or sign in as Admin for unlimited trading.`,
+        : `Free tier limit of ${FREE_DAILY_MANUAL_TRADE_LIMIT} trades per day reached (${current}/${FREE_DAILY_MANUAL_TRADE_LIMIT}). Upgrade to Pro for high-volume automated trading.`,
       isPro: pro,
       isAdmin: false,
     };

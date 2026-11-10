@@ -8,7 +8,15 @@ interface PatternProfile {
   reasoning: string;
 }
 
-const PROFILES: Record<PatternType, PatternProfile> = {
+const DEFAULT_PROFILE: PatternProfile = {
+  entryOffset: 0.002,
+  slOffset: -0.01,
+  tpOffset: 0.02,
+  bias: "long",
+  reasoning: "Chart pattern price action projection based on support/resistance and momentum.",
+};
+
+const PROFILES: Partial<Record<PatternType, PatternProfile>> = {
   double_top: {
     entryOffset: -0.003, slOffset: 0.01, tpOffset: -0.02, bias: "short",
     reasoning: "Double Top confirms bearish reversal — two failed attempts to break resistance signal selling pressure.",
@@ -16,6 +24,14 @@ const PROFILES: Record<PatternType, PatternProfile> = {
   double_bottom: {
     entryOffset: 0.003, slOffset: -0.01, tpOffset: 0.02, bias: "long",
     reasoning: "Double Bottom confirms bullish reversal — two failed attempts to break support signal accumulating buying interest.",
+  },
+  triple_top: {
+    entryOffset: -0.004, slOffset: 0.012, tpOffset: -0.025, bias: "short",
+    reasoning: "Triple Top confirms major distribution ceiling with buyer exhaustion.",
+  },
+  triple_bottom: {
+    entryOffset: 0.004, slOffset: -0.012, tpOffset: 0.025, bias: "long",
+    reasoning: "Triple Bottom confirms strong institutional demand accumulation base.",
   },
   ma_crossover_bull: {
     entryOffset: 0.002, slOffset: -0.008, tpOffset: 0.015, bias: "long",
@@ -49,6 +65,10 @@ const PROFILES: Record<PatternType, PatternProfile> = {
     entryOffset: -0.002, slOffset: 0.008, tpOffset: -0.025, bias: "short",
     reasoning: "Descending Triangle — flat support with falling resistance shows sellers pressing down; breakout expected downward.",
   },
+  symmetrical_triangle: {
+    entryOffset: 0.002, slOffset: -0.01, tpOffset: 0.02, bias: "long",
+    reasoning: "Symmetrical Triangle — volatility contraction squeezing towards breakout expansion.",
+  },
   cup_and_handle: {
     entryOffset: 0.003, slOffset: -0.01, tpOffset: 0.035, bias: "long",
     reasoning: "Cup and Handle — rounded accumulation bottom followed by a shallow handle; bullish continuation likely.",
@@ -61,10 +81,42 @@ const PROFILES: Record<PatternType, PatternProfile> = {
     entryOffset: 0.003, slOffset: -0.012, tpOffset: 0.025, bias: "long",
     reasoning: "Falling Wedge — converging downward trendlines squeeze momentum; bullish breakout increasingly likely.",
   },
+  bullish_engulfing: {
+    entryOffset: 0.001, slOffset: -0.01, tpOffset: 0.025, bias: "long",
+    reasoning: "Bullish Engulfing — strong buyer candle swallowed previous selling pressure completely.",
+  },
+  bearish_engulfing: {
+    entryOffset: -0.001, slOffset: 0.01, tpOffset: -0.025, bias: "short",
+    reasoning: "Bearish Engulfing — aggressive selling candle swallowed previous buying pressure completely.",
+  },
+  hammer: {
+    entryOffset: 0.001, slOffset: -0.01, tpOffset: 0.02, bias: "long",
+    reasoning: "Hammer pinbar — long lower shadow rejected cheaper liquidity.",
+  },
+  shooting_star: {
+    entryOffset: -0.001, slOffset: 0.01, tpOffset: -0.02, bias: "short",
+    reasoning: "Shooting star — long upper shadow rejected high prices.",
+  },
+  liquidity_sweep_bull: {
+    entryOffset: 0.002, slOffset: -0.012, tpOffset: 0.03, bias: "long",
+    reasoning: "Turtle soup sweep below key floor reclaimed with high absorption.",
+  },
+  liquidity_sweep_bear: {
+    entryOffset: -0.002, slOffset: 0.012, tpOffset: -0.03, bias: "short",
+    reasoning: "Buy stop run above key ceiling rejected back into range.",
+  },
+  breakout_bull: {
+    entryOffset: 0.003, slOffset: -0.01, tpOffset: 0.03, bias: "long",
+    reasoning: "Range ceiling expansion with continuation momentum.",
+  },
+  breakout_bear: {
+    entryOffset: -0.003, slOffset: 0.01, tpOffset: -0.03, bias: "short",
+    reasoning: "Range floor breakdown with downside continuation momentum.",
+  },
 };
 
 export function generateFallbackAnalysis(pattern: DetectedPattern, coin: string, price: number): string {
-  const profile = PROFILES[pattern.type] ?? PROFILES.double_top;
+  const profile = PROFILES[pattern.type] ?? DEFAULT_PROFILE;
   const entry = price * (1 + profile.entryOffset);
   const sl = price * (1 + profile.slOffset);
   const tp = price * (1 + profile.tpOffset);
@@ -95,7 +147,7 @@ export function parseAnalysisPrices(explanation: string): { entry: number; sl: n
 }
 
 export function getFallbackPrices(pattern: DetectedPattern, price: number): { entry: number; sl: number; tp: number } {
-  const profile = PROFILES[pattern.type] ?? PROFILES.double_top;
+  const profile = PROFILES[pattern.type] ?? DEFAULT_PROFILE;
   return {
     entry: price * (1 + profile.entryOffset),
     sl: price * (1 + profile.slOffset),

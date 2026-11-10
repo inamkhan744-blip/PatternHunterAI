@@ -1,5 +1,5 @@
 import type { Candle } from "../types";
-import { rsi } from "./indicators";
+import { rsi, macd } from "./indicators";
 import type { SMCData, HTFTrendResult } from "./SMCScanner";
 
 export interface ConfluenceCheckItem {
@@ -12,23 +12,22 @@ export interface ConfluenceCheckItem {
   detail?: string;
 }
 
+export type SignalSetupBias = "Strong Buy" | "Buy" | "Neutral" | "Sell" | "Strong Sell" | "Bullish" | "Bearish";
+
 export interface ConfluenceResult {
-  score: number; // 0 - 100
-  canExecute: boolean; // score >= 85
+  score: number;
+  canExecute: boolean;
   items: ConfluenceCheckItem[];
-  setupBias: "Bullish" | "Bearish" | "Neutral";
+  setupBias: SignalSetupBias;
   currentPrice: number;
   adxValue: number | null;
   rsiValue: number | null;
   volumeRatio: number | null;
   smcZoneFound: string | null;
+  evidence: string[];
+  invalidationCriteria: string[];
 }
 
-/**
- * Calculates Welles Wilder's ADX (Average Directional Index)
- * standard 14 period.
- * Returns array of ADX values corresponding to candles, or null if insufficient data.
- */
 export function calculateADX(candles: Candle[], period = 14): (number | null)[] {
   const n = candles.length;
   const result: (number | null)[] = new Array(n).fill(null);
@@ -48,7 +47,6 @@ export function calculateADX(candles: Candle[], period = 14): (number | null)[] 
     const prevLow = candles[i - 1].low;
     const prevClose = candles[i - 1].close;
 
-    // True Range
     const currentTR = Math.max(
       high - low,
       Math.abs(high - prevClose),
@@ -56,7 +54,6 @@ export function calculateADX(candles: Candle[], period = 14): (number | null)[] 
     );
     tr.push(currentTR);
 
-    // Directional Movement
     const upMove = high - prevHigh;
     const downMove = prevLow - low;
 
@@ -73,7 +70,6 @@ export function calculateADX(candles: Candle[], period = 14): (number | null)[] 
     }
   }
 
-  // Smooth TR, +DM, -DM using Wilder's smoothing
   let smoothTR = 0;
   let smoothPlusDM = 0;
   let smoothMinusDM = 0;
@@ -104,7 +100,6 @@ export function calculateADX(candles: Candle[], period = 14): (number | null)[] 
     dx[i] = calcDX(smoothPlusDM, smoothMinusDM, smoothTR);
   }
 
-  // Calculate ADX as smoothed DX
   const firstAdxIndex = period * 2 - 1;
   if (firstAdxIndex < n) {
     let sumDX = 0;
@@ -123,21 +118,14 @@ export function calculateADX(candles: Candle[], period = 14): (number | null)[] 
   return result;
 }
 
-/**
- * Sniper Confluence Engine:
- * Evaluates 5 conditions totaling 100 points:
- * 1. HTF Trend alignment (25 pts)
- * 2. SMC setup: Price inside Bullish/Bearish FVG or OB (25 pts)
- * 3. RSI: 40-60 (Neutral sweet spot) or Overbought/Oversold extremes (15 pts)
- * 4. Volume: Above 20-period average (15 pts)
- * 5. ADX: > 20 (Trending market) (20 pts)
- */
 export function evaluateConfluence(
   candles: Candle[],
   smcData: SMCData,
   htfTrend: HTFTrendResult | null
 ): ConfluenceResult {
   const items: ConfluenceCheckItem[] = [];
+  const evidence: string[] = [];
+  const invalidationCriteria: string[] = [];
 
   if (candles.length === 0) {
     return {
@@ -150,31 +138,26 @@ export function evaluateConfluence(
       rsiValue: null,
       volumeRatio: null,
       smcZoneFound: null,
+      evidence: ["No candle data provided"],
+      invalidationCriteria: ["Empty chart feed"],
     };
   }
 
   const currentCandle = candles[candles.length - 1];
   const currentPrice = currentCandle.close;
+  const closes = candles.map((c) => c.close);
 
-  // Detect bias: based on HTF trend or recent price structure
   const htfDirection = htfTrend?.trend ?? "Neutral";
-  let setupBias: "Bullish" | "Bearish" | "Neutral" = "Neutral";
-  if (htfDirection === "Bullish") setupBias = "Bullish";
-  else if (htfDirection === "Bearish") setupBias = "Bearish";
+  let baseBias: "Bullish" | "Bearish" | "Neutral" = "Neutral";
+  if (htfDirection === "Bullish") baseBias = "Bullish";
+  else if (htfDirection === "Bearish") baseBias = "Bearish";
   else {
-    // Fallback: 20-period SMA
     const recentCloses = candles.slice(-20).map((c) => c.close);
-    const avgClose = recentCloses.reduce((a, b) => a + b, 0) / recentCloses.length;
-    setupBias = currentPrice >= avgClose ? "Bullish" : "Bearish";
+    const avgClose = recentCloses.reduce((a, b) => a + b, 0) / (recentCloses.length || 1);
+    baseBias = currentPrice >= avgClose ? "Bullish" : "Bearish";
   }
 
-  // 1. HTF Trend Alignment (25 Points)
-  // Aligned if HTF Trend is Bullish (price above 1H & 4H EMA50) or Bearish (price below EMA50)
-  // and aligns with setup bias.
-  const isHtfAligned =
-    htfTrend !== null &&
-    (htfTrend.trend === "Bullish" || htfTrend.trend === "Bearish");
-
+  const isHtfAligned = htfTrend !== null && (htfTrend.trend === "Bullish" || htfTrend.trend === "Bearish");
   if (isHtfAligned) {
     items.push({
       id: "htf-trend",
@@ -185,6 +168,8 @@ export function evaluateConfluence(
       message: `HTF Trend: ${htfTrend.trend} (1H & 4H EMA50 aligned)`,
       detail: `1H EMA(50): $${htfTrend.ema1h?.toFixed(2) ?? "N/A"} | 4H EMA(50): $${htfTrend.ema4h?.toFixed(2) ?? "N/A"}`,
     });
+    evidence.push(`Strong HTF directional alignment: ${htfTrend.trend} trend confirmed on 1H/4H timeframe`);
+    invalidationCriteria.push(`1H candle close across opposite side of EMA(50)`);
   } else {
     items.push({
       id: "htf-trend",
@@ -197,17 +182,13 @@ export function evaluateConfluence(
     });
   }
 
-  // 2. SMC Setup (25 Points)
-  // Check if currentPrice is inside any active Bullish/Bearish Order Block or Fair Value Gap
   let activeSMCZone: string | null = null;
   let smcType: "bullish" | "bearish" | null = null;
 
-  // Check recent unmitigated or active zones
   for (const ob of smcData.orderBlocks) {
     const minP = Math.min(ob.top, ob.bottom);
     const maxP = Math.max(ob.top, ob.bottom);
-    // Expand tolerance slightly by 0.1% for wick contact
-    const tolerance = currentPrice * 0.001;
+    const tolerance = currentPrice * 0.0015;
     if (currentPrice >= minP - tolerance && currentPrice <= maxP + tolerance) {
       activeSMCZone = `${ob.type === "bullish" ? "Bullish" : "Bearish"} Order Block ($${minP.toFixed(2)} - $${maxP.toFixed(2)})`;
       smcType = ob.type;
@@ -219,7 +200,7 @@ export function evaluateConfluence(
     for (const fvg of smcData.fvgs) {
       const minP = Math.min(fvg.top, fvg.bottom);
       const maxP = Math.max(fvg.top, fvg.bottom);
-      const tolerance = currentPrice * 0.001;
+      const tolerance = currentPrice * 0.0015;
       if (currentPrice >= minP - tolerance && currentPrice <= maxP + tolerance) {
         activeSMCZone = `${fvg.type === "bullish" ? "Bullish" : "Bearish"} Fair Value Gap ($${minP.toFixed(2)} - $${maxP.toFixed(2)})`;
         smcType = fvg.type;
@@ -238,6 +219,8 @@ export function evaluateConfluence(
       message: `Price inside ${activeSMCZone}`,
       detail: `Institutional zone reaction detected (${smcType === "bullish" ? "Demand" : "Supply"}).`,
     });
+    evidence.push(`Price is interacting with institutional ${activeSMCZone}`);
+    invalidationCriteria.push(`Candle close outside of ${activeSMCZone}`);
   } else {
     items.push({
       id: "smc-setup",
@@ -250,11 +233,8 @@ export function evaluateConfluence(
     });
   }
 
-  // 3. RSI: 40-60 (Neutral) or Overbought/Oversold extremes (15 points)
-  const closes = candles.map((c) => c.close);
   const rsiSeries = rsi(closes, 14);
   const currentRsi = rsiSeries[rsiSeries.length - 1];
-
   let rsiPassed = false;
   let rsiDesc = "";
 
@@ -262,31 +242,68 @@ export function evaluateConfluence(
     if (currentRsi >= 40 && currentRsi <= 60) {
       rsiPassed = true;
       rsiDesc = `RSI: ${currentRsi.toFixed(1)} (Healthy Neutral Sweet Spot)`;
-    } else if (currentRsi <= 30) {
+      evidence.push(`RSI at ${currentRsi.toFixed(1)} provides ample runway without immediate exhaustion`);
+    } else if (currentRsi <= 30 && baseBias === "Bullish") {
       rsiPassed = true;
-      rsiDesc = `RSI: ${currentRsi.toFixed(1)} (Oversold Extreme - Reversal Confluence)`;
-    } else if (currentRsi >= 70) {
+      rsiDesc = `RSI: ${currentRsi.toFixed(1)} (Oversold Extreme - Demand Reversal)`;
+      evidence.push(`RSI oversold bounce confluence at ${currentRsi.toFixed(1)}`);
+    } else if (currentRsi >= 70 && baseBias === "Bearish") {
       rsiPassed = true;
-      rsiDesc = `RSI: ${currentRsi.toFixed(1)} (Overbought Extreme - Exhaustion Confluence)`;
+      rsiDesc = `RSI: ${currentRsi.toFixed(1)} (Overbought Extreme - Supply Rejection)`;
+      evidence.push(`RSI overbought rejection confluence at ${currentRsi.toFixed(1)}`);
     } else {
       rsiPassed = false;
-      rsiDesc = `RSI: ${currentRsi.toFixed(1)} (No Confluence / Mid-momentum 30-40 or 60-70)`;
+      rsiDesc = `RSI: ${currentRsi.toFixed(1)} (Neutral / Counter-trend reading)`;
     }
   } else {
-    rsiDesc = "Insufficient data for RSI calculation";
+    rsiDesc = "Insufficient candle data for RSI";
   }
 
   items.push({
     id: "rsi-condition",
-    name: "RSI Confluence (40-60 Neutral or Extremes)",
+    name: "RSI Confluence",
     passed: rsiPassed,
     score: rsiPassed ? 15 : 0,
     maxScore: 15,
     message: rsiDesc,
-    detail: "Criteria: 40-60 for momentum continuation OR < 30 / > 70 for key reversal confluence.",
   });
 
-  // 4. Volume: Above 20-period average (15 points)
+  let macdPassed = false;
+  let macdDesc = "";
+  if (candles.length >= 26) {
+    const macdData = macd(closes, 12, 26, 9);
+    const lastHist = macdData.histogram[macdData.histogram.length - 1];
+    const prevHist = macdData.histogram[macdData.histogram.length - 2];
+
+    if (lastHist !== null && prevHist !== null) {
+      if (baseBias === "Bullish" && lastHist > 0 && lastHist >= prevHist) {
+        macdPassed = true;
+        macdDesc = `MACD Histogram positive & expanding (+${lastHist.toFixed(2)})`;
+        evidence.push("Bullish MACD histogram expansion confirming upward acceleration");
+      } else if (baseBias === "Bearish" && lastHist < 0 && lastHist <= prevHist) {
+        macdPassed = true;
+        macdDesc = `MACD Histogram negative & accelerating (${lastHist.toFixed(2)})`;
+        evidence.push("Bearish MACD histogram expansion confirming downward acceleration");
+      } else {
+        macdPassed = false;
+        macdDesc = `MACD histogram neutral/conflicted (${lastHist.toFixed(2)})`;
+      }
+    } else {
+      macdDesc = "MACD histogram pending signal line convergence";
+    }
+  } else {
+    macdDesc = "Insufficient candle history for MACD";
+  }
+
+  items.push({
+    id: "macd-condition",
+    name: "MACD Momentum Alignment",
+    passed: macdPassed,
+    score: macdPassed ? 15 : 0,
+    maxScore: 15,
+    message: macdDesc,
+  });
+
   const period = 20;
   let volumeRatio: number | null = null;
   let volPassed = false;
@@ -300,56 +317,65 @@ export function evaluateConfluence(
 
     if (currentVol > avgVol) {
       volPassed = true;
-      volDesc = `Volume: ${(volumeRatio * 100).toFixed(0)}% of 20-period average (High Volume)`;
+      volDesc = `Volume: ${(volumeRatio * 100).toFixed(0)}% of 20-period SMA (Above Average)`;
+      evidence.push(`Elevated trading volume (${(volumeRatio * 100).toFixed(0)}% of 20-SMA) shows institutional participation`);
     } else {
       volPassed = false;
-      volDesc = `Volume: ${(volumeRatio * 100).toFixed(0)}% of 20-period average (Below Average)`;
+      volDesc = `Volume: ${(volumeRatio * 100).toFixed(0)}% of 20-period SMA (Below Average)`;
     }
   } else {
-    volDesc = "Insufficient candle history for 20-period volume average";
+    volDesc = "Insufficient candle history for 20-SMA volume";
   }
 
   items.push({
     id: "volume-condition",
-    name: "Volume Confirmation (> 20-period SMA)",
+    name: "Volume Confirmation",
     passed: volPassed,
-    score: volPassed ? 15 : 0,
-    maxScore: 15,
+    score: volPassed ? 10 : 0,
+    maxScore: 10,
     message: volDesc,
-    detail: `Current volume: ${currentCandle.volume.toLocaleString()} vs 20-MA average.`,
   });
 
-  // 5. ADX: > 20 (Trending Market) (20 points)
   const adxSeries = calculateADX(candles, 14);
   const currentADX = adxSeries[adxSeries.length - 1];
-
   let adxPassed = false;
   let adxDesc = "";
 
   if (currentADX !== null && currentADX !== undefined) {
     if (currentADX > 20) {
       adxPassed = true;
-      adxDesc = `ADX: ${currentADX.toFixed(1)} (Trending Market)`;
+      adxDesc = `ADX: ${currentADX.toFixed(1)} (Active Trend Momentum)`;
+      evidence.push(`ADX trend strength at ${currentADX.toFixed(1)} confirms non-ranging conditions`);
     } else {
       adxPassed = false;
-      adxDesc = `ADX < 20 (${currentADX.toFixed(1)}): Choppy Market`;
+      adxDesc = `ADX: ${currentADX.toFixed(1)} (Weak / Sideways Range)`;
     }
   } else {
-    adxDesc = "ADX calculation requires at least 28 candles";
+    adxDesc = "ADX requires at least 28 candles";
   }
 
   items.push({
     id: "adx-condition",
-    name: "ADX Trend Strength (> 20)",
+    name: "ADX Trend Strength",
     passed: adxPassed,
-    score: adxPassed ? 20 : 0,
-    maxScore: 20,
+    score: adxPassed ? 10 : 0,
+    maxScore: 10,
     message: adxDesc,
-    detail: "ADX > 20 filters out low-liquidity consolidations and confirms active trend momentum.",
   });
 
   const totalScore = items.reduce((sum, it) => sum + it.score, 0);
   const canExecute = totalScore >= 85;
+
+  let setupBias: SignalSetupBias = "Neutral";
+  if (baseBias === "Bullish") {
+    setupBias = totalScore >= 85 ? "Strong Buy" : totalScore >= 50 ? "Buy" : "Neutral";
+  } else if (baseBias === "Bearish") {
+    setupBias = totalScore >= 85 ? "Strong Sell" : totalScore >= 50 ? "Sell" : "Neutral";
+  }
+
+  if (invalidationCriteria.length === 0) {
+    invalidationCriteria.push("Reversal across 20-period SMA on closing timeframe");
+  }
 
   return {
     score: totalScore,
@@ -361,5 +387,7 @@ export function evaluateConfluence(
     rsiValue: currentRsi ?? null,
     volumeRatio,
     smcZoneFound: activeSMCZone,
+    evidence,
+    invalidationCriteria,
   };
 }

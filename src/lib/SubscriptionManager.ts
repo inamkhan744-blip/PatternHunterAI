@@ -10,6 +10,7 @@ export interface UserSubscriptionProfile {
   dailyTradeLimit: number;
 }
 
+export const ADMIN_BYPASS_EMAIL = "inamkhan744@gmail.com";
 export const FREE_DAILY_MANUAL_TRADE_LIMIT = 3;
 export type ProDailyTradeLimit = 1 | 5 | 10 | 100;
 
@@ -27,17 +28,18 @@ function getTodayString(): string {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
 }
 
-export function isUserAdmin(_email?: string | null, userMetadata?: Record<string, unknown>): boolean {
+export function isUserAdmin(email?: string | null, userMetadata?: Record<string, unknown>): boolean {
+  if (email && email.trim().toLowerCase() === ADMIN_BYPASS_EMAIL.toLowerCase()) return true;
   if (userMetadata?.role === "admin") return true;
   return false;
 }
 
 export function isUserPro(
-  _email?: string | null,
+  email?: string | null,
   manualProState: boolean = false,
   userMetadata?: Record<string, unknown>
 ): boolean {
-  if (isUserAdmin(_email, userMetadata)) return true;
+  if (isUserAdmin(email, userMetadata)) return true;
   if (userMetadata?.subscription_tier === "pro" || userMetadata?.subscription_tier === "premium") return true;
   return Boolean(manualProState);
 }

@@ -7,10 +7,11 @@ interface Props {
   open: boolean;
   onClose: () => void;
   isPro: boolean;
+  isAdmin?: boolean;
 }
 
-export default function ProModal({ open, onClose, isPro }: Props) {
-  if (!open) return null;
+export default function ProModal({ open, onClose, isPro, isAdmin }: Props) {
+  if (!open || isAdmin) return null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">

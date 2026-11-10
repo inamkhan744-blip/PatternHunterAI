@@ -4,8 +4,8 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
 };
 
-const GEMINI_TIMEOUT_MS = 20000;
-const GEMINI_MODELS = ["gemini-2.0-flash-001", "gemini-2.0-flash", "gemini-1.5-flash"];
+const GEMINI_TIMEOUT_MS = 25000;
+const GEMINI_MODELS = ["gemini-3.1-flash-lite", "gemini-2.0-flash"];
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
@@ -13,20 +13,207 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    const { message, marketContext, conversationHistory } = await req.json();
-
-    if (!message) {
-      return new Response(
-        JSON.stringify({ error: "Missing required field: message" }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
+    const payload = await req.json();
+    const { action } = payload;
 
     const geminiKey = Deno.env.get("GEMINI_API_KEY");
     if (!geminiKey) {
       return new Response(
-        JSON.stringify({ unavailable: true, error: "Gemini API key not configured." }),
+        JSON.stringify({ unavailable: true, error: "Backend GEMINI_API_KEY is not configured in Supabase secrets." }),
         { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // Helper to query Gemini with fallback array ["gemini-3.1-flash-lite", "gemini-2.0-flash"]
+    async function callGemini(contents: unknown[], generationConfig?: Record<string, unknown>) {
+      let lastError = "";
+      for (const model of GEMINI_MODELS) {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
+        try {
+          const res = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(geminiKey)}`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                contents,
+                generationConfig: generationConfig || { temperature: 0.4, maxOutputTokens: 800 },
+              }),
+              signal: controller.signal,
+            }
+          );
+          clearTimeout(timeoutId);
+
+          if (!res.ok) {
+            const errBody = await res.text().catch(() => "");
+            lastError = `Gemini API error (${res.status}) on ${model}: ${errBody}`;
+            console.warn(lastError);
+            continue;
+          }
+
+          const data = await res.json();
+          const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (text && text.trim().length > 0) {
+            return { text: text.trim(), model };
+          }
+          lastError = `Empty response from model ${model}`;
+        } catch (fetchErr) {
+          clearTimeout(timeoutId);
+          lastError = fetchErr instanceof Error ? fetchErr.message : "Unknown fetch error";
+          console.warn(`Fetch error on ${model}:`, lastError);
+          continue;
+        }
+      }
+      throw new Error(lastError || "All Gemini fallback models failed");
+    }
+
+    // Case 1: Swarm Debate Generation
+    if (action === "swarm") {
+      const {
+        symbol,
+        price,
+        rsi = 50,
+        trend = "neutral",
+        patternName = "Consolidation",
+        patternDirection = "neutral",
+        fearGreed = 50,
+        atrValue = "N/A",
+        spreadPct = "0.02%",
+        confluenceScore = 50,
+      } = payload;
+
+      const prompt = `You are an elite hedge fund investment committee debating an algorithmic trade setup.
+Asset: ${symbol}
+Current Price: $${price}
+RSI(14): ${rsi}
+Trend: ${trend}
+Pattern: ${patternName} (${patternDirection})
+Fear & Greed Index: ${fearGreed}
+ATR: ${atrValue}
+Spread %: ${spreadPct}
+Preliminary Confluence Score: ${confluenceScore}/100
+
+Produce a JSON response strictly matching this schema with NO markdown code fences:
+{
+  "bullThesis": "Concise high-conviction bullish argument from Bull Agent (max 3 sentences)",
+  "bullConfidence": 85,
+  "bearThesis": "Concise risk/supply warning from Bear Agent (max 3 sentences)",
+  "bearConfidence": 70,
+  "riskVerdict": "GO" or "NO-GO",
+  "riskThesis": "Concise risk assessment and sizing rationale from Risk Manager (max 3 sentences)",
+  "recommendedDirection": "LONG" or "SHORT" or "HOLD",
+  "recommendedLeverage": 3,
+  "recommendedPositionPct": 2.5
+}`;
+
+      try {
+        const { text, model } = await callGemini(
+          [{ parts: [{ text: prompt }] }],
+          {
+            temperature: 0.3,
+            maxOutputTokens: 600,
+            responseMimeType: "application/json",
+          }
+        );
+
+        const cleaned = text.replace(/```json\n?|```/g, "").trim();
+        const parsed = JSON.parse(cleaned);
+
+        return new Response(
+          JSON.stringify({ success: true, data: parsed, modelUsed: model }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      } catch (err) {
+        return new Response(
+          JSON.stringify({ unavailable: true, error: err instanceof Error ? err.message : "Swarm debate failed" }),
+          { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+    }
+
+    // Case 2: Vision Analysis
+    if (action === "vision") {
+      const { imageBase64, mimeType = "image/png", activeSymbol = "BTCUSDT" } = payload;
+      if (!imageBase64) {
+        return new Response(
+          JSON.stringify({ error: "Missing required field: imageBase64" }),
+          { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      const prompt = `You are a Senior Crypto Technical Analyst & Vision AI specialized in reading candlestick charts, order books, SMC liquidity zones, and technical patterns.
+Carefully examine this candlestick chart image for ${activeSymbol}.
+Identify:
+1. Trend: Overall trend ("Bullish", "Bearish", or "Sideways/Consolidation") with an explanation.
+2. Support & Resistance: The key visible support levels/zones and resistance levels/zones on the chart.
+3. Patterns: All visible chart patterns (e.g. Double Bottom/Top, Head & Shoulders, Flags, Wedges, Fair Value Gaps, Order Blocks, Liquidity Sweeps) with direction ("bullish"|"bearish"|"neutral"), confidence (50-99), and description.
+4. Key Takeaway: Concise trading recommendation, suggested action ("LONG"|"SHORT"|"WAIT"), and invalidation/stop-loss level.
+
+Respond STRICTLY in valid JSON matching this schema:
+{
+  "trend": "Bullish" | "Bearish" | "Sideways/Consolidation",
+  "trendReason": "Brief explanation of price structure and moving averages visible",
+  "supportResistance": {
+    "support": ["Level 1", "Level 2"],
+    "resistance": ["Level 1", "Level 2"]
+  },
+  "patterns": [
+    {
+      "name": "Pattern Name",
+      "direction": "bullish" | "bearish" | "neutral",
+      "confidence": 85,
+      "description": "Details regarding location and breakout target"
+    }
+  ],
+  "suggestedAction": "LONG" | "SHORT" | "WAIT",
+  "invalidationLevel": "Price level that invalidates this setup",
+  "keyTakeaway": "1-2 sentence actionable summary for execution."
+}`;
+
+      try {
+        const { text, model } = await callGemini(
+          [
+            {
+              parts: [
+                { text: prompt },
+                {
+                  inline_data: {
+                    mime_type: mimeType,
+                    data: imageBase64,
+                  },
+                },
+              ],
+            },
+          ],
+          {
+            temperature: 0.2,
+            maxOutputTokens: 800,
+            responseMimeType: "application/json",
+          }
+        );
+
+        const cleaned = text.replace(/```json\n?|```/g, "").trim();
+        const parsed = JSON.parse(cleaned);
+
+        return new Response(
+          JSON.stringify({ success: true, data: parsed, modelUsed: model }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      } catch (err) {
+        return new Response(
+          JSON.stringify({ unavailable: true, error: err instanceof Error ? err.message : "Vision analysis failed" }),
+          { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+    }
+
+    // Case 3: Standard PatternHunter AI Chat (Default)
+    const { message, marketContext, conversationHistory } = payload;
+    if (!message) {
+      return new Response(
+        JSON.stringify({ error: "Missing required field: message" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
@@ -67,57 +254,16 @@ Guidelines:
 
     const prompt = `${systemPrompt}\n\nUser: ${message}\n\nPatternHunter AI:`;
 
-    let geminiText: string | null = null;
-    let lastError = "";
-
-    for (const model of GEMINI_MODELS) {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
-      try {
-        const geminiRes = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              contents: [{ parts: [{ text: prompt }] }],
-              generationConfig: { temperature: 0.6, maxOutputTokens: 500 },
-            }),
-            signal: controller.signal,
-          }
-        );
-        clearTimeout(timeoutId);
-
-        if (!geminiRes.ok) {
-          lastError = `Gemini API error (${geminiRes.status}) for model ${model}`;
-          continue;
-        }
-
-        const geminiData = await geminiRes.json();
-        const text = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (text && text.trim().length > 0) {
-          geminiText = text.trim();
-          break;
-        }
-        lastError = `Empty response from model ${model}`;
-      } catch (fetchErr) {
-        clearTimeout(timeoutId);
-        lastError = fetchErr instanceof Error ? fetchErr.message : "Unknown fetch error";
-        continue;
-      }
-    }
-
-    if (geminiText) {
-      return new Response(
-        JSON.stringify({ response: geminiText }),
-        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
+    const { text, model } = await callGemini(
+      [{ parts: [{ text: prompt }] }],
+      { temperature: 0.6, maxOutputTokens: 500 }
+    );
 
     return new Response(
-      JSON.stringify({ unavailable: true, error: lastError || "AI chat unavailable" }),
-      { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      JSON.stringify({ response: text, modelUsed: model }),
+      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
+
   } catch (err) {
     return new Response(
       JSON.stringify({ unavailable: true, error: err instanceof Error ? err.message : "Unknown error" }),

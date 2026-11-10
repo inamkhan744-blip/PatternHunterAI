@@ -16,7 +16,7 @@ import {
   Eye,
   Zap,
 } from "lucide-react";
-import { getGeminiApiKey, getSelectedModel, getCachedModels } from "../lib/ModelManager";
+import { supabase } from "../lib/supabase";
 
 export interface VisionAnalysisResult {
   trend: "Bullish" | "Bearish" | "Sideways/Consolidation";
@@ -137,7 +137,7 @@ export default function VisionAIUpload({ open, onClose, activeSymbol = "BTCUSDT"
   };
 
   /**
-   * Run Gemini Vision API analysis on the uploaded base64 screenshot.
+   * Run Gemini Vision AI analysis via backend Supabase Edge Function.
    */
   const analyzeChartWithVision = async () => {
     if (!selectedImage) return;
@@ -149,113 +149,37 @@ export default function VisionAIUpload({ open, onClose, activeSymbol = "BTCUSDT"
     const base64Parts = selectedImage.split(",");
     const rawBase64 = base64Parts.length > 1 ? base64Parts[1] : base64Parts[0];
 
-    const geminiApiKey = getGeminiApiKey();
-    if (!geminiApiKey) {
-      setError("Gemini API Key is not configured. Please open Settings and add your Gemini API Key.");
-      setAnalyzing(false);
-      return;
-    }
+    try {
+      const { data, error: invokeError } = await supabase.functions.invoke("ai-chat", {
+        body: {
+          action: "vision",
+          imageBase64: rawBase64,
+          mimeType: imageMime || "image/png",
+          activeSymbol,
+        },
+      });
 
-    const prompt = `You are a Senior Crypto Technical Analyst & Vision AI specialized in reading candlestick charts, order books, SMC liquidity zones, and technical patterns.
-Carefully examine this candlestick chart image for ${activeSymbol}.
-Identify:
-1. Trend: Overall trend ("Bullish", "Bearish", or "Sideways/Consolidation") with an explanation.
-2. Support & Resistance: The key visible support levels/zones and resistance levels/zones on the chart.
-3. Patterns: All visible chart patterns (e.g. Double Bottom/Top, Head & Shoulders, Flags, Wedges, Fair Value Gaps, Order Blocks, Liquidity Sweeps) with direction ("bullish"|"bearish"|"neutral"), confidence (50-99), and description.
-4. Key Takeaway: Concise trading recommendation, suggested action ("LONG"|"SHORT"|"WAIT"), and invalidation/stop-loss level.
-
-Respond STRICTLY in valid JSON matching this schema:
-{
-  "trend": "Bullish" | "Bearish" | "Sideways/Consolidation",
-  "trendReason": "Brief explanation of price structure and moving averages visible",
-  "supportResistance": {
-    "support": ["Level 1", "Level 2"],
-    "resistance": ["Level 1", "Level 2"]
-  },
-  "patterns": [
-    {
-      "name": "Pattern Name",
-      "direction": "bullish" | "bearish" | "neutral",
-      "confidence": 85,
-      "description": "Details regarding location and breakout target"
-    }
-  ],
-  "suggestedAction": "LONG" | "SHORT" | "WAIT",
-  "invalidationLevel": "Price level that invalidates this setup",
-  "keyTakeaway": "1-2 sentence actionable summary for execution."
-}`;
-
-    // Read selected model and cached models from ModelManager (localStorage)
-    const primaryModel = getSelectedModel();
-    const cached = getCachedModels();
-
-    // Construct ordered candidate list with primary model first, followed by others
-    const modelCandidates = Array.from(
-      new Set([primaryModel, ...cached, "gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.0-flash-001"])
-    ).filter(Boolean);
-
-    let lastErrorMessage = "Vision AI analysis failed.";
-
-    // Smart Fallback: loop through models in list if selected model fails (e.g. 404, rate limit)
-    for (const model of modelCandidates) {
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 20000);
-
-        const res = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(geminiApiKey)}`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              contents: [
-                {
-                  parts: [
-                    { text: prompt },
-                    {
-                      inline_data: {
-                        mime_type: imageMime || "image/png",
-                        data: rawBase64,
-                      },
-                    },
-                  ],
-                },
-              ],
-              generationConfig: {
-                responseMimeType: "application/json",
-                temperature: 0.2,
-              },
-            }),
-            signal: controller.signal,
-          }
-        );
-        clearTimeout(timeout);
-
-        if (res.ok) {
-          const data = await res.json();
-          const textContent = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-          if (textContent) {
-            const parsed: VisionAnalysisResult = JSON.parse(textContent);
-            parsed.modelUsed = `Gemini Vision (${model})`;
-            setResult(parsed);
-            setAnalyzing(false);
-            return;
-          }
-        } else {
-          const errData = await res.json().catch(() => ({}));
-          const errMsg = errData?.error?.message || `HTTP ${res.status}: ${res.statusText}`;
-          lastErrorMessage = `Model ${model} returned error: ${errMsg}`;
-          console.warn(`Vision AI API attempt with ${model} failed (${res.status}): ${errMsg}. Trying fallback model...`);
-        }
-      } catch (err) {
-        lastErrorMessage = err instanceof Error ? err.message : `Call to ${model} timed out or failed`;
-        console.warn(`Vision AI API attempt with ${model} failed:`, err);
+      if (invokeError) {
+        throw new Error(invokeError.message || "Vision analysis backend error");
       }
-    }
 
-    // Completely removed fake backup engine. Show real error message
-    setError(`All Gemini Vision models failed. Last error: ${lastErrorMessage}`);
-    setAnalyzing(false);
+      if (data?.unavailable) {
+        throw new Error(data.error || "Vision analysis is currently unavailable");
+      }
+
+      if (data?.data) {
+        const parsed: VisionAnalysisResult = data.data;
+        parsed.modelUsed = data.modelUsed ? `Gemini Vision (${data.modelUsed})` : "Gemini Multimodal";
+        setResult(parsed);
+      } else {
+        throw new Error("Invalid response format from Vision AI");
+      }
+    } catch (err) {
+      console.warn("Vision AI analysis failed:", err);
+      setError(err instanceof Error ? err.message : "Vision AI analysis failed.");
+    } finally {
+      setAnalyzing(false);
+    }
   };
 
   if (!open) return null;

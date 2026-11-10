@@ -118,6 +118,90 @@ export async function notifyTradeOpened(trade: {
 }
 
 /**
+ * Helper to dispatch pattern alert to Telegram.
+ */
+export async function notifyPatternDetected(alert: {
+  symbol: string;
+  patternName: string;
+  direction: "bullish" | "bearish";
+  price: number;
+  timeframe: string;
+}): Promise<void> {
+  const emoji = alert.direction === "bullish" ? "🚀 BULLISH" : "📉 BEARISH";
+  const msg = [
+    `<b>⚡ [FORTRESS AI] PATTERN DETECTED</b>`,
+    `<b>Symbol:</b> <code>${alert.symbol}</code> (${alert.timeframe})`,
+    `<b>Pattern:</b> ${alert.patternName} [${emoji}]`,
+    `<b>Current Price:</b> $${alert.price.toLocaleString()}`,
+    `<b>Confidence:</b> High Confluence Trigger`,
+    `<b>Timestamp:</b> ${new Date().toISOString()}`,
+  ].join("\n");
+
+  await sendTelegramAlert(msg, "HTML");
+}
+
+/**
+ * Dispatches a rich Discord Webhook alert (supports Discord Embeds)
+ */
+export async function sendDiscordWebhook(
+  webhookUrl: string,
+  payload: {
+    title: string;
+    description: string;
+    colorHex?: number;
+    fields?: { name: string; value: string; inline?: boolean }[];
+  }
+): Promise<{ success: boolean; error?: string }> {
+  if (!webhookUrl || !webhookUrl.startsWith("http")) {
+    return { success: false, error: "Invalid Discord Webhook URL" };
+  }
+
+  try {
+    const isDiscord = webhookUrl.includes("discord.com") || webhookUrl.includes("discordapp.com");
+    let bodyData: unknown;
+
+    if (isDiscord) {
+      bodyData = {
+        username: "Fortress Hedge Fund AI",
+        avatar_url: "https://images.unsplash.com/photo-1642543492481-44e81e3914a7?w=128",
+        embeds: [
+          {
+            title: payload.title,
+            description: payload.description,
+            color: payload.colorHex ?? 0x00ff66,
+            fields: payload.fields || [],
+            footer: { text: "PatternHunter Fortress Terminal • Institutional Alerts" },
+            timestamp: new Date().toISOString(),
+          },
+        ],
+      };
+    } else {
+      // Generic JSON Webhook format
+      bodyData = {
+        event: "FORTRESS_ALERT",
+        title: payload.title,
+        description: payload.description,
+        fields: payload.fields,
+        timestamp: new Date().toISOString(),
+      };
+    }
+
+    const res = await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(bodyData),
+    });
+
+    if (res.ok || res.status === 204) {
+      return { success: true };
+    }
+    return { success: false, error: `Webhook returned status ${res.status}` };
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : "Network error" };
+  }
+}
+
+/**
  * Helper to dispatch trade closed alert.
  */
 export async function notifyTradeClosed(trade: {

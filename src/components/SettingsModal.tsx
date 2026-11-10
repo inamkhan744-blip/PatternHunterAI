@@ -21,6 +21,15 @@ import { usePWAInstall } from "../lib/pwa";
 import { getDecryptedApiKeys, storeEncryptedApiKeys } from "../lib/CryptoSecurity";
 import { loadTelegramConfig, saveTelegramConfig } from "../lib/TelegramService";
 import { autoTradeEngine } from "../lib/BinanceAutoTrade";
+import {
+  SUPPORTED_EXCHANGES,
+  type ExchangeId,
+  getActiveExchange,
+  setActiveExchange,
+  getExchangeCredentials,
+  saveExchangeCredentials,
+  testExchangeConnectivity,
+} from "../lib/MultiExchange";
 import { useAuth } from "../lib/auth";
 import { isUserAdmin } from "../lib/SubscriptionManager";
 
@@ -53,15 +62,22 @@ export default function SettingsModal({
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [hapticFeedback, setHapticFeedback] = useState(true);
 
-  // API Key Form State (Binance & Telegram unlocked for all users)
-  const [binanceKey, setBinanceKeyState] = useState<string>("");
-  const [binanceSecret, setBinanceSecretState] = useState<string>("");
+  // Multi-Exchange tab state
+  const [selectedExchange, setSelectedExchange] = useState<ExchangeId>(() => getActiveExchange());
+  const [exchangeKey, setExchangeKey] = useState<string>("");
+  const [exchangeSecret, setExchangeSecret] = useState<string>("");
+  const [exchangePassphrase, setExchangePassphrase] = useState<string>("");
+  const [testingPing, setTestingPing] = useState(false);
+  const [pingResult, setPingResult] = useState<{ success: boolean; latencyMs: number } | null>(null);
+
+  // Telegram Alert State
   const [telegramToken, setTelegramTokenState] = useState<string>("");
   const [telegramChatId, setTelegramChatIdState] = useState<string>("");
 
   // Show / Hide Password field states
-  const [showBinanceKey, setShowBinanceKey] = useState(false);
-  const [showBinanceSecret, setShowBinanceSecret] = useState(false);
+  const [showExchangeKey, setShowExchangeKey] = useState(false);
+  const [showExchangeSecret, setShowExchangeSecret] = useState(false);
+  const [showPassphrase, setShowPassphrase] = useState(false);
   const [showTelegramToken, setShowTelegramToken] = useState(false);
   const [showTelegramChatId, setShowTelegramChatId] = useState(false);
 
@@ -69,20 +85,22 @@ export default function SettingsModal({
   const [toast, setToast] = useState<ToastState | null>(null);
   const [saveSuccess, setSaveSuccess] = useState(false);
 
-  // Load stored credentials when opening modal
+  // Load stored credentials when opening modal or changing exchange
   useEffect(() => {
     if (!open) return;
-    const binanceKeys = getDecryptedApiKeys();
-    setBinanceKeyState(binanceKeys.apiKey || "");
-    setBinanceSecretState(binanceKeys.apiSecret || "");
+    const creds = getExchangeCredentials(selectedExchange);
+    setExchangeKey(creds.apiKey || "");
+    setExchangeSecret(creds.apiSecret || "");
+    setExchangePassphrase(creds.passphrase || "");
 
     const tg = loadTelegramConfig();
     setTelegramTokenState(tg.botToken || "");
     setTelegramChatIdState(tg.chatId || "");
 
+    setPingResult(null);
     setToast(null);
     setSaveSuccess(false);
-  }, [open]);
+  }, [open, selectedExchange]);
 
   // Toast auto-clear
   useEffect(() => {
@@ -98,12 +116,21 @@ export default function SettingsModal({
   const handleSaveApiConfiguration = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
 
-    // 1. Encrypt and Save Binance API Keys
-    storeEncryptedApiKeys(binanceKey.trim(), binanceSecret.trim());
-    autoTradeEngine.saveConfig({
-      apiKey: binanceKey.trim(),
-      apiSecret: binanceSecret.trim(),
+    // 1. Encrypt and Save Exchange API Keys
+    saveExchangeCredentials(selectedExchange, {
+      apiKey: exchangeKey.trim(),
+      apiSecret: exchangeSecret.trim(),
+      passphrase: exchangePassphrase.trim() || undefined,
     });
+    setActiveExchange(selectedExchange);
+
+    if (selectedExchange === "binance") {
+      storeEncryptedApiKeys(exchangeKey.trim(), exchangeSecret.trim());
+      autoTradeEngine.saveConfig({
+        apiKey: exchangeKey.trim(),
+        apiSecret: exchangeSecret.trim(),
+      });
+    }
 
     // 2. Save Telegram Bot Configuration
     saveTelegramConfig({
@@ -115,9 +142,17 @@ export default function SettingsModal({
     setSaveSuccess(true);
     setToast({
       type: "success",
-      message: "API Configuration saved securely to localStorage!",
+      message: `${SUPPORTED_EXCHANGES.find((x) => x.id === selectedExchange)?.name} API credentials saved securely with AES-256 encryption!`,
     });
     setTimeout(() => setSaveSuccess(false), 3000);
+  };
+
+  const handleTestConnection = async () => {
+    setTestingPing(true);
+    setPingResult(null);
+    const res = await testExchangeConnectivity(selectedExchange);
+    setPingResult(res);
+    setTestingPing(false);
   };
 
   const handleInstallClick = async () => {
@@ -199,71 +234,138 @@ export default function SettingsModal({
             </div>
           )}
 
-          {/* API Configuration Section - Unlocked for ALL users */}
+          {/* Multi-Exchange API Configuration Section */}
           <div className="p-4 rounded-xl bg-[#0d121f] border border-cyan-500/30 space-y-4">
             <div className="flex items-center justify-between">
               <span className="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-2 font-mono">
                 <Key className="w-4 h-4 text-cyan-400" />
-                Exchange & Alert Configuration
+                Multi-Exchange Router (15+ Markets)
               </span>
               <span className="text-[10px] text-cyan-400 font-mono bg-cyan-950/60 px-2 py-0.5 rounded border border-cyan-500/30">
-                User Connected
+                AES-256 Encrypted
               </span>
             </div>
 
+            {/* Exchange Tabs Selector */}
+            <div className="grid grid-cols-4 gap-2">
+              {SUPPORTED_EXCHANGES.map((ex) => (
+                <button
+                  key={ex.id}
+                  type="button"
+                  onClick={() => setSelectedExchange(ex.id)}
+                  className={`py-2 px-1 rounded-xl text-xs font-bold font-mono transition flex flex-col items-center gap-1 border ${
+                    selectedExchange === ex.id
+                      ? "bg-cyan-500/20 text-white border-cyan-400 shadow-md shadow-cyan-950/40"
+                      : "bg-slate-950 text-slate-400 border-slate-800 hover:text-white"
+                  }`}
+                >
+                  <span className="text-sm font-black" style={{ color: ex.color }}>
+                    {ex.iconText}
+                  </span>
+                  <span className="text-[10px]">{ex.name}</span>
+                </button>
+              ))}
+            </div>
+
+            <p className="text-[11px] text-slate-400 font-sans">
+              {SUPPORTED_EXCHANGES.find((x) => x.id === selectedExchange)?.description}
+            </p>
+
             <div className="space-y-3">
-              {/* Binance API Key */}
+              {/* API Key */}
               <div>
                 <label className="text-[11px] font-medium text-slate-300 block mb-1">
-                  Binance API Key
+                  {SUPPORTED_EXCHANGES.find((x) => x.id === selectedExchange)?.name} API Key
                 </label>
                 <div className="relative">
                   <input
-                    type={showBinanceKey ? "text" : "password"}
-                    value={binanceKey}
-                    onChange={(e) => setBinanceKeyState(e.target.value)}
-                    placeholder="Enter Binance Spot / Futures API Key"
+                    type={showExchangeKey ? "text" : "password"}
+                    value={exchangeKey}
+                    onChange={(e) => setExchangeKey(e.target.value)}
+                    placeholder={`Enter ${SUPPORTED_EXCHANGES.find((x) => x.id === selectedExchange)?.name} API Key`}
                     className="w-full px-3 py-2 pr-9 rounded-lg bg-slate-950 border border-slate-700 focus:border-cyan-400 focus:outline-none text-xs text-white placeholder-slate-600 font-mono"
                   />
                   <button
                     type="button"
-                    onClick={() => setShowBinanceKey(!showBinanceKey)}
+                    onClick={() => setShowExchangeKey(!showExchangeKey)}
                     className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
-                    title={showBinanceKey ? "Hide Key" : "Show Key"}
                   >
-                    {showBinanceKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    {showExchangeKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                   </button>
                 </div>
               </div>
 
-              {/* Binance Secret Key */}
+              {/* Secret Key */}
               <div>
                 <label className="text-[11px] font-medium text-slate-300 block mb-1">
-                  Binance Secret Key
+                  {SUPPORTED_EXCHANGES.find((x) => x.id === selectedExchange)?.name} Secret Key
                 </label>
                 <div className="relative">
                   <input
-                    type={showBinanceSecret ? "text" : "password"}
-                    value={binanceSecret}
-                    onChange={(e) => setBinanceSecretState(e.target.value)}
-                    placeholder="Enter Binance API Secret"
+                    type={showExchangeSecret ? "text" : "password"}
+                    value={exchangeSecret}
+                    onChange={(e) => setExchangeSecret(e.target.value)}
+                    placeholder={`Enter ${SUPPORTED_EXCHANGES.find((x) => x.id === selectedExchange)?.name} API Secret`}
                     className="w-full px-3 py-2 pr-9 rounded-lg bg-slate-950 border border-slate-700 focus:border-cyan-400 focus:outline-none text-xs text-white placeholder-slate-600 font-mono"
                   />
                   <button
                     type="button"
-                    onClick={() => setShowBinanceSecret(!showBinanceSecret)}
+                    onClick={() => setShowExchangeSecret(!showExchangeSecret)}
                     className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
-                    title={showBinanceSecret ? "Hide Secret" : "Show Secret"}
                   >
-                    {showBinanceSecret ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    {showExchangeSecret ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                   </button>
                 </div>
+              </div>
+
+              {/* Passphrase (Required for OKX & KuCoin) */}
+              {SUPPORTED_EXCHANGES.find((x) => x.id === selectedExchange)?.requiresPassphrase && (
+                <div>
+                  <label className="text-[11px] font-medium text-slate-300 block mb-1">
+                    API Passphrase
+                  </label>
+                  <div className="relative">
+                    <input
+                      type={showPassphrase ? "text" : "password"}
+                      value={exchangePassphrase}
+                      onChange={(e) => setExchangePassphrase(e.target.value)}
+                      placeholder="Passphrase specified when generating API key"
+                      className="w-full px-3 py-2 pr-9 rounded-lg bg-slate-950 border border-slate-700 focus:border-cyan-400 focus:outline-none text-xs text-white placeholder-slate-600 font-mono"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassphrase(!showPassphrase)}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
+                    >
+                      {showPassphrase ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Test Ping & Connectivity Button */}
+              <div className="flex items-center gap-3 pt-1">
+                <button
+                  type="button"
+                  onClick={handleTestConnection}
+                  disabled={testingPing}
+                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-slate-300 font-mono flex items-center gap-1.5"
+                >
+                  <Laptop className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>{testingPing ? "Testing Ping..." : "Test Connection"}</span>
+                </button>
+
+                {pingResult && (
+                  <span className={`text-xs font-mono font-bold ${pingResult.success ? "text-[#00ff66]" : "text-[#ff3344]"}`}>
+                    {pingResult.success ? `✓ Online (${pingResult.latencyMs}ms)` : `✗ Failed`}
+                  </span>
+                )}
               </div>
 
               {/* Telegram Bot Token */}
-              <div>
+              <div className="pt-3 border-t border-slate-800">
                 <label className="text-[11px] font-medium text-slate-300 block mb-1">
-                  Telegram Bot Token
+                  Telegram Bot Token (Optional)
                 </label>
                 <div className="relative">
                   <input
@@ -277,7 +379,6 @@ export default function SettingsModal({
                     type="button"
                     onClick={() => setShowTelegramToken(!showTelegramToken)}
                     className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
-                    title={showTelegramToken ? "Hide Token" : "Show Token"}
                   >
                     {showTelegramToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                   </button>
@@ -287,7 +388,7 @@ export default function SettingsModal({
               {/* Telegram Chat ID */}
               <div>
                 <label className="text-[11px] font-medium text-slate-300 block mb-1">
-                  Telegram Chat ID
+                  Telegram Chat ID (Optional)
                 </label>
                 <div className="relative">
                   <input
@@ -301,7 +402,6 @@ export default function SettingsModal({
                     type="button"
                     onClick={() => setShowTelegramChatId(!showTelegramChatId)}
                     className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
-                    title={showTelegramChatId ? "Hide Chat ID" : "Show Chat ID"}
                   >
                     {showTelegramChatId ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                   </button>
@@ -321,12 +421,12 @@ export default function SettingsModal({
                 {saveSuccess ? (
                   <>
                     <Check className="w-4 h-4" />
-                    Keys Saved Successfully!
+                    Exchange Keys Saved Successfully!
                   </>
                 ) : (
                   <>
                     <Key className="w-4 h-4" />
-                    Save API Configuration
+                    Save & Activate Exchange Keys
                   </>
                 )}
               </button>

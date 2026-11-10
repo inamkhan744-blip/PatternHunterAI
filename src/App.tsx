@@ -79,11 +79,14 @@ import SettingsModal from "./components/SettingsModal";
 import OrderBook from "./components/OrderBook";
 import PnLCalendar from "./components/PnLCalendar";
 import GridBotUI from "./components/GridBotUI";
+import DCABotUI from "./components/DCABotUI";
 import CopyTradingTab from "./components/CopyTradingTab";
 import StrategyBuilder from "./components/StrategyBuilder";
 import { gridTradingBot } from "./lib/GridBot";
+import { dcaBotEngine } from "./lib/DCABot";
 import { isUserAdmin, isUserPro } from "./lib/SubscriptionManager";
 import { autoTradeEngine } from "./lib/BinanceAutoTrade";
+import { getActiveExchange, setActiveExchange, SUPPORTED_EXCHANGES, type ExchangeId } from "./lib/MultiExchange";
 import { paperTradingEngine } from "./lib/PaperTrading";
 import { tradeManager } from "./lib/TradeManager";
 import { evaluateConfluence } from "./lib/ConfluenceEngine";
@@ -118,7 +121,8 @@ const NAV_GROUPS: NavGroup[] = [
     groupTitle: "Tools & Bots",
     items: [
       { key: "grid", label: "Grid Bot", icon: GridIcon },
-      { key: "copy", label: "Copy Trading", icon: Users },
+      { key: "dca", label: "DCA Bot", icon: RefreshCw },
+      { key: "copy", label: "Strategy Marketplace", icon: Users },
       { key: "strategy", label: "Strategy Builder", icon: Cpu },
       { key: "arbitrage", label: "Arbitrage", icon: ArrowUpRight },
       { key: "backtest", label: "Backtest Lab", icon: BarChart3 },
@@ -205,6 +209,9 @@ export default function App() {
     if (isAdmin) return true;
     return isUserPro(user?.email, isPro);
   }, [isAdmin, user?.email, isPro]);
+
+  // Multi-Exchange State
+  const [currentExchange, setCurrentExchange] = useState<ExchangeId>(() => getActiveExchange());
 
   // Auto-Pilot master state synced with autoTradeEngine
   const [autoPilotActive, setAutoPilotActive] = useState<boolean>(() => autoTradeEngine.getConfig().autoPilotEnabled);
@@ -516,9 +523,10 @@ export default function App() {
       setLastPrice(price);
       setPriceChange(changePct);
 
-      // Feed real-time price to TradeManager, Grid Bot & Paper Trading engine
+      // Feed real-time price to TradeManager, Grid Bot, DCA Bot & Paper Trading engine
       tradeManager.updateLivePrice(selectedCoin.binanceSymbol, price);
       gridTradingBot.onPriceTick(price, selectedCoin.binanceSymbol);
+      dcaBotEngine.onPriceTick(price, selectedCoin.binanceSymbol);
       paperTradingEngine.evaluatePrice(price, selectedCoin.binanceSymbol);
 
       // Auto-Pilot execution check on real-time price tick
@@ -1188,8 +1196,26 @@ export default function App() {
                   <span>Vision AI</span>
                 </button>
 
-                {/* System Status Badges */}
+                {/* Multi-Exchange Switcher & System Status Badges */}
                 <div className="hidden sm:flex items-center gap-1.5 font-mono text-[10px]">
+                  {/* Exchange Selector Dropdown */}
+                  <select
+                    value={currentExchange}
+                    onChange={(e) => {
+                      const nextEx = e.target.value as ExchangeId;
+                      setCurrentExchange(nextEx);
+                      setActiveExchange(nextEx);
+                    }}
+                    className="px-2 py-1 rounded bg-slate-900 border border-slate-700 text-cyan-300 font-bold outline-none cursor-pointer hover:border-cyan-500"
+                    title="Active Exchange Router"
+                  >
+                    {SUPPORTED_EXCHANGES.map((ex) => (
+                      <option key={ex.id} value={ex.id}>
+                        {ex.name} API
+                      </option>
+                    ))}
+                  </select>
+
                   {/* Execution Mode Badge */}
                   <span
                     className={`px-2 py-1 rounded border font-bold flex items-center gap-1 cursor-pointer ${
@@ -1198,10 +1224,10 @@ export default function App() {
                         : "bg-red-500/15 text-red-300 border-red-500/50 shadow-sm shadow-red-950/40 animate-pulse"
                     }`}
                     onClick={() => setAutoTradeOpen(true)}
-                    title={isPaperMode ? "Running in virtual simulation (Demo Mode). Click to connect Binance API." : "Live real-money order execution on Binance API!"}
+                    title={isPaperMode ? "Running in virtual simulation (Demo Mode). Click to connect Exchange API." : "Live real-money order execution on Exchange API!"}
                   >
                     <span className={`w-1.5 h-1.5 rounded-full ${isPaperMode ? "bg-amber-400" : "bg-red-400"}`} />
-                    {isPaperMode ? "🟡 PAPER TRADING" : "🔴 LIVE BINANCE API"}
+                    {isPaperMode ? "🟡 PAPER TRADING" : `🔴 LIVE ${currentExchange.toUpperCase()}`}
                   </span>
 
                   {/* Latency & Stream Health */}
@@ -1447,6 +1473,12 @@ export default function App() {
           {activeTab === "grid" && (
             <div className="px-4 sm:px-6 py-4">
               <GridBotUI selectedCoin={selectedCoin} currentPrice={lastPrice || 0} />
+            </div>
+          )}
+
+          {activeTab === "dca" && (
+            <div className="px-4 sm:px-6 py-4">
+              <DCABotUI selectedCoin={selectedCoin} currentPrice={lastPrice || 0} />
             </div>
           )}
 

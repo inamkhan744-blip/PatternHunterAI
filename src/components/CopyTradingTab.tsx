@@ -1,5 +1,23 @@
 import { useState, useEffect } from "react";
-import { Users, TrendingUp, ShieldCheck, CheckCircle2, UserCheck, AlertTriangle, ArrowUpRight, DollarSign, Zap, ExternalLink } from "lucide-react";
+import {
+  Users,
+  TrendingUp,
+  ShieldCheck,
+  CheckCircle2,
+  UserCheck,
+  AlertTriangle,
+  ArrowUpRight,
+  DollarSign,
+  Zap,
+  ExternalLink,
+  Store,
+  Upload,
+  Sparkles,
+  Award,
+  Layers,
+  ChevronRight,
+  Sliders,
+} from "lucide-react";
 import { paperTradingEngine } from "../lib/PaperTrading";
 
 export interface TopTrader {
@@ -22,6 +40,23 @@ export interface TopTrader {
     leverage: number;
     pnlPct: number;
   }[];
+}
+
+export interface MarketplaceStrategy {
+  id: string;
+  title: string;
+  author: string;
+  authorHandle: string;
+  authorAvatar: string;
+  category: "SCALPING" | "SWING" | "ARBITRAGE" | "SMC" | "GRID";
+  backtestedWinRate: number;
+  roi30d: number;
+  sharpeRatio: number;
+  subscribers: number;
+  priceModel: "FREE" | "PRO_EXCLUSIVE" | "$29/mo" | "$49/mo";
+  description: string;
+  keyIndicators: string[];
+  maxLeverage: number;
 }
 
 const TOP_TRADERS: TopTrader[] = [
@@ -104,7 +139,75 @@ const TOP_TRADERS: TopTrader[] = [
   },
 ];
 
+const DEFAULT_MARKETPLACE_STRATEGIES: MarketplaceStrategy[] = [
+  {
+    id: "strat-1",
+    title: "SMC Institutional Liquidity Sweep",
+    author: "Alex V.",
+    authorHandle: "@SatoshiSniper",
+    authorAvatar: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80",
+    category: "SMC",
+    backtestedWinRate: 84.2,
+    roi30d: 132.4,
+    sharpeRatio: 2.85,
+    subscribers: 1240,
+    priceModel: "PRO_EXCLUSIVE",
+    description: "Detects HTF Fair Value Gaps (FVG) and false breakout sweeps before entering with institutional orders.",
+    keyIndicators: ["FVG", "Order Blocks", "RSI Divergence", "ATR 14"],
+    maxLeverage: 5,
+  },
+  {
+    id: "strat-2",
+    title: "Delta Neutral Funding Rate Harvester",
+    author: "Marcus Thorne",
+    authorHandle: "@DeltaNeutral",
+    authorAvatar: "https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=150&auto=format&fit=crop&q=80",
+    category: "ARBITRAGE",
+    backtestedWinRate: 91.0,
+    roi30d: 46.8,
+    sharpeRatio: 3.42,
+    subscribers: 2890,
+    priceModel: "FREE",
+    description: "Captures 8-hour perpetual funding premiums with near-zero directional market risk.",
+    keyIndicators: ["Funding Rate Spread", "Basis Delta", "Spot/Perp Imbalance"],
+    maxLeverage: 2,
+  },
+  {
+    id: "strat-3",
+    title: "Whale Shadow Volatility Grid Rider",
+    author: "Elena Rostova",
+    authorHandle: "@MacroWhale",
+    authorAvatar: "https://images.unsplash.com/photo-1580489944761-15a19d654956?w=150&auto=format&fit=crop&q=80",
+    category: "GRID",
+    backtestedWinRate: 88.5,
+    roi30d: 78.2,
+    sharpeRatio: 2.64,
+    subscribers: 980,
+    priceModel: "$29/mo",
+    description: "Arithmetic micro-grid placing counter limit orders between dynamic whale support and resistance walls.",
+    keyIndicators: ["L2 Depth Cumulative", "Bollinger Bands 20,2", "ATR Spacing"],
+    maxLeverage: 3,
+  },
+  {
+    id: "strat-4",
+    title: "Multi-Timeframe Trend Crossover Hunter",
+    author: "Kenji Sato",
+    authorHandle: "@AlphaPredator",
+    authorAvatar: "https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=150&auto=format&fit=crop&q=80",
+    category: "SWING",
+    backtestedWinRate: 76.8,
+    roi30d: 95.1,
+    sharpeRatio: 2.12,
+    subscribers: 640,
+    priceModel: "FREE",
+    description: "EMA 20/50/200 cascade alignment paired with high-volume breakouts on top 20 altcoins.",
+    keyIndicators: ["EMA Triple Ribbon", "MACD Histogram", "OBV"],
+    maxLeverage: 4,
+  },
+];
+
 const STORAGE_KEY_COPIED_TRADERS = "fortress_copied_traders_list";
+const STORAGE_KEY_SUBSCRIBED_STRATEGIES = "fortress_subscribed_strategies_list";
 
 interface CopiedConfig {
   traderId: string;
@@ -116,6 +219,8 @@ interface CopiedConfig {
 }
 
 export default function CopyTradingTab() {
+  const [activeSubTab, setActiveSubTab] = useState<"traders" | "marketplace">("marketplace");
+
   const [copiedMap, setCopiedMap] = useState<Record<string, CopiedConfig>>(() => {
     try {
       const stored = localStorage.getItem(STORAGE_KEY_COPIED_TRADERS);
@@ -124,6 +229,21 @@ export default function CopyTradingTab() {
       return {};
     }
   });
+
+  const [subscribedStrategies, setSubscribedStrategies] = useState<string[]>(() => {
+    try {
+      const stored = localStorage.getItem(STORAGE_KEY_SUBSCRIBED_STRATEGIES);
+      return stored ? JSON.parse(stored) : ["strat-2"];
+    } catch {
+      return ["strat-2"];
+    }
+  });
+
+  const [publishModalOpen, setPublishModalOpen] = useState(false);
+  const [newStratTitle, setNewStratTitle] = useState("");
+  const [newStratCategory, setNewStratCategory] = useState<MarketplaceStrategy["category"]>("SMC");
+  const [newStratPrice, setNewStratPrice] = useState<MarketplaceStrategy["priceModel"]>("FREE");
+  const [newStratDesc, setNewStratDesc] = useState("");
 
   const [selectedTraderForCopy, setSelectedTraderForCopy] = useState<TopTrader | null>(null);
   const [allocationUsd, setAllocationUsd] = useState(500);
@@ -134,6 +254,10 @@ export default function CopyTradingTab() {
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY_COPIED_TRADERS, JSON.stringify(copiedMap));
   }, [copiedMap]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY_SUBSCRIBED_STRATEGIES, JSON.stringify(subscribedStrategies));
+  }, [subscribedStrategies]);
 
   const activeCopiedList = Object.keys(copiedMap);
 
@@ -152,7 +276,6 @@ export default function CopyTradingTab() {
       [trader.id]: config,
     }));
 
-    // Mirror current open trades in paper trading engine
     for (const pos of trader.recentPositions) {
       paperTradingEngine.executeOrder({
         symbol: pos.symbol,
@@ -178,6 +301,27 @@ export default function CopyTradingTab() {
     });
   };
 
+  const handleToggleSubscribeStrategy = (stratId: string, title: string) => {
+    if (subscribedStrategies.includes(stratId)) {
+      setSubscribedStrategies((prev) => prev.filter((id) => id !== stratId));
+      setShowSuccessToast(`Unsubscribed from strategy: ${title}`);
+    } else {
+      setSubscribedStrategies((prev) => [...prev, stratId]);
+      setShowSuccessToast(`Subscribed to strategy "${title}"! Automated paper runner activated.`);
+    }
+    setTimeout(() => setShowSuccessToast(null), 5000);
+  };
+
+  const handlePublishStrategy = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newStratTitle.trim()) return;
+    setPublishModalOpen(false);
+    setShowSuccessToast(`Strategy "${newStratTitle}" submitted to Marketplace review! Listed in your portfolio.`);
+    setNewStratTitle("");
+    setNewStratDesc("");
+    setTimeout(() => setShowSuccessToast(null), 5000);
+  };
+
   const totalSimulatedProfit = Object.values(copiedMap).reduce((sum, c) => sum + (c.simulatedProfit || 0), 0);
   const totalAllocated = Object.values(copiedMap).reduce((sum, c) => sum + (c.allocationUsd || 0), 0);
 
@@ -187,19 +331,19 @@ export default function CopyTradingTab() {
       <div className="rounded-2xl bg-[#090d16] border border-cyan-500/30 p-5 shadow-2xl flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
         <div className="flex items-center gap-3">
           <div className="w-12 h-12 rounded-xl bg-cyan-950/80 border border-cyan-500/40 flex items-center justify-center text-cyan-400">
-            <Users className="w-6 h-6" />
+            <Store className="w-6 h-6" />
           </div>
           <div>
             <div className="flex items-center gap-2">
               <h1 className="text-base font-black text-white uppercase tracking-wider">
-                INSTITUTIONAL COPY TRADING // SOCIAL ALPHA POOL
+                STRATEGY MARKETPLACE & SOCIAL COPY TRADING
               </h1>
               <span className="px-2 py-0.5 rounded text-[10px] font-black bg-emerald-500/20 text-[#00ff66] border border-emerald-500/40 uppercase">
-                PAPER MIRRORING ACTIVE
+                DECENTRALIZED QUANT HUB
               </span>
             </div>
             <p className="text-xs text-slate-400 font-sans mt-0.5">
-              Mirror verified top crypto quants. Simulated paper portfolio automatically replicates trade executions in real-time.
+              Buy, sell and auto-replicate institutional quantitative strategies. Mirror top quants with 1-click execution.
             </p>
           </div>
         </div>
@@ -211,8 +355,8 @@ export default function CopyTradingTab() {
             <span className="text-sm font-bold text-cyan-400">{activeCopiedList.length} Traders</span>
           </div>
           <div className="border-l border-slate-800 pl-4">
-            <span className="text-[10px] text-slate-500 uppercase block">ALLOCATED CAPITAL</span>
-            <span className="text-sm font-bold text-amber-400">${totalAllocated.toFixed(0)} USDT</span>
+            <span className="text-[10px] text-slate-500 uppercase block">SUBSCRIBED STRATEGIES</span>
+            <span className="text-sm font-bold text-emerald-400">{subscribedStrategies.length} Active</span>
           </div>
           <div className="border-l border-slate-800 pl-4">
             <span className="text-[10px] text-slate-500 uppercase block">MIRROR REALIZED PNL</span>
@@ -223,6 +367,42 @@ export default function CopyTradingTab() {
         </div>
       </div>
 
+      {/* Subtab Switcher & Publish Action */}
+      <div className="flex items-center justify-between flex-wrap gap-4 border-b border-slate-800 pb-3">
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setActiveSubTab("marketplace")}
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition ${
+              activeSubTab === "marketplace"
+                ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/50 shadow-md shadow-cyan-950/40"
+                : "bg-slate-900 text-slate-400 border border-slate-800 hover:text-white"
+            }`}
+          >
+            <Store className="w-4 h-4 text-cyan-400" />
+            <span>Strategy Marketplace</span>
+          </button>
+          <button
+            onClick={() => setActiveSubTab("traders")}
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition ${
+              activeSubTab === "traders"
+                ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/50 shadow-md shadow-cyan-950/40"
+                : "bg-slate-900 text-slate-400 border border-slate-800 hover:text-white"
+            }`}
+          >
+            <Users className="w-4 h-4 text-cyan-400" />
+            <span>Top Quants & Traders</span>
+          </button>
+        </div>
+
+        <button
+          onClick={() => setPublishModalOpen(true)}
+          className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 text-xs font-black uppercase tracking-wider shadow-md shadow-amber-950/30 transition"
+        >
+          <Upload className="w-4 h-4 text-slate-950" />
+          <span>Publish My Strategy</span>
+        </button>
+      </div>
+
       {/* Success Toast */}
       {showSuccessToast && (
         <div className="flex items-center gap-2 p-3 rounded-xl bg-emerald-950/80 border border-emerald-500/60 text-[#00ff66] text-xs font-sans animate-in fade-in duration-200">
@@ -231,129 +411,345 @@ export default function CopyTradingTab() {
         </div>
       )}
 
-      {/* Trader Cards Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-        {TOP_TRADERS.map((trader) => {
-          const isCopied = !!copiedMap[trader.id];
-          const copyDetails = copiedMap[trader.id];
+      {/* VIEW 1: STRATEGY MARKETPLACE */}
+      {activeSubTab === "marketplace" && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+          {DEFAULT_MARKETPLACE_STRATEGIES.map((strat) => {
+            const isSubscribed = subscribedStrategies.includes(strat.id);
 
-          return (
-            <div
-              key={trader.id}
-              className={`rounded-2xl bg-[#090d16] border p-5 transition-all shadow-xl flex flex-col justify-between ${
-                isCopied ? "border-emerald-500/60 ring-1 ring-emerald-500/30" : "border-slate-800 hover:border-slate-700"
-              }`}
-            >
-              {/* Profile Bar */}
-              <div>
-                <div className="flex items-center justify-between gap-3 pb-3 border-b border-slate-800">
-                  <div className="flex items-center gap-3">
-                    <img
-                      src={trader.avatar}
-                      alt={trader.name}
-                      className="w-12 h-12 rounded-xl object-cover border border-slate-700"
-                    />
+            return (
+              <div
+                key={strat.id}
+                className={`rounded-2xl bg-[#090d16] border p-5 transition-all shadow-xl flex flex-col justify-between ${
+                  isSubscribed
+                    ? "border-emerald-500/60 ring-1 ring-emerald-500/30"
+                    : "border-slate-800 hover:border-slate-700"
+                }`}
+              >
+                <div>
+                  {/* Strategy Header */}
+                  <div className="flex items-start justify-between gap-3 pb-3 border-b border-slate-800">
                     <div>
-                      <div className="flex items-center gap-2">
-                        <span className="font-bold text-sm text-white">{trader.name}</span>
-                        <span className="px-1.5 py-0.2 rounded text-[9px] font-black bg-cyan-500/20 text-cyan-300 border border-cyan-500/40">
-                          {trader.tier}
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="px-2 py-0.5 rounded text-[9px] font-black bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 uppercase">
+                          {strat.category}
+                        </span>
+                        <span className={`px-2 py-0.5 rounded text-[9px] font-black uppercase ${
+                          strat.priceModel === "FREE"
+                            ? "bg-emerald-500/20 text-[#00ff66]"
+                            : strat.priceModel === "PRO_EXCLUSIVE"
+                            ? "bg-amber-500/20 text-amber-300"
+                            : "bg-blue-500/20 text-blue-300"
+                        }`}>
+                          {strat.priceModel}
                         </span>
                       </div>
-                      <span className="text-xs text-slate-500 font-sans">{trader.handle}</span>
+                      <h3 className="font-bold text-sm text-white">{strat.title}</h3>
+                      <div className="flex items-center gap-2 mt-1 text-xs text-slate-400 font-sans">
+                        <img
+                          src={strat.authorAvatar}
+                          alt={strat.author}
+                          className="w-5 h-5 rounded-full object-cover"
+                        />
+                        <span>{strat.author}</span>
+                        <span className="text-slate-500">{strat.authorHandle}</span>
+                      </div>
+                    </div>
+
+                    <div className="text-right">
+                      <span className="text-[10px] text-slate-500 uppercase block">30D RETURN</span>
+                      <span className="text-base font-black text-[#00ff66] flex items-center justify-end gap-1">
+                        <TrendingUp className="w-3.5 h-3.5" />
+                        +{strat.roi30d}%
+                      </span>
                     </div>
                   </div>
 
-                  <div className="text-right">
-                    <span className="text-[10px] text-slate-500 uppercase block">30D ROI</span>
-                    <span className="text-base font-black text-[#00ff66] flex items-center justify-end gap-1">
-                      <TrendingUp className="w-3.5 h-3.5" />
-                      +{trader.roi30d}%
-                    </span>
+                  {/* Quantitative Metrics Matrix */}
+                  <div className="grid grid-cols-3 gap-2 my-4 p-3 rounded-xl bg-slate-950/80 border border-slate-800/80 text-center">
+                    <div>
+                      <span className="text-[10px] text-slate-500 uppercase block">WIN RATE</span>
+                      <span className="text-xs font-bold text-white">{strat.backtestedWinRate}%</span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-slate-500 uppercase block">SHARPE RATIO</span>
+                      <span className="text-xs font-bold text-cyan-400">{strat.sharpeRatio}</span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-slate-500 uppercase block">SUBSCRIBERS</span>
+                      <span className="text-xs font-bold text-amber-400">{strat.subscribers}</span>
+                    </div>
                   </div>
-                </div>
 
-                {/* Metrics Matrix */}
-                <div className="grid grid-cols-3 gap-2 my-4 p-3 rounded-xl bg-slate-950/80 border border-slate-800/80 text-center">
-                  <div>
-                    <span className="text-[10px] text-slate-500 uppercase block">WIN RATE</span>
-                    <span className="text-xs font-bold text-white">{trader.winRate}%</span>
-                  </div>
-                  <div>
-                    <span className="text-[10px] text-slate-500 uppercase block">MAX DRAWDOWN</span>
-                    <span className="text-xs font-bold text-[#ff3344]">{trader.maxDrawdown}%</span>
-                  </div>
-                  <div>
-                    <span className="text-[10px] text-slate-500 uppercase block">AUM / FOLLOWERS</span>
-                    <span className="text-xs font-bold text-cyan-400">{trader.aum} ({trader.followers})</span>
-                  </div>
-                </div>
+                  {/* Description */}
+                  <p className="text-xs text-slate-300 font-sans mb-4 leading-relaxed">
+                    {strat.description}
+                  </p>
 
-                {/* Strategy Descriptor */}
-                <div className="mb-4">
-                  <span className="text-[10px] text-slate-500 uppercase block mb-1">PROVEN STRATEGY</span>
-                  <div className="text-xs text-slate-300 font-sans bg-slate-900/50 p-2.5 rounded-lg border border-slate-800/80 flex items-center gap-2">
-                    <Zap className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                    <span>{trader.strategy}</span>
-                  </div>
-                </div>
-
-                {/* Active Live Positions Being Mirrored */}
-                <div className="mb-4 space-y-1.5">
-                  <span className="text-[10px] text-slate-500 uppercase block">
-                    LIVE POSITIONS ({trader.recentPositions.length})
-                  </span>
-                  <div className="space-y-1">
-                    {trader.recentPositions.map((pos, idx) => (
-                      <div
-                        key={idx}
-                        className="flex items-center justify-between text-xs px-2.5 py-1.5 rounded bg-slate-950 border border-slate-800/60"
+                  {/* Indicator tags */}
+                  <div className="flex flex-wrap gap-1.5 mb-4">
+                    {strat.keyIndicators.map((ind, i) => (
+                      <span
+                        key={i}
+                        className="px-2 py-0.5 rounded text-[10px] bg-slate-900 border border-slate-800 text-slate-400 font-sans"
                       >
-                        <div className="flex items-center gap-2">
-                          <span className={`text-[10px] font-bold px-1 rounded ${pos.direction === "LONG" ? "bg-green-500/20 text-[#00ff66]" : "bg-red-500/20 text-[#ff3344]"}`}>
-                            {pos.direction} {pos.leverage}x
-                          </span>
-                          <span className="font-bold text-white">{pos.symbol}</span>
-                        </div>
-                        <span className="text-[#00ff66] font-bold">+{pos.pnlPct}%</span>
-                      </div>
+                        {ind}
+                      </span>
                     ))}
                   </div>
                 </div>
-              </div>
 
-              {/* Action Button */}
-              <div className="pt-3 border-t border-slate-800">
-                {isCopied ? (
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="text-xs">
-                      <span className="text-[10px] text-slate-500 uppercase block">MIRROR STATUS</span>
-                      <span className="text-[#00ff66] font-bold flex items-center gap-1">
-                        <CheckCircle2 className="w-3.5 h-3.5" />
-                        Mirrored (${copyDetails.allocationUsd} USDT)
+                {/* Subscription Action Button */}
+                <div className="pt-3 border-t border-slate-800">
+                  {isSubscribed ? (
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-xs text-[#00ff66] font-bold flex items-center gap-1.5">
+                        <CheckCircle2 className="w-4 h-4" />
+                        Subscribed & Running
+                      </span>
+                      <button
+                        onClick={() => handleToggleSubscribeStrategy(strat.id, strat.title)}
+                        className="px-4 py-2 rounded-lg bg-red-950/60 hover:bg-red-900/60 border border-red-500/50 text-red-300 text-xs font-bold uppercase transition"
+                      >
+                        UNSUBSCRIBE
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => handleToggleSubscribeStrategy(strat.id, strat.title)}
+                      className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-slate-950 text-xs font-black uppercase tracking-wider transition-all shadow-md shadow-cyan-950/40"
+                    >
+                      <Zap className="w-4 h-4 fill-slate-950" />
+                      <span>SUBSCRIBE & RUN STRATEGY ({strat.priceModel})</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* VIEW 2: TOP QUANTS & TRADERS */}
+      {activeSubTab === "traders" && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+          {TOP_TRADERS.map((trader) => {
+            const isCopied = !!copiedMap[trader.id];
+            const copyDetails = copiedMap[trader.id];
+
+            return (
+              <div
+                key={trader.id}
+                className={`rounded-2xl bg-[#090d16] border p-5 transition-all shadow-xl flex flex-col justify-between ${
+                  isCopied ? "border-emerald-500/60 ring-1 ring-emerald-500/30" : "border-slate-800 hover:border-slate-700"
+                }`}
+              >
+                <div>
+                  <div className="flex items-center justify-between gap-3 pb-3 border-b border-slate-800">
+                    <div className="flex items-center gap-3">
+                      <img
+                        src={trader.avatar}
+                        alt={trader.name}
+                        className="w-12 h-12 rounded-xl object-cover border border-slate-700"
+                      />
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold text-sm text-white">{trader.name}</span>
+                          <span className="px-1.5 py-0.2 rounded text-[9px] font-black bg-cyan-500/20 text-cyan-300 border border-cyan-500/40">
+                            {trader.tier}
+                          </span>
+                        </div>
+                        <span className="text-xs text-slate-500 font-sans">{trader.handle}</span>
+                      </div>
+                    </div>
+
+                    <div className="text-right">
+                      <span className="text-[10px] text-slate-500 uppercase block">30D ROI</span>
+                      <span className="text-base font-black text-[#00ff66] flex items-center justify-end gap-1">
+                        <TrendingUp className="w-3.5 h-3.5" />
+                        +{trader.roi30d}%
                       </span>
                     </div>
-                    <button
-                      onClick={() => handleStopCopy(trader.id)}
-                      className="px-4 py-2 rounded-lg bg-red-950/60 hover:bg-red-900/60 border border-red-500/50 text-red-300 text-xs font-bold uppercase transition"
-                    >
-                      STOP COPYING
-                    </button>
                   </div>
-                ) : (
-                  <button
-                    onClick={() => setSelectedTraderForCopy(trader)}
-                    className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-slate-950 text-xs font-black uppercase tracking-wider transition-all shadow-md shadow-cyan-950/40"
-                  >
-                    <UserCheck className="w-4 h-4 fill-slate-950" />
-                    <span>COPY TRADER ({trader.roi30d}% ROI)</span>
-                  </button>
-                )}
+
+                  <div className="grid grid-cols-3 gap-2 my-4 p-3 rounded-xl bg-slate-950/80 border border-slate-800/80 text-center">
+                    <div>
+                      <span className="text-[10px] text-slate-500 uppercase block">WIN RATE</span>
+                      <span className="text-xs font-bold text-white">{trader.winRate}%</span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-slate-500 uppercase block">MAX DRAWDOWN</span>
+                      <span className="text-xs font-bold text-[#ff3344]">{trader.maxDrawdown}%</span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-slate-500 uppercase block">AUM / FOLLOWERS</span>
+                      <span className="text-xs font-bold text-cyan-400">{trader.aum} ({trader.followers})</span>
+                    </div>
+                  </div>
+
+                  <div className="mb-4">
+                    <span className="text-[10px] text-slate-500 uppercase block mb-1">PROVEN STRATEGY</span>
+                    <div className="text-xs text-slate-300 font-sans bg-slate-900/50 p-2.5 rounded-lg border border-slate-800/80 flex items-center gap-2">
+                      <Zap className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                      <span>{trader.strategy}</span>
+                    </div>
+                  </div>
+
+                  <div className="mb-4 space-y-1.5">
+                    <span className="text-[10px] text-slate-500 uppercase block">
+                      LIVE POSITIONS ({trader.recentPositions.length})
+                    </span>
+                    <div className="space-y-1">
+                      {trader.recentPositions.map((pos, idx) => (
+                        <div
+                          key={idx}
+                          className="flex items-center justify-between text-xs px-2.5 py-1.5 rounded bg-slate-950 border border-slate-800/60"
+                        >
+                          <div className="flex items-center gap-2">
+                            <span className={`text-[10px] font-bold px-1 rounded ${pos.direction === "LONG" ? "bg-green-500/20 text-[#00ff66]" : "bg-red-500/20 text-[#ff3344]"}`}>
+                              {pos.direction} {pos.leverage}x
+                            </span>
+                            <span className="font-bold text-white">{pos.symbol}</span>
+                          </div>
+                          <span className="text-[#00ff66] font-bold">+{pos.pnlPct}%</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="pt-3 border-t border-slate-800">
+                  {isCopied ? (
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="text-xs">
+                        <span className="text-[10px] text-slate-500 uppercase block">MIRROR STATUS</span>
+                        <span className="text-[#00ff66] font-bold flex items-center gap-1">
+                          <CheckCircle2 className="w-3.5 h-3.5" />
+                          Mirrored (${copyDetails.allocationUsd} USDT)
+                        </span>
+                      </div>
+                      <button
+                        onClick={() => handleStopCopy(trader.id)}
+                        className="px-4 py-2 rounded-lg bg-red-950/60 hover:bg-red-900/60 border border-red-500/50 text-red-300 text-xs font-bold uppercase transition"
+                      >
+                        STOP COPYING
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => setSelectedTraderForCopy(trader)}
+                      className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-slate-950 text-xs font-black uppercase tracking-wider transition-all shadow-md shadow-cyan-950/40"
+                    >
+                      <UserCheck className="w-4 h-4 fill-slate-950" />
+                      <span>COPY TRADER ({trader.roi30d}% ROI)</span>
+                    </button>
+                  )}
+                </div>
               </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Publish Strategy Modal */}
+      {publishModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-2xl bg-[#090d16] border border-cyan-500/50 p-6 shadow-2xl font-mono space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <h3 className="text-sm font-bold text-white uppercase flex items-center gap-2">
+                <Upload className="w-4 h-4 text-cyan-400" />
+                Publish Algorithm to Marketplace
+              </h3>
+              <button
+                onClick={() => setPublishModalOpen(false)}
+                className="text-slate-500 hover:text-white text-sm"
+              >
+                ✕
+              </button>
             </div>
-          );
-        })}
-      </div>
+
+            <form onSubmit={handlePublishStrategy} className="space-y-4 font-sans text-xs">
+              <div>
+                <label className="text-slate-400 block mb-1 font-mono uppercase text-[11px]">
+                  Strategy Title
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. SMC Order Block Scalper v2"
+                  value={newStratTitle}
+                  onChange={(e) => setNewStratTitle(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white font-mono outline-none focus:border-cyan-500"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-slate-400 block mb-1 font-mono uppercase text-[11px]">
+                    Category
+                  </label>
+                  <select
+                    value={newStratCategory}
+                    onChange={(e) => setNewStratCategory(e.target.value as MarketplaceStrategy["category"])}
+                    className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white font-mono outline-none focus:border-cyan-500"
+                  >
+                    <option value="SMC">Smart Money (SMC)</option>
+                    <option value="SCALPING">High-Freq Scalping</option>
+                    <option value="SWING">Trend Swing</option>
+                    <option value="GRID">Volatility Grid</option>
+                    <option value="ARBITRAGE">Delta Neutral</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-slate-400 block mb-1 font-mono uppercase text-[11px]">
+                    Monetization
+                  </label>
+                  <select
+                    value={newStratPrice}
+                    onChange={(e) => setNewStratPrice(e.target.value as MarketplaceStrategy["priceModel"])}
+                    className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white font-mono outline-none focus:border-cyan-500"
+                  >
+                    <option value="FREE">Free for Community</option>
+                    <option value="PRO_EXCLUSIVE">Pro Tier Only</option>
+                    <option value="$29/mo">$29 / month</option>
+                    <option value="$49/mo">$49 / month</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="text-slate-400 block mb-1 font-mono uppercase text-[11px]">
+                  Strategy Logic & Risk Rules
+                </label>
+                <textarea
+                  rows={3}
+                  required
+                  placeholder="Describe your strategy logic, indicators, and recommended stop loss..."
+                  value={newStratDesc}
+                  onChange={(e) => setNewStratDesc(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white font-sans outline-none focus:border-cyan-500"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setPublishModalOpen(false)}
+                  className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs uppercase"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-slate-950 font-black text-xs uppercase tracking-wider shadow-md shadow-cyan-950/40"
+                >
+                  SUBMIT TO MARKETPLACE
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* Copy Settings Modal */}
       {selectedTraderForCopy && (
@@ -395,9 +791,6 @@ export default function CopyTradingTab() {
                     className="w-full bg-slate-950 border border-slate-700 rounded-lg pl-7 pr-3 py-2 text-white font-mono font-bold outline-none focus:border-cyan-500"
                   />
                 </div>
-                <span className="text-[10px] text-slate-500 mt-1 block">
-                  Simulated paper allocation for mirroring this trader.
-                </span>
               </div>
 
               <div>
@@ -427,14 +820,7 @@ export default function CopyTradingTab() {
                   onChange={(e) => setStopLossLimit(Number(e.target.value) || 5)}
                   className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white font-mono font-bold outline-none focus:border-cyan-500"
                 />
-                <span className="text-[10px] text-slate-500 mt-1 block">
-                  Automatically disconnects mirror if drawdown exceeds {stopLossLimit}%.
-                </span>
               </div>
-            </div>
-
-            <div className="p-3 rounded-lg bg-cyan-950/30 border border-cyan-500/30 text-[11px] text-cyan-300 font-sans">
-              ⚡ Paper mode enabled: all trades are simulated in virtual memory with zero real financial risk.
             </div>
 
             <div className="flex items-center justify-end gap-3 pt-2">

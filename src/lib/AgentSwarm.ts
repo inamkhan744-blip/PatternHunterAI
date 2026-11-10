@@ -208,11 +208,23 @@ export async function runRealSwarmDebate(params: SwarmDebateParams): Promise<Swa
       },
     });
 
-    if (error || !data || !data.data) {
+    if (error) {
+      console.error("AgentSwarm invoke error:", error);
       return baseSim;
     }
 
-    const parsed = data.data;
+    if (!data) {
+      console.error("AgentSwarm empty data returned");
+      return baseSim;
+    }
+
+    // Backend may return { success: true, data: { ...parsedAI } } or nested { data: { data: ... } } or raw object
+    const parsed = (data.data?.data ? data.data.data : data.data) || (data.bullThesis ? data : null);
+
+    if (!parsed) {
+      console.error("AgentSwarm unable to parse response data:", data);
+      return baseSim;
+    }
 
     const bullMessage: SwarmAgentMessage = {
       agent: "Bull Agent",
@@ -255,7 +267,8 @@ export async function runRealSwarmDebate(params: SwarmDebateParams): Promise<Swa
       apiKeyUsed: true,
       isRealAI: true,
     };
-  } catch {
+  } catch (err) {
+    console.error("AgentSwarm debate error:", err);
     return baseSim;
   }
 }

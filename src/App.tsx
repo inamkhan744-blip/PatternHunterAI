@@ -658,24 +658,71 @@ export default function App() {
         },
       });
 
-      if (invokeError || data?.unavailable || !data?.explanation) {
-        throw new Error(invokeError?.message || data?.error || "Edge unavailable");
+      if (invokeError || data?.unavailable) {
+        throw invokeError || new Error(data?.error || "Edge unavailable");
       }
 
-      const text = data.explanation;
+      // Backend may return direct format { explanation } or wrapped format { success: true, data: { ...parsedAI } | string, modelUsed: "..." }
+      const resolvedData = data?.data !== undefined ? data.data : data;
+
+      let text = "";
+      let entryVal: number | null = null;
+      let slVal: number | null = null;
+      let tpVal: number | null = null;
+
+      if (typeof resolvedData === "string") {
+        text = resolvedData;
+      } else if (resolvedData && typeof resolvedData === "object") {
+        if (typeof resolvedData.explanation === "string") {
+          text = resolvedData.explanation;
+        } else if (typeof resolvedData.text === "string") {
+          text = resolvedData.text;
+        } else if (typeof resolvedData.response === "string") {
+          text = resolvedData.response;
+        } else {
+          // If parsedAI object contains structured fields
+          const entryStr = resolvedData.entry !== undefined ? `$${resolvedData.entry}` : null;
+          const slStr = resolvedData.sl !== undefined ? `$${resolvedData.sl}` : resolvedData.stopLoss !== undefined ? `$${resolvedData.stopLoss}` : null;
+          const tpStr = resolvedData.tp !== undefined ? `$${resolvedData.tp}` : resolvedData.takeProfit !== undefined ? `$${resolvedData.takeProfit}` : null;
+          const reasoningStr = resolvedData.reasoning || resolvedData.analysis || resolvedData.summary || resolvedData.keyTakeaway || "";
+
+          const lines: string[] = [
+            `Pattern found: ${pattern.name} at $${lastPrice.toFixed(2)}. ${pattern.direction === "bearish" ? "Expect a reversal to the downside." : "Expect a reversal to the upside."}`
+          ];
+          if (entryStr) lines.push(`Entry: ${entryStr}`);
+          if (slStr) lines.push(`SL: ${slStr}`);
+          if (tpStr) lines.push(`TP: ${tpStr}`);
+          if (reasoningStr) lines.push(`Reasoning: ${reasoningStr}`);
+
+          text = lines.join("\n");
+        }
+
+        // Direct numeric values if returned in parsedAI
+        if (typeof resolvedData.entry === "number") entryVal = resolvedData.entry;
+        else if (typeof resolvedData.entryPrice === "number") entryVal = resolvedData.entryPrice;
+
+        if (typeof resolvedData.sl === "number") slVal = resolvedData.sl;
+        else if (typeof resolvedData.stopLoss === "number") slVal = resolvedData.stopLoss;
+        else if (typeof resolvedData.stopLossPrice === "number") slVal = resolvedData.stopLossPrice;
+
+        if (typeof resolvedData.tp === "number") tpVal = resolvedData.tp;
+        else if (typeof resolvedData.takeProfit === "number") tpVal = resolvedData.takeProfit;
+        else if (typeof resolvedData.takeProfitPrice === "number") tpVal = resolvedData.takeProfitPrice;
+      } else if (typeof data?.explanation === "string") {
+        text = data.explanation;
+      }
+
+      if (!text && !entryVal) {
+        throw new Error(data?.error || "AI returned empty analysis");
+      }
+
       setExplanation(text);
       const parsed = parseAnalysisPrices(text);
-      if (parsed) {
-        setEntryPrice(parsed.entry);
-        setSlPrice(parsed.sl);
-        setTpPrice(parsed.tp);
-      } else {
-        const prices = getFallbackPrices(pattern, lastPrice);
-        setEntryPrice(prices.entry);
-        setSlPrice(prices.sl);
-        setTpPrice(prices.tp);
-      }
-    } catch {
+      setEntryPrice(entryVal ?? parsed?.entry ?? getFallbackPrices(pattern, lastPrice).entry);
+      setSlPrice(slVal ?? parsed?.sl ?? getFallbackPrices(pattern, lastPrice).sl);
+      setTpPrice(tpVal ?? parsed?.tp ?? getFallbackPrices(pattern, lastPrice).tp);
+    } catch (err) {
+      console.error("Pattern Analysis error:", err);
       const fallback = generateFallbackAnalysis(pattern, selectedCoin.symbol, lastPrice);
       setExplanation(fallback);
       setAiError("Live AI analysis unavailable — showing automated estimate.");

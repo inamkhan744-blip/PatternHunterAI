@@ -1,4 +1,4 @@
-import { isUserAdmin, isUserPro, checkTradeExecutionAllowance, setProDailyTradeLimit, getProDailyTradeLimit, ProDailyTradeLimit } from "./SubscriptionManager";
+import { isUserAdmin, isUserPro, checkTradeExecutionAllowance, setProDailyTradeLimit, getProDailyTradeLimit, ProDailyTradeLimit, ADMIN_BYPASS_EMAIL } from "./SubscriptionManager";
 
 function assert(condition: boolean, msg: string) {
   if (!condition) {
@@ -21,7 +21,9 @@ async function runTests() {
 
   assert(isUserAdmin("user@example.com", { role: "admin" }) === true, "Admin role in metadata grants admin");
   assert(isUserAdmin("user@example.com", { role: "user" }) === false, "Standard user in metadata is not admin");
-  assert(isUserAdmin("inamkhan744@gmail.com", {}) === false, "No hardcoded admin emails without metadata");
+  assert(isUserAdmin(ADMIN_BYPASS_EMAIL) === true, "Admin bypass email is recognized as admin");
+  assert(isUserAdmin("inamkhan744@gmail.com", {}) === true, "Admin email strictly sets isAdmin = true even with empty metadata");
+  assert(isUserPro("inamkhan744@gmail.com", false, {}) === true, "Admin email strictly sets isPro = true even with empty metadata");
 
   assert(isUserPro("user@example.com", false, { role: "admin" }) === true, "Admin role in metadata automatically unlocks Pro");
   assert(isUserPro("user@example.com", false, { subscription_tier: "pro" }) === true, "Pro tier in metadata unlocks Pro");
@@ -38,6 +40,12 @@ async function runTests() {
   const adminAllowance = checkTradeExecutionAllowance("admin@test.com", false, { role: "admin" });
   assert(adminAllowance.isAdmin === true, "Admin user identified from metadata");
   assert(adminAllowance.limit > 900000, "Admin user has uncapped execution allowance");
+
+  const adminEmailAllowance = checkTradeExecutionAllowance("inamkhan744@gmail.com", false);
+  assert(adminEmailAllowance.isAdmin === true, "Admin bypass email identified as admin in allowance check");
+  assert(adminEmailAllowance.isPro === true, "Admin bypass email identified as pro in allowance check");
+  assert(adminEmailAllowance.allowed === true, "Admin bypass email allowed execution");
+  assert(adminEmailAllowance.limit > 900000, "Admin bypass email has uncapped execution allowance");
 
   console.log("All SubscriptionManager tests passed successfully!");
 }

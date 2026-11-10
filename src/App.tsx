@@ -81,7 +81,7 @@ import StrategyBuilder from "./components/StrategyBuilder";
 import { gridTradingBot } from "./lib/GridBot";
 import { dcaBotEngine } from "./lib/DCABot";
 import { webhookService, type TradingViewSignal } from "./lib/WebhookService";
-import { isUserAdmin, isUserPro } from "./lib/SubscriptionManager";
+import { isUserAdmin, isUserPro, ADMIN_BYPASS_EMAIL } from "./lib/SubscriptionManager";
 import { autoTradeEngine } from "./lib/BinanceAutoTrade";
 import { getActiveExchange, setActiveExchange, SUPPORTED_EXCHANGES, type ExchangeId } from "./lib/MultiExchange";
 import { paperTradingEngine } from "./lib/PaperTrading";
@@ -202,9 +202,14 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   // Admin and Pro derivation from server-side role & metadata
-  const isAdmin = useMemo(() => isUserAdmin(user?.email, user?.user_metadata), [user?.email, user?.user_metadata]);
+  const isAdmin = useMemo(() => {
+    if (user?.email && user.email.trim().toLowerCase() === ADMIN_BYPASS_EMAIL.toLowerCase()) return true;
+    return isUserAdmin(user?.email, user?.user_metadata);
+  }, [user?.email, user?.user_metadata]);
+
   const effectiveIsPro = useMemo(() => {
     if (isAdmin) return true;
+    if (user?.email && user.email.trim().toLowerCase() === ADMIN_BYPASS_EMAIL.toLowerCase()) return true;
     return isUserPro(user?.email, isPro, user?.user_metadata);
   }, [isAdmin, user?.email, isPro, user?.user_metadata]);
 
@@ -246,6 +251,7 @@ export default function App() {
   useEffect(() => {
     if (isAdmin) {
       setIsPro(true);
+      setProModalOpen(false);
     }
   }, [isAdmin]);
 
@@ -260,7 +266,10 @@ export default function App() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     if (params.get("pro") === "true") setIsPro(true);
-    if (isAdmin) setIsPro(true);
+    if (isAdmin) {
+      setIsPro(true);
+      setProModalOpen(false);
+    }
     setRemainingScans(getRemainingScans());
 
     // Restore existing FOMO lock from localStorage if active
@@ -1832,9 +1841,10 @@ export default function App() {
       {/* Pro Modal only accessible if NOT admin */}
       {!isAdmin && (
         <ProModal
-          open={proModalOpen}
+          open={proModalOpen && !isAdmin}
           onClose={() => setProModalOpen(false)}
           isPro={effectiveIsPro}
+          isAdmin={isAdmin}
         />
       )}
       <ScanPanel

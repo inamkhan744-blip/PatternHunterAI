@@ -169,17 +169,26 @@ Deno.serve(async (req: Request) => {
 
     const serverApiKey = Deno.env.get("BINANCE_SERVER_API_KEY");
     const serverApiSecret = Deno.env.get("BINANCE_SERVER_API_SECRET");
-    if (signWithServerSecret && serverApiKey && serverApiSecret) {
-      outgoingHeaders["X-MBX-APIKEY"] = serverApiKey;
-      const timestamp = Date.now();
-      const queryParams = new URLSearchParams(query);
-      if (!queryParams.has("timestamp")) {
-        queryParams.set("timestamp", String(timestamp));
+    if (signWithServerSecret) {
+      // Disallow unauthenticated or anonymous execution with server credentials
+      if (userId === "anonymous") {
+        return new Response(
+          JSON.stringify({ error: "Unauthorized: Shared server credentials require authenticated user session." }),
+          { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
       }
-      const rawQuery = queryParams.toString();
-      const signature = await hmacSha256(serverApiSecret, rawQuery);
-      queryParams.set("signature", signature);
-      finalQuery = queryParams.toString();
+      if (serverApiKey && serverApiSecret) {
+        outgoingHeaders["X-MBX-APIKEY"] = serverApiKey;
+        const timestamp = Date.now();
+        const queryParams = new URLSearchParams(query);
+        if (!queryParams.has("timestamp")) {
+          queryParams.set("timestamp", String(timestamp));
+        }
+        const rawQuery = queryParams.toString();
+        const signature = await hmacSha256(serverApiSecret, rawQuery);
+        queryParams.set("signature", signature);
+        finalQuery = queryParams.toString();
+      }
     }
 
     const fullUrl = finalQuery ? `${baseUrl}${path}?${finalQuery}` : `${baseUrl}${path}`;

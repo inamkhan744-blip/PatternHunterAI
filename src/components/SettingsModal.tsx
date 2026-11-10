@@ -18,7 +18,7 @@ import {
   Crown,
 } from "lucide-react";
 import { usePWAInstall } from "../lib/pwa";
-import { getDecryptedApiKeys, storeEncryptedApiKeys } from "../lib/CryptoSecurity";
+import { storeEncryptedApiKeys } from "../lib/CryptoSecurity";
 import { loadTelegramConfig, saveTelegramConfig } from "../lib/TelegramService";
 import { autoTradeEngine } from "../lib/BinanceAutoTrade";
 import {

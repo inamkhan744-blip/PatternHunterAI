@@ -4,15 +4,10 @@ import {
   Play,
   Square,
   TrendingUp,
-  DollarSign,
-  Clock,
-  Layers,
-  ShieldCheck,
   AlertCircle,
   CheckCircle2,
   Sliders,
   History,
-  Zap,
 } from "lucide-react";
 import { dcaBotEngine, type DCABotConfig, type DCABotState } from "../lib/DCABot";
 import { formatPrice } from "../lib/patterns";
@@ -96,6 +91,9 @@ export default function DCABotUI({ selectedCoin, currentPrice }: Props) {
               <h1 className="text-base font-black text-white uppercase tracking-wider">
                 INSTITUTIONAL DCA BOT // DOLLAR-COST AVERAGING ENGINE
               </h1>
+              <span className="px-2 py-0.5 rounded text-[10px] font-black bg-cyan-500/20 text-cyan-400 border border-cyan-500/40 uppercase">
+                PAPER MODE
+              </span>
               <span className={`px-2 py-0.5 rounded text-[10px] font-black uppercase ${
                 botState.isActive
                   ? "bg-emerald-500/20 text-[#00ff66] border border-emerald-500/40 animate-pulse"

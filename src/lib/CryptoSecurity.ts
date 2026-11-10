@@ -15,7 +15,7 @@ export interface ApiCredentials {
 }
 
 function getDerivedMasterKey(customSalt?: string): string {
-  const envKey = (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_ENCRYPTION_MASTER_KEY) || "";
+  const envKey = (typeof import.meta !== "undefined" && (import.meta as unknown as { env?: Record<string, string> }).env?.VITE_ENCRYPTION_MASTER_KEY) || "";
   if (envKey) return envKey;
 
   const clientSeed = typeof window !== "undefined" ? window.location.origin + (window.navigator?.userAgent || "") : "node_environment";
@@ -74,8 +74,9 @@ export function decryptData(cipherBundle: string, secretKey?: string): string {
       const ciphertext = CryptoJS.enc.Hex.parse(cipherHex);
 
       const derived = CryptoJS.PBKDF2(key, salt, { keySize: 256 / 32, iterations: 1000 });
+      const cipherParams = CryptoJS.lib.CipherParams.create({ ciphertext });
       const decrypted = CryptoJS.AES.decrypt(
-        { ciphertext } as any,
+        cipherParams,
         derived,
         { iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }
       );

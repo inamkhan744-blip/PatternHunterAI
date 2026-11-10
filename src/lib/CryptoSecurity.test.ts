@@ -9,7 +9,7 @@ function assert(condition: boolean, msg: string) {
 }
 
 const mockStorage = new Map<string, string>();
-(globalThis as any).localStorage = {
+(globalThis as unknown as { localStorage: unknown }).localStorage = {
   getItem: (k: string) => mockStorage.get(k) || null,
   setItem: (k: string, v: string) => mockStorage.set(k, v),
   removeItem: (k: string) => mockStorage.delete(k),

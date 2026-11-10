@@ -115,9 +115,10 @@ async function runTests() {
   engine.saveConfig({ disclaimerAgreed: true, profitVaultEnabled: true, maxOpenTrades: 2 });
   engine.resetCircuitBreaker();
 
-  // Simulate first loss
-  const closedLoss1 = engine.closeTrade(mockTrade.id, 48500, "SL");
-  assert(engine.getCircuitBreaker().consecutiveLosses >= 0, "Engine circuit breaker initialized");
+  // Push trade into engine so closeTrade finds it
+  (engine as unknown as { trades: ManagedTrade[] }).trades.push({ ...mockTrade, id: "mock-trade-1" });
+  const closedLoss1 = engine.closeTrade("mock-trade-1", 48500, "SL");
+  assert(closedLoss1 !== null && engine.getCircuitBreaker().consecutiveLosses >= 0, "Engine circuit breaker initialized");
 
   // 7. Post-Loss Cooldown (30 minutes)
   engine.clearPostLossCooldown();

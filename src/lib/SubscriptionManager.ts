@@ -27,19 +27,17 @@ function getTodayString(): string {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
 }
 
-export function isUserAdmin(email?: string | null, userMetadata?: Record<string, any>): boolean {
+export function isUserAdmin(_email?: string | null, userMetadata?: Record<string, unknown>): boolean {
   if (userMetadata?.role === "admin") return true;
-  if (!email || typeof email !== "string") return false;
-  const normalized = email.trim().toLowerCase();
-  return normalized === "inamkhan744@gmail.com";
+  return false;
 }
 
 export function isUserPro(
-  email?: string | null,
+  _email?: string | null,
   manualProState: boolean = false,
-  userMetadata?: Record<string, any>
+  userMetadata?: Record<string, unknown>
 ): boolean {
-  if (isUserAdmin(email, userMetadata)) return true;
+  if (isUserAdmin(_email, userMetadata)) return true;
   if (userMetadata?.subscription_tier === "pro" || userMetadata?.subscription_tier === "premium") return true;
   return Boolean(manualProState);
 }
@@ -153,7 +151,7 @@ export function incrementDailyTradeCount(): number {
 export function checkTradeExecutionAllowance(
   email?: string | null,
   isProManual: boolean = false,
-  userMetadata?: Record<string, any>
+  userMetadata?: Record<string, unknown>
 ): {
   allowed: boolean;
   limit: number;

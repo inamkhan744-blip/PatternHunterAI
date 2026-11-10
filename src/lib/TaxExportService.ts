@@ -34,7 +34,7 @@ export function generateTaxReportPDF(summary: TaxReportSummary): void {
   doc.setFontSize(9);
   doc.text("Enterprise Quant Portfolio PnL & Derivative Funding Audit", 14, 25);
   doc.text(`Generated: ${new Date().toUTCString()}`, 14, 30);
-  doc.text(`Account / Taxpayer: ${summary.userEmail || "inamkhan744@gmail.com"}`, 14, 35);
+  doc.text(`Account / Taxpayer: ${summary.userEmail || "Authenticated User"}`, 14, 35);
 
   doc.setFont("helvetica", "bold");
   doc.setTextColor(0, 255, 102);

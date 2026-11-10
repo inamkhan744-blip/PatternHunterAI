@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
-import { DollarSign, BarChart2, TrendingUp, TrendingDown, RefreshCw, Globe, ChevronRight } from "lucide-react";
+import { TrendingUp, TrendingDown, RefreshCw, Globe } from "lucide-react";
 
 export interface MacroItem {
   symbol: string;

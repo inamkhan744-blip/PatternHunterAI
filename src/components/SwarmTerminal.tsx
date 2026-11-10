@@ -4,17 +4,14 @@ import {
   TrendingUp,
   TrendingDown,
   ShieldAlert,
-  Play,
   RotateCcw,
   CheckCircle2,
   XCircle,
   Zap,
-  Terminal,
   Activity,
   X,
 } from "lucide-react";
 import {
-  simulateSwarmDebate,
   runRealSwarmDebate,
   SwarmDebateResult,
   SwarmAgentMessage,

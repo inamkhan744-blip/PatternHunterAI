@@ -59,8 +59,8 @@ export default function PatternPanel({
   loading,
   error,
   onExplain,
-  coin,
-  timeframe,
+  coin: _coin,
+  timeframe: _timeframe,
   onSaveSignal,
   entryPrice,
   slPrice,
@@ -69,6 +69,8 @@ export default function PatternPanel({
   fomoRemainingSeconds = 0,
   onOpenAutoTrade,
 }: Props) {
+  void _coin;
+  void _timeframe;
   const [saved, setSaved] = useState(false);
 
   if (!pattern) {

@@ -2,21 +2,11 @@ import { useState, useEffect } from "react";
 import {
   Users,
   TrendingUp,
-  ShieldCheck,
   CheckCircle2,
   UserCheck,
-  AlertTriangle,
-  ArrowUpRight,
-  DollarSign,
   Zap,
-  ExternalLink,
   Store,
   Upload,
-  Sparkles,
-  Award,
-  Layers,
-  ChevronRight,
-  Sliders,
 } from "lucide-react";
 import { paperTradingEngine } from "../lib/PaperTrading";
 
@@ -323,7 +313,8 @@ export default function CopyTradingTab() {
   };
 
   const totalSimulatedProfit = Object.values(copiedMap).reduce((sum, c) => sum + (c.simulatedProfit || 0), 0);
-  const totalAllocated = Object.values(copiedMap).reduce((sum, c) => sum + (c.allocationUsd || 0), 0);
+  const _totalAllocated = Object.values(copiedMap).reduce((sum, c) => sum + (c.allocationUsd || 0), 0);
+  void _totalAllocated;
 
   return (
     <div className="max-w-7xl mx-auto w-full px-4 sm:px-6 py-4 font-mono space-y-6">
@@ -340,6 +331,9 @@ export default function CopyTradingTab() {
               </h1>
               <span className="px-2 py-0.5 rounded text-[10px] font-black bg-emerald-500/20 text-[#00ff66] border border-emerald-500/40 uppercase">
                 DECENTRALIZED QUANT HUB
+              </span>
+              <span className="px-2 py-0.5 rounded text-[10px] font-black bg-amber-500/20 text-amber-400 border border-amber-500/40 uppercase">
+                SIMULATION ONLY
               </span>
             </div>
             <p className="text-xs text-slate-400 font-sans mt-0.5">

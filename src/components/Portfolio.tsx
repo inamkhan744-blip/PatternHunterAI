@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useMemo } from "react";
-import { Wallet, Plus, Trash2, Loader2, TrendingUp, TrendingDown, RefreshCw, ArrowUpRight, ArrowDownRight, FileText, Download } from "lucide-react";
+import { Wallet, Plus, Trash2, Loader2, TrendingUp, TrendingDown, RefreshCw, ArrowUpRight, ArrowDownRight, Download } from "lucide-react";
 import { COINS, PRO_COINS } from "../constants";
 import { fetchCandles } from "../lib/binance";
 import { formatPrice } from "../lib/patterns";
@@ -47,7 +47,7 @@ export default function Portfolio() {
     loadHoldings();
   }, [loadHoldings]);
 
-  const enrichedHoldings = useMemo<HoldingWithPrice[]>(() => {
+  const _enrichedHoldings = useMemo<HoldingWithPrice[]>(() => {
     return holdings.map((h) => ({
       ...h,
       currentPrice: 0,
@@ -57,6 +57,7 @@ export default function Portfolio() {
       pnlPercent: 0,
     }));
   }, [holdings]);
+  void _enrichedHoldings;
 
   const [priceMap, setPriceMap] = useState<Record<string, number>>({});
 

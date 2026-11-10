@@ -11,7 +11,6 @@ import {
   BarChart2,
   ShieldAlert,
   Sliders,
-  Eye,
 } from "lucide-react";
 import { formatPrice } from "../lib/patterns";
 import { useBinanceWebSocket } from "../lib/useBinanceWebSocket";
@@ -34,7 +33,8 @@ interface WhaleWall {
 export default function OrderBook({ symbol }: Props) {
   const [data, setData] = useState<OrderBookData | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("depth_chart");
-  const [zoomLevel, setZoomLevel] = useState<number>(2); // 1%, 2%, 5%
+  const [_zoomLevel, _setZoomLevel] = useState<number>(2); // 1%, 2%, 5%
+  void _zoomLevel; void _setZoomLevel;
   const [hoveredPoint, setHoveredPoint] = useState<{
     price: number;
     cumulative: number;

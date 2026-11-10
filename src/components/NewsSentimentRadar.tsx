@@ -5,7 +5,6 @@ import {
   TrendingDown,
   Minus,
   RefreshCw,
-  ExternalLink,
   Sparkles,
   Newspaper,
   ChevronRight,

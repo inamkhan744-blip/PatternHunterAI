@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import {
   TrendingUp,
   TrendingDown,
@@ -21,6 +21,7 @@ import {
   TradeStats,
 } from "../lib/TradeManager";
 import { formatPrice } from "../lib/patterns";
+import { getDecryptedApiKeys } from "../lib/CryptoSecurity";
 
 interface Props {
   currentSymbol?: string;
@@ -32,6 +33,16 @@ export default function ActivePositions({ currentSymbol, currentPrice }: Props) 
   const [activeTrades, setActiveTrades] = useState<ActiveTrade[]>(() => tradeManager.getActiveTrades());
   const [tradeHistory, setTradeHistory] = useState<ClosedTrade[]>(() => tradeManager.getTradeHistory());
   const [stats, setStats] = useState<TradeStats>(() => tradeManager.getStats());
+
+  // Check if real Binance API credentials exist in localStorage
+  const hasValidBinanceKeys = useMemo(() => {
+    try {
+      const keys = getDecryptedApiKeys();
+      return Boolean(keys.apiKey && keys.apiSecret && keys.apiKey.trim().length > 0 && keys.apiSecret.trim().length > 0);
+    } catch {
+      return false;
+    }
+  }, []);
 
   useEffect(() => {
     const sync = () => {
@@ -157,14 +168,23 @@ export default function ActivePositions({ currentSymbol, currentPrice }: Props) 
 
         <div className="p-4 rounded-2xl bg-slate-900/80 border border-slate-800 shadow-lg flex flex-col justify-between">
           <span className="text-[11px] text-slate-400 block uppercase font-sans">
-            Safety Shield
+            Execution Mode
           </span>
-          <div className="flex items-center gap-1.5 text-xs font-bold text-cyan-400">
-            <ShieldCheck className="w-4 h-4 text-cyan-400" />
-            <span>Vault Protection</span>
+          <div className="flex items-center gap-1.5 text-xs font-bold">
+            {hasValidBinanceKeys ? (
+              <span className="text-[#00ff66] flex items-center gap-1">
+                <CheckCircle className="w-3.5 h-3.5" />
+                BINANCE API READY
+              </span>
+            ) : (
+              <span className="text-amber-400 flex items-center gap-1">
+                <ShieldCheck className="w-3.5 h-3.5" />
+                SIMULATED PAPER VAULT
+              </span>
+            )}
           </div>
           <span className="text-[10px] text-slate-500">
-            ATR SL & TP Active
+            {hasValidBinanceKeys ? "Real order routing enabled" : "No Binance keys stored"}
           </span>
         </div>
       </div>
@@ -202,6 +222,7 @@ export default function ActivePositions({ currentSymbol, currentPrice }: Props) 
             <div className="grid grid-cols-1 gap-3">
               {activeTrades.map((trade) => {
                 const isProfitable = trade.unrealizedPnl >= 0;
+                const isTrulyReal = trade.mode === "REAL" && hasValidBinanceKeys;
                 return (
                   <div
                     key={trade.id}
@@ -234,12 +255,13 @@ export default function ActivePositions({ currentSymbol, currentPrice }: Props) 
 
                         <span
                           className={`text-[10px] uppercase font-bold px-2 py-0.5 rounded border ${
-                            trade.mode === "PAPER"
-                              ? "bg-amber-500/15 text-amber-300 border-amber-500/30"
-                              : "bg-cyan-500/15 text-cyan-300 border-cyan-500/30"
+                            isTrulyReal
+                              ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/40"
+                              : "bg-amber-500/20 text-amber-400 border-amber-500/40"
                           }`}
+                          title={isTrulyReal ? "Real Binance order execution" : "Paper/Simulated trade (No valid Binance API keys configured)"}
                         >
-                          {trade.mode}
+                          {isTrulyReal ? "REAL" : "PAPER / SIMULATED"}
                         </span>
 
                         <span className="text-[10px] text-slate-500 flex items-center gap-1">
@@ -369,6 +391,7 @@ export default function ActivePositions({ currentSymbol, currentPrice }: Props) 
                   <tbody className="divide-y divide-slate-800/60">
                     {tradeHistory.map((t) => {
                       const isWin = t.realizedPnl >= 0;
+                      const isTrulyReal = t.mode === "REAL" && hasValidBinanceKeys;
                       return (
                         <tr key={t.id} className="hover:bg-slate-800/40 transition">
                           <td className="py-3 px-4 whitespace-nowrap">
@@ -388,7 +411,7 @@ export default function ActivePositions({ currentSymbol, currentPrice }: Props) 
 
                           <td className="py-3 px-4 whitespace-nowrap text-slate-400">
                             <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700">
-                              {t.marketType} · {t.mode}
+                              {t.marketType} · {isTrulyReal ? "REAL" : "PAPER"}
                             </span>
                           </td>
 

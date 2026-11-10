@@ -37,7 +37,9 @@ import {
   Grid as GridIcon,
   Users,
   Cpu,
+  Menu,
 } from "lucide-react";
+import { SideDrawer } from "./components/SideDrawer";
 import CandlestickChart from "./components/CandlestickChart";
 import PatternPanel from "./components/PatternPanel";
 import ProModal from "./components/ProModal";
@@ -156,6 +158,7 @@ export default function App() {
   const { user, loading: authLoading } = useAuth();
 
   const [activeTab, setActiveTab] = useState<AppTab>("chart");
+  const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [selectedCoin, setSelectedCoin] = useState<Coin>(COINS[0]);
   const [timeframe, setTimeframe] = useState<Timeframe>("1h");
   const [candles, setCandles] = useState<Candle[]>([]);
@@ -209,7 +212,7 @@ export default function App() {
   // System Status State: Live vs Paper mode, WebSocket ping latency
   const [isPaperMode, setIsPaperMode] = useState<boolean>(() => {
     const cfg = autoTradeEngine.getConfig();
-    return !cfg.apiKey || !cfg.apiSecret;
+    return !cfg.apiKey || !cfg.apiSecret || !cfg.apiKey.trim() || !cfg.apiSecret.trim();
   });
   const [wsLatency, setWsLatency] = useState<number>(28);
 
@@ -508,7 +511,7 @@ export default function App() {
       // Simulate live jitter for WebSocket round-trip display
       setWsLatency(Math.floor(22 + Math.random() * 18));
       const cfg = autoTradeEngine.getConfig();
-      setIsPaperMode(!cfg.apiKey || !cfg.apiSecret);
+      setIsPaperMode(!cfg.apiKey || !cfg.apiSecret || !cfg.apiKey.trim() || !cfg.apiSecret.trim());
 
       setLastPrice(price);
       setPriceChange(changePct);
@@ -940,11 +943,19 @@ export default function App() {
         {/* Mobile header */}
         <header className="lg:hidden border-b border-slate-800 bg-slate-950/80 backdrop-blur-xl sticky top-0 z-40">
           <div className="px-4 py-3 flex items-center justify-between gap-4">
-            <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-500 to-cyan-400 flex items-center justify-center shrink-0">
-                <Activity className="w-5 h-5 text-white" />
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setIsDrawerOpen(true)}
+                className="p-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-slate-800 transition"
+                aria-label="Open side menu"
+                title="Open Navigation Menu"
+              >
+                <Menu className="w-5 h-5" />
+              </button>
+              <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-blue-500 to-cyan-400 flex items-center justify-center shrink-0">
+                <Activity className="w-4 h-4 text-white" />
               </div>
-              <h1 className="text-base font-bold tracking-tight">
+              <h1 className="text-sm font-bold tracking-tight">
                 PatternHunter <span className="text-cyan-400">AI</span>
               </h1>
             </div>
@@ -1006,6 +1017,14 @@ export default function App() {
           <div className="border-b border-slate-800 bg-slate-900/50">
             <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between gap-4 flex-wrap">
               <div className="flex items-center gap-3">
+                <button
+                  onClick={() => setIsDrawerOpen(true)}
+                  className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 transition-colors"
+                  aria-label="Open side menu"
+                  title="Open Navigation Menu"
+                >
+                  <Menu className="w-4 h-4" />
+                </button>
                 {/* Coin selector with search */}
                 <div className="relative">
                   <button
@@ -1568,6 +1587,14 @@ export default function App() {
         onClose={() => setSettingsOpen(false)}
         onOpenAutoTrade={() => setAutoTradeOpen(true)}
         onOpenVisionAI={() => setVisionAIOpen(true)}
+      />
+
+      {/* Sleek Side Drawer Navigation */}
+      <SideDrawer
+        isOpen={isDrawerOpen}
+        onClose={() => setIsDrawerOpen(false)}
+        activeTab={activeTab}
+        onSelectTab={(tab) => setActiveTab(tab)}
       />
     </div>
   );

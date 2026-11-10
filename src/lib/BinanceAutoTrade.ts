@@ -8,6 +8,7 @@
 
 import { getDecryptedApiKeys, storeEncryptedApiKeys } from "./CryptoSecurity";
 import { notifyTradeOpened, notifyTradeClosed, sendTelegramAlert } from "./TelegramService";
+import { pushNotificationService } from "./PushNotification";
 import { checkTradeExecutionAllowance, incrementDailyTradeCount } from "./SubscriptionManager";
 import { simulateSwarmDebate } from "./AgentSwarm";
 import { fetchCandles } from "./binance";
@@ -47,6 +48,9 @@ export interface ManagedTrade {
   takeProfitPrice: number;
   initialStopLoss: number;
   trailingSlTriggered: boolean;
+  trailingStage?: "INITIAL" | "BREAK_EVEN" | "TRAILING_ATR";
+  peakPrice?: number;
+  troughPrice?: number;
   atrAtEntry: number;
   liquidationPrice?: number;
   openTime: number;
@@ -55,6 +59,8 @@ export interface ManagedTrade {
   realizedPnl?: number;
   profitVaultAmount?: number;
   orderId?: string;
+  slOrderId?: string;
+  tpOrderId?: string;
   orderType: "LIMIT" | "MARKET";
 }
 
@@ -306,8 +312,15 @@ export function calculateAtrStopLoss(
 export function evaluateTrailingStopLoss(
   currentPrice: number,
   trade: ManagedTrade
-): { shouldUpdateSl: boolean; newStopLoss: number; reason?: string } {
-  if (!trade || trade.status !== "OPEN" || trade.trailingSlTriggered) {
+): {
+  shouldUpdateSl: boolean;
+  newStopLoss: number;
+  newTrailingStage?: "BREAK_EVEN" | "TRAILING_ATR";
+  newPeak?: number;
+  newTrough?: number;
+  reason?: string;
+} {
+  if (!trade || trade.status !== "OPEN") {
     return { shouldUpdateSl: false, newStopLoss: trade.stopLossPrice };
   }
 
@@ -316,23 +329,62 @@ export function evaluateTrailingStopLoss(
     return { shouldUpdateSl: false, newStopLoss: trade.stopLossPrice };
   }
 
+  const safeAtr = trade.atrAtEntry > 0 ? trade.atrAtEntry : trade.entryPrice * 0.015;
+  const trailDistance = 1.5 * safeAtr;
+
   if (trade.direction === "LONG") {
+    const currentPeak = Math.max(trade.peakPrice ?? trade.entryPrice, currentPrice);
     const currentReward = currentPrice - trade.entryPrice;
-    if (currentReward >= initialRisk && trade.stopLossPrice < trade.entryPrice) {
-      return {
-        shouldUpdateSl: true,
-        newStopLoss: trade.entryPrice,
-        reason: "1:1 RR target achieved. Stop Loss moved to Break-Even (Entry Price).",
-      };
+
+    // Check if 1:1 RR reached
+    if (currentReward >= initialRisk) {
+      // Once break-even reached, also check dynamic 1.5x ATR trailing from peak
+      const dynamicTrailSl = currentPeak - trailDistance;
+      // Stop loss should be at least break-even (entryPrice), and trail up if dynamicTrailSl > entryPrice
+      const targetSl = Math.max(trade.entryPrice, dynamicTrailSl);
+
+      if (targetSl > trade.stopLossPrice) {
+        const stage = targetSl > trade.entryPrice ? "TRAILING_ATR" : "BREAK_EVEN";
+        const reason =
+          stage === "TRAILING_ATR"
+            ? `Price reached peak $${currentPeak.toFixed(2)}. SL trailed by 1.5x ATR to $${targetSl.toFixed(2)}.`
+            : "1:1 RR target achieved. Stop Loss moved to Break-Even (Entry Price).";
+
+        return {
+          shouldUpdateSl: true,
+          newStopLoss: Number(targetSl.toFixed(4)),
+          newTrailingStage: stage,
+          newPeak: currentPeak,
+          reason,
+        };
+      }
     }
   } else {
+    // SHORT direction
+    const currentTrough = Math.min(trade.troughPrice ?? trade.entryPrice, currentPrice);
     const currentReward = trade.entryPrice - currentPrice;
-    if (currentReward >= initialRisk && trade.stopLossPrice > trade.entryPrice) {
-      return {
-        shouldUpdateSl: true,
-        newStopLoss: trade.entryPrice,
-        reason: "1:1 RR target achieved. Stop Loss moved to Break-Even (Entry Price).",
-      };
+
+    // Check if 1:1 RR reached
+    if (currentReward >= initialRisk) {
+      const dynamicTrailSl = currentTrough + trailDistance;
+      // Stop loss should be at least break-even (entryPrice), and trail down if dynamicTrailSl < entryPrice
+      const targetSl = Math.min(trade.entryPrice, dynamicTrailSl);
+
+      if (targetSl < trade.stopLossPrice) {
+        const stage = targetSl < trade.entryPrice ? "TRAILING_ATR" : "BREAK_EVEN";
+        const reason =
+          stage === "TRAILING_ATR"
+            ? `Price reached trough $${currentTrough.toFixed(2)}. SL trailed by 1.5x ATR to $${targetSl.toFixed(2)}.`
+            : "1:1 RR target achieved. Stop Loss moved to Break-Even (Entry Price).";
+
+        return {
+          shouldUpdateSl: true,
+          newStopLoss: Number(targetSl.toFixed(4)),
+          newTrailingStage: stage,
+          newTrough: currentTrough,
+          reason,
+        };
+      }
     }
   }
 
@@ -915,6 +967,8 @@ export class BinanceAutoTradeEngine {
 
     // Execute real order on Binance API if live credentials exist
     let orderId = "";
+    let slOrderId: string | undefined;
+    let tpOrderId: string | undefined;
     const hasLiveCreds = Boolean(this.config.apiKey?.trim() && this.config.apiSecret?.trim());
 
     if (hasLiveCreds) {
@@ -939,12 +993,21 @@ export class BinanceAutoTradeEngine {
 
       // Place exchange-native Stop Loss order
       if (marketType === "Futures") {
-        await this.placeFuturesStopLossOrder({
+        const slRes = await this.placeFuturesStopLossOrder({
           symbol: params.symbol,
           side: direction === "LONG" ? "SELL" : "BUY",
           stopPrice: stopLossPrice,
           quantity: sizing.quantity,
-        }).catch(() => {});
+        }).catch(() => null);
+        if (slRes && slRes.orderId) slOrderId = String(slRes.orderId);
+
+        const tpRes = await this.placeFuturesTakeProfitOrder({
+          symbol: params.symbol,
+          side: direction === "LONG" ? "SELL" : "BUY",
+          stopPrice: takeProfitPrice,
+          quantity: sizing.quantity,
+        }).catch(() => null);
+        if (tpRes && tpRes.orderId) tpOrderId = String(tpRes.orderId);
       }
     } else {
       // Paper or sandbox simulation
@@ -964,11 +1027,16 @@ export class BinanceAutoTradeEngine {
       takeProfitPrice,
       initialStopLoss: stopLossPrice,
       trailingSlTriggered: false,
+      trailingStage: "INITIAL",
+      peakPrice: params.entryPrice,
+      troughPrice: params.entryPrice,
       atrAtEntry: params.atrValue,
       liquidationPrice,
       openTime: Date.now(),
       status: "OPEN",
       orderId,
+      slOrderId,
+      tpOrderId,
       orderType: "LIMIT",
     };
 
@@ -978,7 +1046,7 @@ export class BinanceAutoTradeEngine {
     // Increment daily usage
     incrementDailyTradeCount();
 
-    // Telegram Bot Alert
+    // Telegram Bot Alert & Native Push Notification
     notifyTradeOpened({
       symbol: trade.symbol,
       direction: trade.direction,
@@ -988,6 +1056,14 @@ export class BinanceAutoTradeEngine {
       marketType: trade.marketType,
       stopLossPrice: trade.stopLossPrice,
       takeProfitPrice: trade.takeProfitPrice,
+    }).catch(() => {});
+
+    pushNotificationService.notifyTradeExecution({
+      symbol: trade.symbol,
+      direction: trade.direction,
+      entryPrice: trade.entryPrice,
+      source: "Auto-Trade Engine",
+      mode: hasLiveCreds ? "REAL" : "PAPER",
     }).catch(() => {});
 
     return {
@@ -1072,6 +1148,66 @@ export class BinanceAutoTradeEngine {
     }
   }
 
+  private async placeFuturesTakeProfitOrder(params: {
+    symbol: string;
+    side: "BUY" | "SELL";
+    stopPrice: number;
+    quantity: number;
+  }): Promise<{ orderId?: string | number; error?: string }> {
+    const timestamp = Date.now();
+    const query = [
+      `symbol=${params.symbol}`,
+      `side=${params.side}`,
+      `type=TAKE_PROFIT_MARKET`,
+      `stopPrice=${params.stopPrice}`,
+      `closePosition=true`,
+      `timestamp=${timestamp}`,
+    ].join("&");
+
+    const signature = await signQuery(query, this.config.apiSecret);
+
+    try {
+      const res = await proxyBinanceFetch({
+        target: "futures",
+        path: "/fapi/v1/order",
+        method: "POST",
+        body: `${query}&signature=${signature}`,
+        apiKey: this.config.apiKey,
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        return { error: data.msg || "Take Profit order placement failed" };
+      }
+      return { orderId: data.orderId };
+    } catch (e) {
+      return { error: e instanceof Error ? e.message : "Network error" };
+    }
+  }
+
+  /**
+   * OCO Cancel Helper: Cancels a specific order on Binance Futures or Spot
+   */
+  public async cancelExchangeOrder(symbol: string, orderId: string, marketType: MarketType = "Futures"): Promise<boolean> {
+    if (!this.config.apiKey || !this.config.apiSecret || !orderId) return true;
+    try {
+      const timestamp = Date.now();
+      const path = marketType === "Futures" ? "/fapi/v1/order" : "/api/v3/order";
+      const query = `symbol=${symbol}&orderId=${orderId}&timestamp=${timestamp}`;
+      const signature = await signQuery(query, this.config.apiSecret);
+
+      const res = await proxyBinanceFetch({
+        target: marketType === "Futures" ? "futures" : "spot",
+        path,
+        method: "DELETE",
+        query: `${query}&signature=${signature}`,
+        apiKey: this.config.apiKey,
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
   public async closeExchangePosition(trade: ManagedTrade): Promise<boolean> {
     if (!this.config.apiKey || !this.config.apiSecret) return true;
 
@@ -1125,12 +1261,28 @@ export class BinanceAutoTradeEngine {
     for (const trade of this.trades) {
       if (trade.status !== "OPEN" || trade.symbol !== symbol) continue;
 
-      if (this.config.trailingSlEnabled && !trade.trailingSlTriggered) {
+      // Update peak / trough
+      if (trade.direction === "LONG") {
+        trade.peakPrice = Math.max(trade.peakPrice ?? trade.entryPrice, currentPrice);
+      } else {
+        trade.troughPrice = Math.min(trade.troughPrice ?? trade.entryPrice, currentPrice);
+      }
+
+      if (this.config.trailingSlEnabled) {
         const trailingEval = evaluateTrailingStopLoss(currentPrice, trade);
         if (trailingEval.shouldUpdateSl) {
           trade.stopLossPrice = trailingEval.newStopLoss;
           trade.trailingSlTriggered = true;
+          if (trailingEval.newTrailingStage) trade.trailingStage = trailingEval.newTrailingStage;
+          if (trailingEval.newPeak) trade.peakPrice = trailingEval.newPeak;
+          if (trailingEval.newTrough) trade.troughPrice = trailingEval.newTrough;
           updatedTrades.push({ ...trade });
+
+          pushNotificationService.notifyTrailingStopMoved({
+            symbol: trade.symbol,
+            newStopLoss: trailingEval.newStopLoss,
+            stage: trailingEval.newTrailingStage || "BREAK_EVEN",
+          }).catch(() => {});
         }
       }
 
@@ -1182,6 +1334,17 @@ export class BinanceAutoTradeEngine {
     const rawPnl = priceDiff * trade.quantity;
     const realizedPnl = trade.marketType === "Futures" ? rawPnl * trade.leverage : rawPnl;
     trade.realizedPnl = Number(realizedPnl.toFixed(2));
+
+    // OCO Logic: When TP is hit, automatically cancel associated SL order; if SL is hit, cancel TP order
+    if (exitReason === "TP") {
+      if (trade.slOrderId) {
+        this.cancelExchangeOrder(trade.symbol, trade.slOrderId, trade.marketType).catch(() => {});
+      }
+    } else if (exitReason === "SL") {
+      if (trade.tpOrderId) {
+        this.cancelExchangeOrder(trade.symbol, trade.tpOrderId, trade.marketType).catch(() => {});
+      }
+    }
 
     // Execute exchange-level close if live trade
     if (this.config.apiKey && this.config.apiSecret) {
@@ -1256,7 +1419,7 @@ export class BinanceAutoTradeEngine {
 
     this.saveTrades();
 
-    // Telegram Bot Alert on Trade Closed
+    // Telegram Bot Alert & Native Push on Trade Closed / OCO
     notifyTradeClosed({
       symbol: trade.symbol,
       direction: trade.direction,
@@ -1266,6 +1429,15 @@ export class BinanceAutoTradeEngine {
       profitVaultAmount: trade.profitVaultAmount,
       exitReason,
     }).catch(() => {});
+
+    if (exitReason === "TP" || exitReason === "SL") {
+      pushNotificationService.notifyOcoTriggered({
+        symbol: trade.symbol,
+        exitReason,
+        exitPrice: trade.closePrice,
+        pnl: trade.realizedPnl ?? 0,
+      }).catch(() => {});
+    }
 
     return trade;
   }

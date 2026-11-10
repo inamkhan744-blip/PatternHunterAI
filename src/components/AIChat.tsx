@@ -108,11 +108,17 @@ export default function AIChat({
         throw new Error(invokeError.message || "AI backend service error");
       }
 
-      if (data?.unavailable || !data?.response) {
+      // Check wrapped format { success: true, data: { ... } } or { response: "..." }
+      const resolvedReply =
+        data?.response ||
+        (data?.data && typeof data.data === "string" ? data.data : data?.data?.response || data?.data?.explanation || data?.data?.text) ||
+        null;
+
+      if (data?.unavailable || !resolvedReply) {
         throw new Error(data?.error || "AI edge unavailable");
       }
 
-      const replyText: string = data.response;
+      const replyText: string = resolvedReply;
       const actionTag = replyText.match(/\[ACTION:show_chart:(\w+)\]/);
       if (actionTag) {
         const sym = actionTag[1].toUpperCase();

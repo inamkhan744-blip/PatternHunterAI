@@ -38,8 +38,9 @@ export function SideDrawer({ isOpen, onClose, activeTab, onSelectTab }: SideDraw
         { id: "arbitrage" as AppTab, label: "Cross-DEX Arbitrage", icon: ArrowRightLeft },
         { id: "backtest" as AppTab, label: "Backtest Lab", icon: SlidersHorizontal },
         { id: "grid" as AppTab, label: "Grid Bot Engine", icon: Grid },
+        { id: "dca" as AppTab, label: "DCA Bot Engine", icon: SlidersHorizontal },
         { id: "strategy" as AppTab, label: "Strategy Builder", icon: Compass },
-        { id: "copy" as AppTab, label: "Copy Trading", icon: Bot },
+        { id: "copy" as AppTab, label: "Strategy Marketplace & Copy", icon: Bot },
       ],
     },
     {

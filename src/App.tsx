@@ -75,6 +75,7 @@ import SettingsModal from "./components/SettingsModal";
 import OrderBook from "./components/OrderBook";
 import PnLCalendar from "./components/PnLCalendar";
 import GridBotUI from "./components/GridBotUI";
+import TradingJournal from "./components/TradingJournal";
 import DCABotUI from "./components/DCABotUI";
 import CopyTradingTab from "./components/CopyTradingTab";
 import StrategyBuilder from "./components/StrategyBuilder";
@@ -986,8 +987,8 @@ export default function App() {
   }, [effectiveIsPro, isAdmin, scanResults.length, scanning, runScan]);
 
   const handleFreeScan = useCallback(() => {
-    if (canScan()) runScan();
-  }, [runScan]);
+    if (effectiveIsPro || isAdmin || canScan()) runScan();
+  }, [effectiveIsPro, isAdmin, runScan]);
 
   const selectCoinFromScan = useCallback((binanceSymbol: string) => {
     const coin = ALL_COINS.find((c) => c.binanceSymbol === binanceSymbol);
@@ -1672,6 +1673,12 @@ export default function App() {
             </div>
           )}
 
+          {activeTab === "journal" && (
+            <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6">
+              <TradingJournal />
+            </div>
+          )}
+
           {/* New Active Positions & Trade History Tab */}
           {activeTab === "positions" && (
             <ActivePositions
@@ -1686,6 +1693,7 @@ export default function App() {
               onSelectCoin={selectCoinFromTab}
               watchlistSymbols={watchSymbols}
               onToggleWatch={toggleWatch}
+              isPro={effectiveIsPro || isAdmin}
             />
           )}
 

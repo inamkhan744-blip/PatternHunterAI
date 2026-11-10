@@ -11,6 +11,10 @@ import {
   Layers,
   ArrowRightLeft,
   Compass,
+  List,
+  BookOpen,
+  Wallet,
+  BookMarked,
 } from "lucide-react";
 import type { AppTab } from "../types";
 
@@ -30,6 +34,8 @@ export function SideDrawer({ isOpen, onClose, activeTab, onSelectTab }: SideDraw
       items: [
         { id: "chart" as AppTab, label: "Chart Analysis", icon: TrendingUp },
         { id: "positions" as AppTab, label: "Active Positions & Ledger", icon: Layers },
+        { id: "depth" as AppTab, label: "Order Book & Market Depth", icon: BookOpen },
+        { id: "portfolio" as AppTab, label: "Portfolio & PnL Calendar", icon: Wallet },
       ],
     },
     {
@@ -44,12 +50,14 @@ export function SideDrawer({ isOpen, onClose, activeTab, onSelectTab }: SideDraw
       ],
     },
     {
-      title: "Market Intelligence",
+      title: "Market Intelligence & Journal",
       items: [
+        { id: "scanner" as AppTab, label: "Market Pattern Scanner", icon: List },
         { id: "watchlist" as AppTab, label: "Asset Watchlist", icon: Bookmark },
+        { id: "journal" as AppTab, label: "AI Trading Journal", icon: BookMarked },
         { id: "alerts" as AppTab, label: "Price & Confluence Alerts", icon: Bell },
         { id: "chat" as AppTab, label: "AI Trading Agent Chat", icon: MessageSquare },
-        { id: "history" as AppTab, label: "Trade Execution History", icon: History },
+        { id: "history" as AppTab, label: "Signal Execution History", icon: History },
       ],
     },
   ];

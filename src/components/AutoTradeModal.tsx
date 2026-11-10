@@ -70,8 +70,8 @@ export default function AutoTradeModal({
   currentAtr,
 }: Props) {
   const { user } = useAuth();
-  const isAdmin = useMemo(() => isUserAdmin(user?.email), [user?.email]);
-  const isPro = useMemo(() => isUserPro(user?.email, false), [user?.email]);
+  const isAdmin = useMemo(() => isUserAdmin(user?.email, user?.user_metadata), [user?.email, user?.user_metadata]);
+  const isPro = useMemo(() => isUserPro(user?.email, false, user?.user_metadata), [user?.email, user?.user_metadata]);
 
   const [config, setConfig] = useState<AutoTradeConfig>(autoTradeEngine.getConfig());
   const [circuitBreaker, setCircuitBreaker] = useState<CircuitBreakerState>(autoTradeEngine.getCircuitBreaker());

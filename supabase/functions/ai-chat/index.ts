@@ -5,7 +5,15 @@ const corsHeaders = {
 };
 
 const GEMINI_TIMEOUT_MS = 25000;
-const GEMINI_MODELS = ["gemini-3.1-flash-lite", "gemini-2.0-flash"];
+const GEMINI_MODELS = ["gemini-1.5-flash", "gemini-2.0-flash"];
+
+function stripMarkdownJson(raw: string): string {
+  return raw
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/g, "")
+    .replace(/```json\n?|```/g, "")
+    .trim();
+}
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
@@ -117,7 +125,7 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
           }
         );
 
-        const cleaned = text.replace(/```json\n?|```/g, "").trim();
+        const cleaned = stripMarkdownJson(text);
         const parsed = JSON.parse(cleaned);
 
         return new Response(
@@ -173,7 +181,7 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
           }
         );
 
-        const cleaned = text.replace(/```json\n?|```/g, "").trim();
+        const cleaned = stripMarkdownJson(text);
         const parsed = JSON.parse(cleaned);
 
         return new Response(
@@ -249,7 +257,7 @@ Respond STRICTLY in valid JSON matching this schema:
           }
         );
 
-        const cleaned = text.replace(/```json\n?|```/g, "").trim();
+        const cleaned = stripMarkdownJson(text);
         const parsed = JSON.parse(cleaned);
 
         return new Response(

@@ -32,7 +32,7 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    // Helper to query Gemini with fallback array ["gemini-3.1-flash-lite", "gemini-2.0-flash"]
+    // Helper to query Gemini with fallback array ["gemini-1.5-flash", "gemini-2.0-flash"]
     async function callGemini(contents: unknown[], generationConfig?: Record<string, unknown>) {
       let lastError = "";
       for (const model of GEMINI_MODELS) {

@@ -1,18 +1,25 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { Calculator, Gauge, AlertTriangle } from "lucide-react";
 
 interface Props {
   entryPrice: number | null;
+  direction?: "long" | "short";
 }
 
-export default function RiskCalculator({ entryPrice: defaultEntry }: Props) {
+export default function RiskCalculator({ entryPrice: defaultEntry, direction: propDirection }: Props) {
   const [balance, setBalance] = useState("10000");
   const [riskPct, setRiskPct] = useState("1.5");
   const [entryPriceInput, setEntryPriceInput] = useState(defaultEntry ? String(defaultEntry) : "65000");
   const [stopLossInput, setStopLossInput] = useState(defaultEntry ? String(defaultEntry * 0.98) : "63700");
   const [takeProfitInput, setTakeProfitInput] = useState(defaultEntry ? String(defaultEntry * 1.04) : "67600");
   const [leverage, setLeverage] = useState("5");
-  const [direction, setDirection] = useState<"long" | "short">("long");
+  const [direction, setDirection] = useState<"long" | "short">(propDirection || "long");
+
+  useEffect(() => {
+    if (propDirection) {
+      setDirection(propDirection);
+    }
+  }, [propDirection]);
 
   const parsedBalance = parseFloat(balance) || 10000;
   const parsedRisk = Math.min(Math.max(parseFloat(riskPct) || 1, 0.1), 10);

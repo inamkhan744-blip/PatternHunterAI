@@ -231,6 +231,8 @@ export default function App() {
     typeof localStorage !== "undefined" &&
     Number(localStorage.getItem("fortress_autopilot_execution_lock") || 0) > Date.now()
   );
+  const autoPilotArmedTimestamp = useRef<number>(Date.now());
+  const lastProcessedCandleTimestamp = useRef<number>(0);
   const [rsiValue, setRsiValue] = useState<number | null>(null);
   const [trendValue, setTrendValue] = useState<string | null>(null);
   const [fearGreedValue, setFearGreedValue] = useState<number | null>(null);
@@ -638,23 +640,53 @@ export default function App() {
       const config = autoTradeEngine.getConfig();
       if (!config.autoPilotEnabled) return;
 
+      // Prevent instant execution using stale signals from the current candle when Auto-Pilot is armed:
+      // Must only execute when a new pattern is detected or a fresh signal is generated after arming.
+      if (candles.length < 5) return;
+      const latestCandle = candles[candles.length - 1];
+      const candleTimeMs = latestCandle.time > 1e11 ? latestCandle.time : latestCandle.time * 1000;
+      const isFreshCandle = candleTimeMs > autoPilotArmedTimestamp.current && latestCandle.time !== lastProcessedCandleTimestamp.current;
+
+      // Check if an active position already exists for this symbol (Execution Lock)
+      if (tradeManager.hasActivePosition(selectedCoin.binanceSymbol)) {
+        return;
+      }
+
       // Check memory and persistent lock
       const storedLock = localStorage.getItem("fortress_autopilot_execution_lock");
       const isPersistentlyLocked = storedLock ? parseInt(storedLock, 10) > Date.now() : false;
       if (autoTradeExecutionLock.current || isPersistentlyLocked) return;
-      if (candles.length < 5) return;
 
       const smcData = scanSMC(candles);
       const confluence = evaluateConfluence(candles, smcData, htfTrendState);
 
-      // Auto-Pilot Execution hurdle: score > 85
-      if (confluence && confluence.score > 85) {
+      // Auto-Pilot Execution hurdle: fresh signal with score > 85
+      if (isFreshCandle && confluence && confluence.score > 85) {
+        // Dynamic direction determination:
+        // If Pattern = Bearish OR AI Verdict / Confluence setupBias = SHORT / Bearish -> SHORT
+        // If Pattern = Bullish OR AI Verdict / Confluence setupBias = LONG / Bullish -> LONG
+        let dynamicDirection: "LONG" | "SHORT" = "LONG";
+        if (pattern?.direction === "bearish" || confluence.setupBias === "Bearish") {
+          dynamicDirection = "SHORT";
+        } else if (pattern?.direction === "bullish" || confluence.setupBias === "Bullish") {
+          dynamicDirection = "LONG";
+        }
+
+        // Check against trade direction mode setting
+        const mode = config.tradeDirectionMode || "BOTH";
+        if (mode === "LONG_ONLY" && dynamicDirection === "SHORT") {
+          return;
+        }
+        if (mode === "SHORT_ONLY" && dynamicDirection === "LONG") {
+          return;
+        }
+
+        lastProcessedCandleTimestamp.current = latestCandle.time;
         autoTradeExecutionLock.current = true;
         const lockExpiration = Date.now() + 10000;
         localStorage.setItem("fortress_autopilot_execution_lock", String(lockExpiration));
 
         const atrVal = currentAtr || (price * 0.02);
-        const direction = confluence.setupBias === "Bearish" ? "SHORT" : "LONG";
 
         // Check if demo/paper trading or live execution
         if (!config.apiKey || !config.apiSecret) {
@@ -662,7 +694,7 @@ export default function App() {
             symbol: selectedCoin.binanceSymbol,
             entryPrice: price,
             atrValue: atrVal,
-            direction,
+            direction: dynamicDirection,
             marketType: config.marketType,
             leverage: config.leverage,
             riskPercent: config.riskPercent,
@@ -696,7 +728,7 @@ export default function App() {
             symbol: selectedCoin.binanceSymbol,
             entryPrice: price,
             atrValue: atrVal,
-            direction,
+            direction: dynamicDirection,
             marketType: config.marketType,
             userEmail: user?.email,
             isPro: effectiveIsPro || isAdmin,
@@ -736,7 +768,7 @@ export default function App() {
     });
 
     return () => unsub();
-  }, [user, selectedCoin.binanceSymbol, candles, htfTrendState, currentAtr, effectiveIsPro, isAdmin]);
+  }, [user, selectedCoin.binanceSymbol, candles, pattern, htfTrendState, currentAtr, effectiveIsPro, isAdmin]);
 
   useEffect(() => {
     if (!user) return;
@@ -981,9 +1013,15 @@ export default function App() {
     }
     const currentCfg = autoTradeEngine.getConfig();
     const nextState = !currentCfg.autoPilotEnabled;
+    if (nextState) {
+      autoPilotArmedTimestamp.current = Date.now();
+      if (candles.length > 0) {
+        lastProcessedCandleTimestamp.current = candles[candles.length - 1].time;
+      }
+    }
     const updated = autoTradeEngine.saveConfig({ autoPilotEnabled: nextState });
     setAutoPilotActive(updated.autoPilotEnabled);
-  }, [effectiveIsPro, isAdmin]);
+  }, [effectiveIsPro, isAdmin, candles]);
 
   const inWatch = watchSymbols.has(selectedCoin.binanceSymbol);
 

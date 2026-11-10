@@ -297,7 +297,10 @@ export default function PatternPanel({
           </div>
         )}
 
-        <RiskCalculator entryPrice={entryPrice ?? price} />
+        <RiskCalculator
+          entryPrice={entryPrice ?? price}
+          direction={pattern ? (pattern.direction === "bearish" ? "short" : "long") : undefined}
+        />
 
         {!error && !explanation && (
           <button

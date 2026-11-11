@@ -53,6 +53,7 @@ import {
   sendTelegramAlert,
   TelegramConfig,
 } from "../lib/TelegramService";
+import { liveWorkerLogStore, type WorkerLog } from "../lib/LiveWorkerLogStore";
 
 interface Props {
   open: boolean;
@@ -92,6 +93,16 @@ export default function AutoTradeModal({
   // Telegram State
   const [telegramConfig, setTgConfig] = useState<TelegramConfig>(loadTelegramConfig());
   const [telegramTesting, setTelegramTesting] = useState(false);
+
+  // Diagnostic Logs state
+  const [diagnosticLogs, setDiagnosticLogs] = useState<WorkerLog[]>(() => liveWorkerLogStore.getLogs());
+
+  useEffect(() => {
+    const unsub = liveWorkerLogStore.subscribe((logs) => {
+      setDiagnosticLogs(logs);
+    });
+    return () => unsub();
+  }, []);
 
   // Sync state on modal open
   useEffect(() => {
@@ -533,8 +544,8 @@ export default function AutoTradeModal({
               </div>
             </div>
 
-            {/* Paper Trading Mode Toggle & Max Daily Loss % Settings */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {/* Paper Trading Mode Toggle, Max Daily Loss %, and AI Fallback Mode Settings */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               {/* Paper Trading Mode Bar */}
               <div className="p-4 rounded-xl bg-[#0d121f] border border-amber-500/30 flex items-center justify-between">
                 <div>
@@ -567,14 +578,14 @@ export default function AutoTradeModal({
                 <div>
                   <div className="flex items-center gap-2">
                     <span className="text-xs font-bold text-slate-200 uppercase tracking-wider">
-                      Max Daily Loss Circuit Breaker
+                      Max Daily Loss
                     </span>
                     <span className="text-xs font-mono font-bold text-[#ff3344]">
                       {config.maxDailyLossPercent || 3.0}%
                     </span>
                   </div>
                   <p className="text-[11px] text-slate-400 font-sans mt-0.5">
-                    Auto-Pilot kills active trades and shuts off if daily drawdown hits this threshold.
+                    Auto-Pilot kills active trades and shuts off if daily drawdown hits threshold.
                   </p>
                 </div>
                 <div className="flex items-center gap-1.5">
@@ -592,6 +603,33 @@ export default function AutoTradeModal({
                     </button>
                   ))}
                 </div>
+              </div>
+
+              {/* Allow Trades if AI Fails (Fallback Mode) */}
+              <div className="p-4 rounded-xl bg-[#0d121f] border border-cyan-500/30 flex items-center justify-between">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-bold text-cyan-400 uppercase tracking-wider">
+                      Allow Trades if AI Fails
+                    </span>
+                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${config.allowAiFallback !== false ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40" : "bg-red-500/20 text-red-300 border border-red-500/40"}`}>
+                      {config.allowAiFallback !== false ? "FALLBACK MODE ON" : "STRICT AI ONLY"}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-400 font-sans mt-0.5">
+                    Falls back to Local Heuristic Engine (RSI, Confluence, Pattern) if Gemini API times out.
+                  </p>
+                </div>
+                <button
+                  onClick={() => handleConfigChange({ allowAiFallback: config.allowAiFallback === false ? true : false })}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition border ${
+                    config.allowAiFallback !== false
+                      ? "bg-cyan-500 text-slate-950 border-cyan-400 shadow-md shadow-cyan-950/50"
+                      : "bg-slate-900 text-slate-300 border-slate-700 hover:bg-slate-800"
+                  }`}
+                >
+                  {config.allowAiFallback !== false ? "Enabled" : "Disabled"}
+                </button>
               </div>
             </div>
 
@@ -1056,6 +1094,46 @@ export default function AutoTradeModal({
                   ))}
                 </div>
               )}
+            </div>
+
+            {/* Real-Time Diagnostic Logs & Terminal Stream */}
+            <div className="p-4 rounded-xl bg-[#03060c] border border-cyan-500/30 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-cyan-300 uppercase tracking-wider flex items-center gap-2">
+                  <Zap className="w-3.5 h-3.5 text-cyan-400 animate-pulse" />
+                  Auto-Pilot Live Worker Diagnostic Log Stream
+                </span>
+                <button
+                  onClick={() => liveWorkerLogStore.clear()}
+                  className="text-[10px] text-slate-400 hover:text-white px-2 py-0.5 rounded bg-slate-900 border border-slate-800"
+                >
+                  Clear Logs
+                </button>
+              </div>
+
+              <div className="h-36 overflow-y-auto space-y-1 p-2 bg-[#020408] rounded-lg border border-slate-900 font-mono text-[11px]">
+                {diagnosticLogs.length === 0 ? (
+                  <div className="text-slate-500 text-center py-6">No worker events logged yet.</div>
+                ) : (
+                  diagnosticLogs.map((log) => {
+                    const color =
+                      log.level === "error"
+                        ? "text-[#ff3344]"
+                        : log.level === "warn"
+                        ? "text-amber-400"
+                        : log.level === "success"
+                        ? "text-[#00ff66]"
+                        : "text-slate-300";
+                    return (
+                      <div key={log.id} className="flex items-start gap-2 leading-tight">
+                        <span className="text-slate-600 shrink-0">[{log.timestamp}]</span>
+                        <span className={`font-semibold shrink-0 uppercase text-[10px] ${color}`}>[{log.level}]</span>
+                        <span className={color}>{log.message}</span>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
             </div>
 
             {/* API Credentials Input with AES-256 Protection */}

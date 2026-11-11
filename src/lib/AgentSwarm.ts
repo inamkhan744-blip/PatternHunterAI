@@ -17,6 +17,8 @@ export interface SwarmAgentMessage {
 
 import { supabase } from "./supabase";
 
+import { liveWorkerLogStore } from "./LiveWorkerLogStore";
+
 export interface SwarmDebateResult {
   symbol: string;
   price: number;
@@ -29,6 +31,7 @@ export interface SwarmDebateResult {
   messages: SwarmAgentMessage[];
   apiKeyUsed?: boolean;
   isRealAI?: boolean;
+  isFallback?: boolean;
 }
 
 export interface SwarmDebateParams {
@@ -42,6 +45,7 @@ export interface SwarmDebateParams {
   spreadPct?: number | null;
   atrValue?: number | null;
   confluenceScore?: number | null;
+  allowAiFallback?: boolean;
 }
 
 /**
@@ -174,57 +178,89 @@ export function simulateSwarmDebate(params: SwarmDebateParams): SwarmDebateResul
     messages: [bullMessage, bearMessage, riskMessage],
     apiKeyUsed: false,
     isRealAI: false,
+    isFallback: true,
+  };
+}
+
+/**
+ * Local Heuristic Engine for AI Swarm:
+ * Evaluates RSI, Confluence Score, and Pattern when Gemini API fails or times out.
+ * Instead of defaulting to NO-GO or failing completely, it dynamically verifies
+ * whether the setup qualifies for execution under deterministic quant rules.
+ */
+export function evaluateLocalHeuristicEngine(params: SwarmDebateParams): SwarmDebateResult {
+  const result = simulateSwarmDebate(params);
+  const allowFallback = params.allowAiFallback ?? true;
+
+  if (!allowFallback) {
+    return {
+      ...result,
+      verdict: "NO-GO",
+      verdictReason: "Gemini API unavailable and AI Fallback Mode is disabled in Auto-Pilot settings.",
+      isFallback: true,
+    };
+  }
+
+  // When fallback is allowed, simulateSwarmDebate computes the deterministic quantitative edge
+  return {
+    ...result,
+    isFallback: true,
   };
 }
 
 /**
  * Real AI Swarm Generator:
  * Invokes Supabase Edge Function 'ai-chat' with action: 'swarm'.
- * Gracefully falls back to simulateSwarmDebate without requiring user-provided Gemini API key.
+ * Gracefully falls back to Local Heuristic Engine without blocking trades when AI is unavailable.
  */
 export async function runRealSwarmDebate(params: SwarmDebateParams): Promise<SwarmDebateResult> {
-  const baseSim = simulateSwarmDebate(params);
-
   const now = new Date();
   const timeStr = (offsetSec: number) => {
     const d = new Date(now.getTime() + offsetSec * 1000);
     return d.toISOString().substring(11, 19);
   };
 
+  const executeEdgeFunction = async () => {
+    return await Promise.race([
+      supabase.functions.invoke("ai-chat", {
+        body: {
+          action: "swarm",
+          symbol: params.symbol,
+          price: params.price,
+          rsi: params.rsi,
+          trend: params.trend,
+          patternName: params.patternName,
+          patternDirection: params.patternDirection,
+          fearGreed: params.fearGreed,
+          atrValue: params.atrValue,
+          spreadPct: params.spreadPct,
+          confluenceScore: params.confluenceScore ?? 75,
+        },
+      }),
+      new Promise<{ data: null; error: Error }>((_, reject) =>
+        setTimeout(() => reject(new Error("AI Edge Function timeout (8s)")), 8000)
+      ),
+    ]);
+  };
+
   try {
-    const { data, error } = await supabase.functions.invoke("ai-chat", {
-      body: {
-        action: "swarm",
-        symbol: params.symbol,
-        price: params.price,
-        rsi: params.rsi,
-        trend: params.trend,
-        patternName: params.patternName,
-        patternDirection: params.patternDirection,
-        fearGreed: params.fearGreed,
-        atrValue: params.atrValue,
-        spreadPct: params.spreadPct,
-        confluenceScore: baseSim.confluenceScore,
-      },
-    });
+    const { data, error } = await executeEdgeFunction();
 
-    if (error) {
-      console.error("AgentSwarm invoke error:", error);
-      return baseSim;
-    }
-
-    if (!data) {
-      console.error("AgentSwarm empty data returned");
-      return baseSim;
+    if (error || !data || data.unavailable) {
+      const reason = error ? error.message : data?.error || "AI Edge unavailable";
+      liveWorkerLogStore.addLog(`Gemini API Failed / Unavailable (${reason}) - Activating Local Heuristic Fallback`, "warn", { symbol: params.symbol });
+      return evaluateLocalHeuristicEngine(params);
     }
 
     // Backend may return { success: true, data: { ...parsedAI } } or nested { data: { data: ... } } or raw object
     const parsed = (data.data?.data ? data.data.data : data.data) || (data.bullThesis ? data : null);
 
     if (!parsed) {
-      console.error("AgentSwarm unable to parse response data:", data);
-      return baseSim;
+      liveWorkerLogStore.addLog("Gemini response parse failed - Activating Local Heuristic Fallback", "warn", { symbol: params.symbol });
+      return evaluateLocalHeuristicEngine(params);
     }
+
+    const baseSim = simulateSwarmDebate(params);
 
     const bullMessage: SwarmAgentMessage = {
       agent: "Bull Agent",
@@ -266,9 +302,11 @@ export async function runRealSwarmDebate(params: SwarmDebateParams): Promise<Swa
       messages: [bullMessage, bearMessage, riskMessage],
       apiKeyUsed: true,
       isRealAI: true,
+      isFallback: false,
     };
   } catch (err) {
-    console.error("AgentSwarm debate error:", err);
-    return baseSim;
+    const errMsg = err instanceof Error ? err.message : String(err);
+    liveWorkerLogStore.addLog(`Gemini API Timeout/Error (${errMsg}) - Falling back to Local Heuristic Engine`, "warn", { symbol: params.symbol });
+    return evaluateLocalHeuristicEngine(params);
   }
 }

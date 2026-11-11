@@ -86,8 +86,9 @@ import StrategyBuilder from "./components/StrategyBuilder";
 import { gridTradingBot } from "./lib/GridBot";
 import { dcaBotEngine } from "./lib/DCABot";
 import { webhookService, type TradingViewSignal } from "./lib/WebhookService";
-import { isUserAdmin, isUserPro, ADMIN_BYPASS_EMAIL } from "./lib/SubscriptionManager";
+import { isUserAdmin, isUserPro, ADMIN_BYPASS_EMAIL, resetDailyTradeCountIfNewDay } from "./lib/SubscriptionManager";
 import { autoTradeEngine } from "./lib/BinanceAutoTrade";
+import { liveWorkerLogStore, type WorkerLog } from "./lib/LiveWorkerLogStore";
 import { getActiveExchange, setActiveExchange, SUPPORTED_EXCHANGES, type ExchangeId } from "./lib/MultiExchange";
 import { paperTradingEngine } from "./lib/PaperTrading";
 import { tradeManager } from "./lib/TradeManager";
@@ -226,6 +227,30 @@ export default function App() {
 
   // Auto-Pilot master state synced with autoTradeEngine
   const [autoPilotActive, setAutoPilotActive] = useState<boolean>(() => autoTradeEngine.getConfig().autoPilotEnabled);
+  const [autoPilotStatusText, setAutoPilotStatusText] = useState<string>("Status: Auto-Pilot Idle");
+
+  // Subscribe to liveWorkerLogStore to update autoPilotStatusText in real-time
+  useEffect(() => {
+    const unsub = liveWorkerLogStore.subscribe((_, latestLog) => {
+      if (latestLog?.message) {
+        if (latestLog.message.includes("Trade rejected:")) {
+          const reason = latestLog.message.replace("Trade rejected:", "Blocked by").trim();
+          setAutoPilotStatusText(`Status: ${reason}`);
+        } else if (latestLog.message.includes("Gemini API Failed") || latestLog.message.includes("Gemini API Timeout")) {
+          setAutoPilotStatusText("Status: Gemini API Failed - Waiting / Fallback");
+        } else if (latestLog.message.includes("Evaluating market: Waiting")) {
+          setAutoPilotStatusText("Status: Scanning for fresh signal");
+        } else if (latestLog.message.includes("Auto-Pilot Armed")) {
+          setAutoPilotStatusText("Status: Scanning for fresh signal");
+        } else if (latestLog.message.includes("Auto-Pilot Disarmed")) {
+          setAutoPilotStatusText("Status: Auto-Pilot Idle");
+        } else if (latestLog.message.includes("Trade executed") || latestLog.message.includes("Auto-Pilot Confluence")) {
+          setAutoPilotStatusText("Status: Trade Executed");
+        }
+      }
+    });
+    return () => unsub();
+  }, []);
 
   // System Status State: Live vs Paper mode, WebSocket ping latency
   const [isPaperMode, setIsPaperMode] = useState<boolean>(() => {
@@ -470,10 +495,14 @@ export default function App() {
     return () => window.removeEventListener("keydown", handleKey);
   }, [activeTab, selectedCoin, timeframe, loadData]);
 
+  // Periodic background candle updater and signal evaluation loop (runs autonomously every 4 seconds)
   useEffect(() => {
     if (!user) return;
     const interval = setInterval(async () => {
       try {
+        // Enforce daily reset check periodically
+        resetDailyTradeCountIfNewDay();
+
         const data = await fetchCandles(selectedCoin.binanceSymbol, 5, timeframe);
         if (data.length > 0) {
           const latest = data[data.length - 1];
@@ -481,11 +510,24 @@ export default function App() {
           setPriceChange(((latest.close - data[0].close) / data[0].close) * 100);
           const stats = await fetchMarketStats(selectedCoin.binanceSymbol);
           if (stats) setMarketStats(stats);
+
+          // Update latest candle in state if new candle closed
+          setCandles((prev) => {
+            if (prev.length === 0) return prev;
+            const lastPrev = prev[prev.length - 1];
+            if (lastPrev.time !== latest.time) {
+              const updated = [...prev.slice(1), latest];
+              const p = detectPattern(updated);
+              setPattern(p);
+              return updated;
+            }
+            return prev;
+          });
         }
       } catch {
         // silent
       }
-    }, 15000);
+    }, 4000);
     return () => clearInterval(interval);
   }, [user, selectedCoin, timeframe, activeTab]);
 
@@ -666,16 +708,33 @@ export default function App() {
 
       // Check if an active position already exists for this symbol (Execution Lock)
       if (tradeManager.hasActivePosition(selectedCoin.binanceSymbol)) {
+        liveWorkerLogStore.addLog("Trade rejected: Active position exists", "warn", { symbol: selectedCoin.binanceSymbol });
+        return;
+      }
+
+      // Check cooldown
+      const cooldown = autoTradeEngine.getPostLossCooldown();
+      if (cooldown.isActive) {
+        liveWorkerLogStore.addLog(`Trade rejected: Cooldown active (${cooldown.remainingSeconds}s remaining)`, "warn", { symbol: selectedCoin.binanceSymbol });
         return;
       }
 
       // Check memory and persistent lock
       const storedLock = localStorage.getItem("fortress_autopilot_execution_lock");
       const isPersistentlyLocked = storedLock ? parseInt(storedLock, 10) > Date.now() : false;
-      if (autoTradeExecutionLock.current || isPersistentlyLocked) return;
+      if (autoTradeExecutionLock.current || isPersistentlyLocked) {
+        liveWorkerLogStore.addLog("Trade rejected: Execution locked (flood debounce)", "info", { symbol: selectedCoin.binanceSymbol });
+        return;
+      }
 
       const smcData = scanSMC(candles);
       const confluence = evaluateConfluence(candles, smcData, htfTrendState);
+
+      if (!isFreshCandle) {
+        liveWorkerLogStore.addLog("Evaluating market: Waiting for fresh candle signal", "info", { symbol: selectedCoin.binanceSymbol });
+      } else if (confluence && confluence.score <= 85) {
+        liveWorkerLogStore.addLog(`Trade rejected: Confluence score ${confluence.score}/85`, "warn", { symbol: selectedCoin.binanceSymbol, score: confluence.score });
+      }
 
       // Auto-Pilot Execution hurdle: fresh signal with score > 85
       if (isFreshCandle && confluence && confluence.score > 85) {
@@ -692,9 +751,11 @@ export default function App() {
         // Check against trade direction mode setting
         const mode = config.tradeDirectionMode || "BOTH";
         if (mode === "LONG_ONLY" && dynamicDirection === "SHORT") {
+          liveWorkerLogStore.addLog("Trade rejected: Auto-Pilot trade direction mode is set to LONG ONLY", "warn", { symbol: selectedCoin.binanceSymbol });
           return;
         }
         if (mode === "SHORT_ONLY" && dynamicDirection === "LONG") {
+          liveWorkerLogStore.addLog("Trade rejected: Auto-Pilot trade direction mode is set to SHORT ONLY", "warn", { symbol: selectedCoin.binanceSymbol });
           return;
         }
 
@@ -1625,6 +1686,20 @@ export default function App() {
                   <Power className={`w-3.5 h-3.5 ${autoPilotActive ? "text-[#00ff66]" : "text-red-400"}`} />
                   <span>AUTO-PILOT: {autoPilotActive ? "ON" : "OFF"}</span>
                 </button>
+
+                {/* Real-Time Auto-Pilot Status Indicator */}
+                <div
+                  onClick={() => setAutoTradeOpen(true)}
+                  className={`hidden lg:flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border font-mono text-[11px] font-bold cursor-pointer transition select-none shrink-0 ${
+                    autoPilotActive
+                      ? "bg-slate-900/90 text-cyan-300 border-cyan-500/40 hover:border-cyan-400"
+                      : "bg-slate-900/50 text-slate-400 border-slate-800"
+                  }`}
+                  title="Click to open Auto-Trade Engine and review live diagnostic logs"
+                >
+                  <span className={`w-2 h-2 rounded-full ${autoPilotActive ? "bg-[#00ff66] animate-pulse" : "bg-slate-600"}`} />
+                  <span className="truncate max-w-[220px]">{autoPilotStatusText}</span>
+                </div>
 
                 {isAdmin && (
                   <div className="flex items-center gap-1 sm:gap-1.5 px-2 sm:px-3 py-1.5 rounded-lg bg-emerald-500/20 border border-emerald-500/50 text-[#00ff66] font-black text-[10px] sm:text-xs uppercase tracking-wider shadow-md shadow-emerald-950/30 font-mono shrink-0">

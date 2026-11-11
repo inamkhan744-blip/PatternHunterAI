@@ -35,6 +35,7 @@ import {
   Users,
   Cpu,
   Menu,
+  SlidersHorizontal,
 } from "lucide-react";
 import { SideDrawer } from "./components/SideDrawer";
 import CandlestickChart from "./components/CandlestickChart";
@@ -206,6 +207,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [adminModalOpen, setAdminModalOpen] = useState(false);
   const [leaderboardModalOpen, setLeaderboardModalOpen] = useState(false);
+  const [mobileToolsOpen, setMobileToolsOpen] = useState(false);
 
   // Admin and Pro derivation from server-side role & metadata
   const isAdmin = useMemo(() => {
@@ -1201,9 +1203,9 @@ export default function App() {
       {/* Main area */}
       <div className="flex-1 flex flex-col min-w-0">
         {/* Mobile header */}
-        <header className="lg:hidden border-b border-slate-800 bg-slate-950/80 backdrop-blur-xl sticky top-0 z-40">
-          <div className="px-4 py-3 flex items-center justify-between gap-4">
-            <div className="flex items-center gap-2">
+        <header className="lg:hidden border-b border-slate-800 bg-slate-950/80 backdrop-blur-xl sticky top-0 z-40 max-w-full overflow-hidden">
+          <div className="px-3 sm:px-4 py-2.5 flex items-center justify-between gap-2 max-w-full overflow-x-auto scrollbar-hide">
+            <div className="flex items-center gap-2 shrink-0">
               <button
                 onClick={() => setIsDrawerOpen(true)}
                 className="p-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-slate-800 transition"
@@ -1215,15 +1217,15 @@ export default function App() {
               <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-blue-500 to-cyan-400 flex items-center justify-center shrink-0">
                 <Activity className="w-4 h-4 text-white" />
               </div>
-              <h1 className="text-sm font-bold tracking-tight">
+              <h1 className="text-sm font-bold tracking-tight whitespace-nowrap">
                 PatternHunter <span className="text-cyan-400">AI</span>
               </h1>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-hide py-0.5 shrink-0">
               {/* Single Auto-Pilot Toggle on Mobile Header */}
               <button
                 onClick={handleHeaderToggleAutoPilot}
-                className={`px-2.5 py-1.5 rounded-lg text-xs font-black uppercase tracking-wider flex items-center gap-1.5 border font-mono ${
+                className={`px-2 py-1.5 rounded-lg text-xs font-black uppercase tracking-wider flex items-center gap-1 border font-mono shrink-0 ${
                   autoPilotActive
                     ? "bg-emerald-500/20 text-[#00ff66] border-emerald-400 animate-pulse"
                     : "bg-red-500/10 text-red-400 border-red-500/40"
@@ -1235,32 +1237,32 @@ export default function App() {
 
               <button
                 onClick={() => setVisionAIOpen(true)}
-                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold transition-colors"
+                className="flex items-center gap-1 px-2 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold transition-colors shrink-0"
                 title="Vision AI Chart Upload"
               >
                 <Eye className="w-3.5 h-3.5 text-white" />
               </button>
               <button
                 onClick={() => setSettingsOpen(true)}
-                className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 transition-colors"
+                className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 transition-colors shrink-0"
                 title="Settings & Install PWA"
               >
                 <SettingsIcon className="w-4 h-4 text-cyan-400" />
               </button>
               {isAdmin ? (
-                <div className="px-2.5 py-1.5 rounded-lg bg-emerald-500/20 border border-emerald-500/50 text-[#00ff66] text-xs font-black flex items-center gap-1 font-mono">
-                  <span>👑 ADMIN MODE</span>
+                <div className="px-2 py-1.5 rounded-lg bg-emerald-500/20 border border-emerald-500/50 text-[#00ff66] text-xs font-black flex items-center gap-1 font-mono shrink-0">
+                  <span>👑 ADMIN</span>
                 </div>
               ) : !effectiveIsPro ? (
                 <button
                   onClick={() => window.open("https://inamkhan08.gumroad.com/l/idbxpj", "_blank", "noopener,noreferrer")}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-900 text-xs font-bold transition-all"
+                  className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-900 text-xs font-bold transition-all shrink-0 whitespace-nowrap"
                 >
                   <Crown className="w-3.5 h-3.5" />
-                  <span>Go Pro</span>
+                  <span>Pro</span>
                 </button>
               ) : (
-                <div className="px-2.5 py-1.5 rounded-lg bg-cyan-500/20 border border-cyan-500/40 text-cyan-300 text-xs font-bold flex items-center gap-1 font-mono">
+                <div className="px-2 py-1.5 rounded-lg bg-cyan-500/20 border border-cyan-500/40 text-cyan-300 text-xs font-bold flex items-center gap-1 font-mono shrink-0">
                   <Crown className="w-3.5 h-3.5 text-amber-400" />
                   <span>Pro</span>
                 </div>
@@ -1276,30 +1278,30 @@ export default function App() {
         {activeTab === "chart" && (
           <div className="border-b border-slate-800 bg-slate-900/50">
             <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between gap-4 flex-wrap">
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2 sm:gap-3 flex-wrap max-w-full overflow-x-auto scrollbar-hide py-1">
                 <button
                   onClick={() => setIsDrawerOpen(true)}
-                  className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 transition-colors"
+                  className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 transition-colors shrink-0"
                   aria-label="Open side menu"
                   title="Open Navigation Menu"
                 >
                   <Menu className="w-4 h-4" />
                 </button>
                 {/* Coin selector with search */}
-                <div className="relative">
+                <div className="relative shrink-0">
                   <button
                     onClick={() => { setCoinDropdownOpen((v) => !v); setCoinSearch(""); }}
-                    className="flex items-center gap-3 px-4 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors"
+                    className="flex items-center gap-2 sm:gap-3 px-3 sm:px-4 py-2 sm:py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors"
                   >
-                    <div className="w-7 h-7 rounded-full bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center text-xs font-bold shrink-0">
+                    <div className="w-6 sm:w-7 h-6 sm:h-7 rounded-full bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center text-xs font-bold shrink-0">
                       {selectedCoin.symbol.slice(0, 3)}
                     </div>
                     <div className="text-left">
-                      <span className="text-sm font-semibold">
+                      <span className="text-xs sm:text-sm font-semibold">
                         {selectedCoin.symbol}<span className="text-slate-500">/USDT</span>
                       </span>
                     </div>
-                    <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform ${coinDropdownOpen ? "rotate-180" : ""}`} />
+                    <ChevronDown className={`w-3.5 sm:w-4 h-3.5 sm:h-4 text-slate-400 transition-transform ${coinDropdownOpen ? "rotate-180" : ""}`} />
                   </button>
 
                   {coinDropdownOpen && (
@@ -1357,11 +1359,11 @@ export default function App() {
                 {/* Star toggle */}
                 <button
                   onClick={() => toggleWatch(selectedCoin)}
-                  className="p-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors"
+                  className="p-2 sm:p-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors shrink-0"
                   title={inWatch ? "Remove from watchlist" : "Add to watchlist"}
                 >
                   <svg
-                    className={`w-4 h-4 ${inWatch ? "text-amber-400 fill-amber-400" : "text-slate-400"}`}
+                    className={`w-3.5 sm:w-4 h-3.5 sm:h-4 ${inWatch ? "text-amber-400 fill-amber-400" : "text-slate-400"}`}
                     fill={inWatch ? "currentColor" : "none"}
                     stroke="currentColor"
                     viewBox="0 0 24 24"
@@ -1372,14 +1374,14 @@ export default function App() {
                 </button>
 
                 {/* Timeframe selector */}
-                <div className="relative">
+                <div className="relative shrink-0">
                   <button
                     onClick={() => setTfDropdownOpen((v) => !v)}
-                    className="flex items-center gap-2 px-3 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors"
+                    className="flex items-center gap-1.5 sm:gap-2 px-2.5 sm:px-3 py-2 sm:py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors"
                   >
-                    <Clock className="w-4 h-4 text-cyan-400" />
-                    <span className="text-sm font-semibold">{tfLabel}</span>
-                    <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform ${tfDropdownOpen ? "rotate-180" : ""}`} />
+                    <Clock className="w-3.5 sm:w-4 h-3.5 sm:h-4 text-cyan-400" />
+                    <span className="text-xs sm:text-sm font-semibold">{tfLabel}</span>
+                    <ChevronDown className={`w-3.5 sm:w-4 h-3.5 sm:h-4 text-slate-400 transition-transform ${tfDropdownOpen ? "rotate-180" : ""}`} />
                   </button>
 
                   {tfDropdownOpen && (
@@ -1410,46 +1412,129 @@ export default function App() {
                 </div>
 
                 {/* Chart type toggle */}
-                <div className="flex items-center bg-slate-800 border border-slate-700 rounded-lg p-0.5">
+                <div className="flex items-center bg-slate-800 border border-slate-700 rounded-lg p-0.5 shrink-0">
                   <button
                     onClick={() => setChartType("candles")}
-                    className={`p-2 rounded-md transition-colors ${chartType === "candles" ? "bg-slate-700 text-cyan-400" : "text-slate-500 hover:text-slate-300"}`}
+                    className={`p-1.5 sm:p-2 rounded-md transition-colors ${chartType === "candles" ? "bg-slate-700 text-cyan-400" : "text-slate-500 hover:text-slate-300"}`}
                     title="Candlestick view"
                   >
-                    <ChartIcon className="w-4 h-4" />
+                    <ChartIcon className="w-3.5 sm:w-4 h-3.5 sm:h-4" />
                   </button>
                   <button
                     onClick={() => setChartType("line")}
-                    className={`p-2 rounded-md transition-colors ${chartType === "line" ? "bg-slate-700 text-cyan-400" : "text-slate-500 hover:text-slate-300"}`}
+                    className={`p-1.5 sm:p-2 rounded-md transition-colors ${chartType === "line" ? "bg-slate-700 text-cyan-400" : "text-slate-500 hover:text-slate-300"}`}
                     title="Line view"
                   >
-                    <LineIcon className="w-4 h-4" />
+                    <LineIcon className="w-3.5 sm:w-4 h-3.5 sm:h-4" />
                   </button>
                 </div>
               </div>
 
-              <div className="flex items-center gap-3 ml-auto">
+              <div className="flex items-center gap-2 sm:gap-3 ml-auto flex-wrap sm:flex-nowrap max-w-full overflow-x-auto scrollbar-hide py-1">
                 {lastPrice && (
-                  <div className="flex items-baseline gap-2">
-                    <span className="text-lg font-bold tracking-tight font-mono">{formatPrice(lastPrice)}</span>
-                    <span className={`text-sm font-medium flex items-center font-mono ${statsChange >= 0 ? "text-[#00ff66]" : "text-[#ff3344]"}`}>
+                  <div className="flex items-baseline gap-2 shrink-0">
+                    <span className="text-base sm:text-lg font-bold tracking-tight font-mono">{formatPrice(lastPrice)}</span>
+                    <span className={`text-xs sm:text-sm font-medium flex items-center font-mono ${statsChange >= 0 ? "text-[#00ff66]" : "text-[#ff3344]"}`}>
                       {statsChange >= 0 ? <ArrowUpRight className="w-3.5 h-3.5" /> : <ArrowDownRight className="w-3.5 h-3.5" />}
                       {statsChange >= 0 ? "+" : ""}{statsChange.toFixed(2)}%
                     </span>
                   </div>
                 )}
-                {/* Vision AI Chart Upload Button on Toolbar */}
+
+                {/* Mobile Tools Dropdown Toggle (md:hidden) */}
+                <div className="relative md:hidden shrink-0">
+                  <button
+                    onClick={() => setMobileToolsOpen((v) => !v)}
+                    className="px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-cyan-300 font-bold text-xs flex items-center gap-1 transition"
+                    title="Toggle System Tools & Badges"
+                  >
+                    <SlidersHorizontal className="w-3.5 h-3.5 text-cyan-400" />
+                    <span>Tools</span>
+                  </button>
+
+                  {mobileToolsOpen && (
+                    <>
+                      <div className="fixed inset-0 z-30" onClick={() => setMobileToolsOpen(false)} />
+                      <div className="absolute left-0 top-full mt-2 z-40 w-64 rounded-xl bg-slate-900 border border-slate-700 shadow-2xl p-3 space-y-2 font-mono text-xs">
+                        <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+                          <span className="text-[10px] uppercase font-bold text-slate-400">Trading Tools</span>
+                          <span className="text-[10px] text-cyan-400">{wsLatency}ms</span>
+                        </div>
+
+                        {/* Vision AI in Mobile Tools */}
+                        <button
+                          onClick={() => { setVisionAIOpen(true); setMobileToolsOpen(false); }}
+                          className="w-full px-2.5 py-2 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-600 text-slate-950 font-black text-xs uppercase flex items-center gap-2"
+                        >
+                          <Eye className="w-3.5 h-3.5" />
+                          <span>Vision AI Upload</span>
+                        </button>
+
+                        {/* AI Swarm in Mobile Tools */}
+                        <button
+                          onClick={() => { setSwarmOpen(true); setMobileToolsOpen(false); }}
+                          className="w-full px-2.5 py-2 rounded-lg bg-gradient-to-r from-emerald-500 to-green-600 text-slate-950 font-black text-xs uppercase flex items-center gap-2"
+                        >
+                          <Sparkles className="w-3.5 h-3.5 fill-slate-950" />
+                          <span>AI Swarm Debate</span>
+                        </button>
+
+                        {/* Exchange Switcher in Mobile Tools */}
+                        <div className="pt-1">
+                          <label className="text-[10px] text-slate-400 block mb-1">Exchange Router</label>
+                          <select
+                            value={currentExchange}
+                            onChange={(e) => {
+                              const nextEx = e.target.value as ExchangeId;
+                              setCurrentExchange(nextEx);
+                              setActiveExchange(nextEx);
+                            }}
+                            className="w-full px-2 py-1.5 rounded bg-slate-950 border border-slate-700 text-cyan-300 font-bold outline-none cursor-pointer"
+                          >
+                            {SUPPORTED_EXCHANGES.map((ex) => (
+                              <option key={ex.id} value={ex.id}>
+                                {ex.name} API
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        {/* Execution Mode Badge in Mobile Tools */}
+                        <div
+                          onClick={() => { setAutoTradeOpen(true); setMobileToolsOpen(false); }}
+                          className={`px-2 py-1.5 rounded border font-bold flex items-center justify-between cursor-pointer ${
+                            isPaperMode
+                              ? "bg-amber-500/10 text-amber-300 border-amber-500/40"
+                              : "bg-red-500/15 text-red-300 border-red-500/50"
+                          }`}
+                        >
+                          <span>MODE</span>
+                          <span>{isPaperMode ? "🟡 PAPER" : `🔴 LIVE ${currentExchange.toUpperCase()}`}</span>
+                        </div>
+
+                        <div className="flex items-center justify-between text-[11px] text-slate-400 px-1 pt-1">
+                          <span className="flex items-center gap-1">
+                            <Sparkles className="w-3 h-3 text-cyan-400" /> AI Edge
+                          </span>
+                          <span className="text-emerald-400 font-bold">ONLINE</span>
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
+
+                {/* Desktop Vision AI Button */}
                 <button
                   onClick={() => setVisionAIOpen(true)}
-                  className="px-3 py-1.5 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-slate-950 font-black text-xs uppercase tracking-wider flex items-center gap-1.5 shadow-md shadow-cyan-950/40 transition"
+                  className="hidden md:flex px-3 py-1.5 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-slate-950 font-black text-xs uppercase tracking-wider items-center gap-1.5 shadow-md shadow-cyan-950/40 transition shrink-0"
                   title="Analyze Chart Screenshot with Gemini Vision AI"
                 >
                   <Eye className="w-3.5 h-3.5 text-slate-950" />
                   <span>Vision AI</span>
                 </button>
 
-                {/* Multi-Exchange Switcher & System Status Badges */}
-                <div className="hidden sm:flex items-center gap-1.5 font-mono text-[10px]">
+                {/* Multi-Exchange Switcher & System Status Badges (Desktop) */}
+                <div className="hidden md:flex items-center gap-1.5 font-mono text-[10px] shrink-0">
                   {/* Exchange Selector Dropdown */}
                   <select
                     value={currentExchange}
@@ -1498,10 +1583,10 @@ export default function App() {
                   </span>
                 </div>
 
-                {/* AI Swarm Debater Button on the Chart */}
+                {/* AI Swarm Debater Button on the Chart (Desktop) */}
                 <button
                   onClick={() => setSwarmOpen(true)}
-                  className="px-2.5 py-1.5 rounded-lg bg-gradient-to-r from-emerald-500 to-green-600 hover:from-emerald-400 hover:to-green-500 text-slate-950 font-black text-xs uppercase tracking-wider flex items-center gap-1.5 shadow-md shadow-emerald-950/40 transition"
+                  className="hidden md:flex px-2.5 py-1.5 rounded-lg bg-gradient-to-r from-emerald-500 to-green-600 hover:from-emerald-400 hover:to-green-500 text-slate-950 font-black text-xs uppercase tracking-wider items-center gap-1.5 shadow-md shadow-emerald-950/40 transition shrink-0"
                   title="Launch 3-Agent AI Swarm Debate"
                 >
                   <Sparkles className="w-3.5 h-3.5 fill-slate-950" />
@@ -1520,7 +1605,7 @@ export default function App() {
                       alert("Emergency stop triggered. All auto-trading paused.");
                     }
                   }}
-                  className="px-2.5 py-1.5 rounded-lg bg-red-600/20 hover:bg-red-600/40 border border-red-500/60 text-[#ff3344] font-black text-xs uppercase tracking-wider flex items-center gap-1.5 transition font-mono shadow-sm shadow-red-950/40"
+                  className="px-2 sm:px-2.5 py-1.5 rounded-lg bg-red-600/20 hover:bg-red-600/40 border border-red-500/60 text-[#ff3344] font-black text-[11px] sm:text-xs uppercase tracking-wider flex items-center gap-1 sm:gap-1.5 transition font-mono shadow-sm shadow-red-950/40 shrink-0"
                   title="Global Emergency Kill Switch — Halts Auto-Pilot & cancels open orders"
                 >
                   <Power className="w-3.5 h-3.5 text-red-400" />
@@ -1530,7 +1615,7 @@ export default function App() {
                 {/* ONE Prominent AUTO-PILOT Toggle Button in the Top Header */}
                 <button
                   onClick={handleHeaderToggleAutoPilot}
-                  className={`px-3 py-1.5 rounded-lg font-black text-xs uppercase tracking-wider flex items-center gap-2 transition-all border font-mono ${
+                  className={`px-2.5 sm:px-3 py-1.5 rounded-lg font-black text-[11px] sm:text-xs uppercase tracking-wider flex items-center gap-1.5 sm:gap-2 transition-all border font-mono shrink-0 ${
                     autoPilotActive
                       ? "bg-emerald-500/20 text-[#00ff66] border-emerald-400 shadow-[0_0_15px_rgba(0,255,102,0.4)] animate-pulse"
                       : "bg-red-500/10 text-red-400 border-red-500/50 hover:bg-red-500/20"
@@ -1542,17 +1627,17 @@ export default function App() {
                 </button>
 
                 {isAdmin && (
-                  <div className="hidden md:flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/20 border border-emerald-500/50 text-[#00ff66] font-black text-xs uppercase tracking-wider shadow-md shadow-emerald-950/30 font-mono">
-                    <span>👑 ADMIN MODE</span>
+                  <div className="flex items-center gap-1 sm:gap-1.5 px-2 sm:px-3 py-1.5 rounded-lg bg-emerald-500/20 border border-emerald-500/50 text-[#00ff66] font-black text-[10px] sm:text-xs uppercase tracking-wider shadow-md shadow-emerald-950/30 font-mono shrink-0">
+                    <span>👑 ADMIN</span>
                   </div>
                 )}
                 <button
                   onClick={() => loadData(selectedCoin.binanceSymbol, timeframe)}
                   disabled={loading}
-                  className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors disabled:opacity-50"
+                  className="p-1.5 sm:p-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors disabled:opacity-50 shrink-0"
                   title="Refresh data"
                 >
-                  <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
+                  <RefreshCw className={`w-3.5 h-3.5 sm:w-4 sm:h-4 ${loading ? "animate-spin" : ""}`} />
                 </button>
               </div>
             </div>

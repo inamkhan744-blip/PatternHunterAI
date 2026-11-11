@@ -33,6 +33,7 @@ export interface ActiveTrade {
   openTime: number;
   unrealizedPnl: number;
   unrealizedPnlPercent: number;
+  isStuck?: boolean;
 }
 
 export interface ClosedTrade {
@@ -137,6 +138,32 @@ class TradeManager {
     return this.activeTrades.some((t) => t.symbol === symbol);
   }
 
+  public checkStuckTrades(timeoutMs: number = 24 * 60 * 60 * 1000): ActiveTrade[] {
+    const now = Date.now();
+    const stuckTrades: ActiveTrade[] = [];
+    let updated = false;
+
+    this.activeTrades = this.activeTrades.map((trade) => {
+      const durationMs = now - trade.openTime;
+      if (durationMs > timeoutMs) {
+        if (!trade.isStuck) {
+          const durationHours = (durationMs / (1000 * 60 * 60)).toFixed(1);
+          console.warn(`[STUCK TRADE TIMEOUT] Trade ${trade.id} for ${trade.symbol} has been open for ${durationHours} hours without hitting SL/TP. Allowing other symbols to trade.`);
+          trade = { ...trade, isStuck: true };
+          updated = true;
+        }
+        stuckTrades.push(trade);
+      }
+      return trade;
+    });
+
+    if (updated) {
+      this.saveState();
+    }
+
+    return stuckTrades;
+  }
+
   public getTradeHistory(): ClosedTrade[] {
     return [...this.tradeHistory];
   }
@@ -185,9 +212,12 @@ class TradeManager {
   }): ActiveTrade | null {
     // Strict Execution Lock: Check if an active position already exists for that specific symbol
     if (this.hasActivePosition(params.symbol)) {
-      console.log("Trade blocked: Active position exists for this symbol.");
+      console.log(`Trade blocked: Active position exists for symbol ${params.symbol}.`);
       return null;
     }
+
+    // Check stuck positions before evaluating limits
+    this.checkStuckTrades();
 
     const direction = params.direction ?? "LONG";
     const marketType = params.marketType ?? "Spot";

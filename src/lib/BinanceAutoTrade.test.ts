@@ -287,6 +287,24 @@ async function runTests() {
   });
   assert(blockedTrade === null, "Second trade for same symbol is blocked by Execution Lock");
 
+  // Multiple Open Trades Test: TradeManager allows distinct symbol
+  const secondSymbolTrade = tradeManager.addTrade({
+    symbol: "SOLUSDT",
+    entryPrice: 150,
+    quantity: 2,
+    direction: "LONG",
+  });
+  assert(secondSymbolTrade !== null, "Second trade for DIFFERENT symbol (SOLUSDT) is allowed");
+  assert(tradeManager.getActiveTrades().length === 2, "Active trades count is 2 for different symbols");
+
+  // Stuck Trade Timeout Test:
+  // Artificially age the first trade to 25 hours ago
+  const activeTrades = tradeManager.getActiveTrades();
+  activeTrades[0].openTime = Date.now() - 25 * 60 * 60 * 1000;
+  const stuckTrades = tradeManager.checkStuckTrades(24 * 60 * 60 * 1000);
+  assert(stuckTrades.length >= 1, "checkStuckTrades flags position open > 24 hours as stuck");
+  assert(stuckTrades[0].isStuck === true, "Trade has isStuck = true flag");
+
   // Cleanup test trade
   tradeManager.closeAllTrades("MANUAL");
 

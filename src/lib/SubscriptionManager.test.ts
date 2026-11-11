@@ -1,4 +1,15 @@
-import { isUserAdmin, isUserPro, checkTradeExecutionAllowance, setProDailyTradeLimit, getProDailyTradeLimit, ProDailyTradeLimit, ADMIN_BYPASS_EMAIL } from "./SubscriptionManager";
+import {
+  isUserAdmin,
+  isUserPro,
+  checkTradeExecutionAllowance,
+  setProDailyTradeLimit,
+  getProDailyTradeLimit,
+  ProDailyTradeLimit,
+  ADMIN_BYPASS_EMAIL,
+  getDailyTradeCount,
+  incrementDailyTradeCount,
+  resetDailyTradeCountIfNewDay,
+} from "./SubscriptionManager";
 
 function assert(condition: boolean, msg: string) {
   if (!condition) {
@@ -46,6 +57,19 @@ async function runTests() {
   assert(adminEmailAllowance.isPro === true, "Admin bypass email identified as pro in allowance check");
   assert(adminEmailAllowance.allowed === true, "Admin bypass email allowed execution");
   assert(adminEmailAllowance.limit > 900000, "Admin bypass email has uncapped execution allowance");
+
+  // Daily reset logic test
+  localStorage.setItem("fortress_daily_trade_tracker", JSON.stringify({
+    date: "2024-01-01",
+    lastTradeDate: "2024-01-01",
+    count: 3,
+  }));
+  const resetCount = resetDailyTradeCountIfNewDay();
+  assert(resetCount === 0, "Trade counter resets to 0 when last trade was yesterday / past date");
+  assert(getDailyTradeCount() === 0, "getDailyTradeCount() returns 0 after reset");
+
+  incrementDailyTradeCount();
+  assert(getDailyTradeCount() === 1, "getDailyTradeCount() increments to 1 for today");
 
   console.log("All SubscriptionManager tests passed successfully!");
 }

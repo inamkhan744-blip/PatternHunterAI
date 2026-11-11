@@ -14,6 +14,7 @@ import { simulateSwarmDebate } from "./AgentSwarm";
 import { fetchCandles } from "./binance";
 import { rsi } from "./indicators";
 import { supabase } from "./supabase";
+import { liveWorkerLogStore } from "./LiveWorkerLogStore";
 
 export type MarketType = "Spot" | "Futures";
 export type TradeDirection = "LONG" | "SHORT";
@@ -36,6 +37,7 @@ export interface AutoTradeConfig {
   disclaimerAgreed: boolean;
   paperTradingEnabled: boolean; // Paper mode virtual trading
   maxDailyLossPercent: number; // Max daily loss % (default 3%) before tripping circuit breaker
+  allowAiFallback: boolean; // Allow trades if Gemini AI fails (local heuristic fallback)
 }
 
 export interface ManagedTrade {
@@ -105,6 +107,7 @@ export const DEFAULT_CONFIG: AutoTradeConfig = {
   disclaimerAgreed: false,
   paperTradingEnabled: false,
   maxDailyLossPercent: 3.0,
+  allowAiFallback: true,
 };
 
 // Base URLs
@@ -891,6 +894,8 @@ export class BinanceAutoTradeEngine {
     if (cooldown.isActive) {
       const mins = Math.floor(cooldown.remainingSeconds / 60);
       const secs = cooldown.remainingSeconds % 60;
+      const rejectMsg = `Trade rejected: Cooldown active (${mins}m ${secs}s remaining)`;
+      liveWorkerLogStore.addLog(rejectMsg, "warn", { symbol: params.symbol, cooldownRemaining: cooldown.remainingSeconds });
       return {
         success: false,
         error: `POST-LOSS COOLDOWN ACTIVE: Trade blocked. ${mins}m ${secs}s remaining before new orders can be executed.`,
@@ -902,6 +907,8 @@ export class BinanceAutoTradeEngine {
     if (drawdown.drawdownPct >= drawdown.maxDailyLossPercent) {
       this.config.autoPilotEnabled = false;
       this.saveConfig({ autoPilotEnabled: false });
+      const rejectMsg = `Trade rejected: Daily drawdown breach (${drawdown.drawdownPct}% >= ${drawdown.maxDailyLossPercent}%)`;
+      liveWorkerLogStore.addLog(rejectMsg, "error", { symbol: params.symbol, drawdown });
       return {
         success: false,
         error: `DAILY DRAWDOWN BREACH: Daily loss (${drawdown.drawdownPct}%) has reached or exceeded max limit of ${drawdown.maxDailyLossPercent}%. Auto-Pilot is shut down.`,
@@ -911,6 +918,8 @@ export class BinanceAutoTradeEngine {
     // 3. Duplicate Protection (< 5 Minutes)
     const dupCheck = this.checkDuplicateProtection(params.symbol);
     if (!dupCheck.allowed) {
+      const rejectMsg = `Trade rejected: Duplicate protection (${dupCheck.reason})`;
+      liveWorkerLogStore.addLog(rejectMsg, "warn", { symbol: params.symbol });
       return {
         success: false,
         error: dupCheck.reason,
@@ -920,6 +929,8 @@ export class BinanceAutoTradeEngine {
     // 4. Spread Guard Check (> 0.1% blocked)
     const spreadCheck = await this.checkSpreadGuard(params.symbol);
     if (!spreadCheck.allowed) {
+      const rejectMsg = `Trade rejected: Spread guard (${spreadCheck.reason})`;
+      liveWorkerLogStore.addLog(rejectMsg, "warn", { symbol: params.symbol, spreadPct: spreadCheck.spreadPct });
       return {
         success: false,
         error: spreadCheck.reason,
@@ -929,6 +940,8 @@ export class BinanceAutoTradeEngine {
     // 5. Global Market Filter: BTC 1H dumping blocks Altcoin Longs
     const btcCheck = await this.checkBtcMarketFilter(direction, params.symbol);
     if (!btcCheck.allowed) {
+      const rejectMsg = `Trade rejected: Global market filter (${btcCheck.reason})`;
+      liveWorkerLogStore.addLog(rejectMsg, "warn", { symbol: params.symbol });
       return {
         success: false,
         error: btcCheck.reason,
@@ -945,9 +958,12 @@ export class BinanceAutoTradeEngine {
       atrValue: params.atrValue,
       spreadPct: spreadCheck.spreadPct,
       confluenceScore: dynamicScaling.requiredScore,
+      allowAiFallback: this.config.allowAiFallback ?? true,
     });
 
     if (swarmResult.verdict === "NO-GO") {
+      const rejectMsg = `Trade rejected: AI Swarm Risk Manager vetoed (${swarmResult.verdictReason})`;
+      liveWorkerLogStore.addLog(rejectMsg, "warn", { symbol: params.symbol, reason: swarmResult.verdictReason });
       return {
         success: false,
         error: `SWARM RISK MANAGER VETO: ${swarmResult.verdictReason}`,
@@ -957,6 +973,8 @@ export class BinanceAutoTradeEngine {
     // Subscription & Daily Limits Check
     const allowance = checkTradeExecutionAllowance(params.userEmail, params.isPro);
     if (!allowance.allowed) {
+      const rejectMsg = `Trade rejected: Daily trade allowance limit reached (${allowance.current}/${allowance.limit})`;
+      liveWorkerLogStore.addLog(rejectMsg, "warn", { symbol: params.symbol, allowance });
       return {
         success: false,
         error: allowance.reason || "Daily trade allowance reached.",
@@ -965,6 +983,8 @@ export class BinanceAutoTradeEngine {
 
     // Legal Disclaimer Check
     if (!this.config.disclaimerAgreed) {
+      const rejectMsg = "Trade rejected: Legal Risk Disclaimer must be accepted before trading";
+      liveWorkerLogStore.addLog(rejectMsg, "error", { symbol: params.symbol });
       return {
         success: false,
         error: "Legal Risk Disclaimer must be accepted before trading.",
@@ -973,6 +993,8 @@ export class BinanceAutoTradeEngine {
 
     // Circuit Breaker Check
     if (this.circuitBreaker.isTripped) {
+      const rejectMsg = `Trade rejected: Circuit Breaker is TRIPPED (${this.circuitBreaker.consecutiveLosses} consecutive losses)`;
+      liveWorkerLogStore.addLog(rejectMsg, "error", { symbol: params.symbol });
       return {
         success: false,
         error: `Circuit Breaker is TRIPPED (${this.circuitBreaker.consecutiveLosses} consecutive losses). Auto-Pilot is disabled for capital protection.`,
@@ -982,7 +1004,8 @@ export class BinanceAutoTradeEngine {
     // Check if an active position already exists for this specific symbol in engine
     const existingPosition = this.trades.find((t) => t.symbol === params.symbol && t.status === "OPEN");
     if (existingPosition) {
-      const msg = "Trade blocked: Active position exists for this symbol.";
+      const msg = "Trade rejected: Active position exists";
+      liveWorkerLogStore.addLog(msg, "warn", { symbol: params.symbol });
       console.log(msg);
       return {
         success: false,
@@ -993,15 +1016,19 @@ export class BinanceAutoTradeEngine {
     // Enforce Trade Direction Mode (BOTH, LONG_ONLY, SHORT_ONLY)
     const directionMode = this.config.tradeDirectionMode || "BOTH";
     if (directionMode === "LONG_ONLY" && direction === "SHORT") {
+      const rejectMsg = "Trade rejected: Auto-Pilot trade direction mode is set to LONG ONLY";
+      liveWorkerLogStore.addLog(rejectMsg, "warn", { symbol: params.symbol });
       return {
         success: false,
-        error: "Trade blocked: Auto-Pilot trade direction mode is set to LONG ONLY.",
+        error: rejectMsg,
       };
     }
     if (directionMode === "SHORT_ONLY" && direction === "LONG") {
+      const rejectMsg = "Trade rejected: Auto-Pilot trade direction mode is set to SHORT ONLY";
+      liveWorkerLogStore.addLog(rejectMsg, "warn", { symbol: params.symbol });
       return {
         success: false,
-        error: "Trade blocked: Auto-Pilot trade direction mode is set to SHORT ONLY.",
+        error: rejectMsg,
       };
     }
 
@@ -1011,6 +1038,8 @@ export class BinanceAutoTradeEngine {
     // Max Open Trades limit (1-3)
     const openTrades = this.getOpenTrades();
     if (openTrades.length >= this.config.maxOpenTrades) {
+      const rejectMsg = `Trade rejected: Max open trades reached (${openTrades.length}/${this.config.maxOpenTrades})`;
+      liveWorkerLogStore.addLog(rejectMsg, "warn", { symbol: params.symbol });
       return {
         success: false,
         error: `Max open trades reached (${openTrades.length}/${this.config.maxOpenTrades}). Wait for existing positions to close.`,

@@ -65,6 +65,7 @@ export interface ManagedTrade {
   slOrderId?: string;
   tpOrderId?: string;
   orderType: "LIMIT" | "MARKET";
+  isStuck?: boolean;
 }
 
 export interface CircuitBreakerState {
@@ -538,6 +539,29 @@ export class BinanceAutoTradeEngine {
     return [...this.trades];
   }
 
+  public checkStuckTrades(timeoutMs: number = 24 * 60 * 60 * 1000): ManagedTrade[] {
+    const now = Date.now();
+    const stuck: ManagedTrade[] = [];
+    let updated = false;
+
+    for (const trade of this.trades) {
+      if (trade.status === "OPEN" && now - trade.openTime > timeoutMs) {
+        if (!trade.isStuck) {
+          trade.isStuck = true;
+          const openHours = ((now - trade.openTime) / (1000 * 60 * 60)).toFixed(1);
+          console.warn(`[STUCK TRADE TIMEOUT] Position for ${trade.symbol} (ID: ${trade.id}) has been open for ${openHours}h without hitting SL/TP. Allowing scanner to seek new trades on other symbols.`);
+          updated = true;
+        }
+        stuck.push(trade);
+      }
+    }
+
+    if (updated) {
+      this.saveTrades();
+    }
+    return stuck;
+  }
+
   private loadCircuitBreaker(): CircuitBreakerState {
     try {
       const stored = localStorage.getItem(STORAGE_KEY_CIRCUIT);
@@ -980,6 +1004,9 @@ export class BinanceAutoTradeEngine {
         error: "Trade blocked: Auto-Pilot trade direction mode is set to SHORT ONLY.",
       };
     }
+
+    // Check stuck trade timeout before evaluating capacity
+    this.checkStuckTrades();
 
     // Max Open Trades limit (1-3)
     const openTrades = this.getOpenTrades();

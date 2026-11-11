@@ -18,12 +18,13 @@ const STORAGE_KEY_PRO_TRADE_LIMIT = "fortress_pro_daily_trade_limit";
 const STORAGE_KEY_DAILY_USAGE = "fortress_daily_trade_tracker";
 const STORAGE_KEY_CACHED_PROFILE = "fortress_cached_user_profile";
 
-interface DailyTradeTracker {
+export interface DailyTradeTracker {
   date: string;
+  lastTradeDate?: string;
   count: number;
 }
 
-function getTodayString(): string {
+export function getTodayString(): string {
   const d = new Date();
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
 }
@@ -107,13 +108,21 @@ export function setProDailyTradeLimit(limit: ProDailyTradeLimit): void {
   }
 }
 
-export function getDailyTradeCount(): number {
+export function resetDailyTradeCountIfNewDay(): number {
+  const today = getTodayString();
   try {
     if (typeof localStorage === "undefined") return 0;
     const raw = localStorage.getItem(STORAGE_KEY_DAILY_USAGE);
     if (raw) {
       const parsed: DailyTradeTracker = JSON.parse(raw);
-      if (parsed.date === getTodayString()) {
+      const recordDate = parsed.lastTradeDate || parsed.date;
+      if (recordDate && recordDate !== today) {
+        // Last trade was yesterday or older -> reset counter to 0 for today
+        const resetState: DailyTradeTracker = { date: today, lastTradeDate: recordDate, count: 0 };
+        localStorage.setItem(STORAGE_KEY_DAILY_USAGE, JSON.stringify(resetState));
+        return 0;
+      }
+      if (parsed.date === today) {
         return parsed.count;
       }
     }
@@ -123,28 +132,19 @@ export function getDailyTradeCount(): number {
   return 0;
 }
 
+export function getDailyTradeCount(): number {
+  return resetDailyTradeCountIfNewDay();
+}
+
 export function incrementDailyTradeCount(): number {
   const today = getTodayString();
-  let currentCount = 0;
-  try {
-    if (typeof localStorage !== "undefined") {
-      const raw = localStorage.getItem(STORAGE_KEY_DAILY_USAGE);
-      if (raw) {
-        const parsed: DailyTradeTracker = JSON.parse(raw);
-        if (parsed.date === today) {
-          currentCount = parsed.count;
-        }
-      }
-    }
-  } catch {
-    // fallback
-  }
+  const currentCount = resetDailyTradeCountIfNewDay();
 
   const nextCount = currentCount + 1;
   if (typeof localStorage !== "undefined") {
     localStorage.setItem(
       STORAGE_KEY_DAILY_USAGE,
-      JSON.stringify({ date: today, count: nextCount })
+      JSON.stringify({ date: today, lastTradeDate: today, count: nextCount })
     );
   }
   return nextCount;

@@ -10,7 +10,7 @@ import {
   type SeriesMarker,
   type Time,
 } from "lightweight-charts";
-import { TrendingUp, TrendingDown, Minus, Layers, Target, Flame, Edit3, Slash, MoveHorizontal, Percent, Trash2 } from "lucide-react";
+import { TrendingUp, TrendingDown, Minus, Layers, Target, Flame, Edit3, Slash, MoveHorizontal, Percent, Trash2, Type, BoxSelect } from "lucide-react";
 import type { Candle, DetectedPattern } from "../types";
 import { getPatternColor } from "../lib/patterns";
 import { sma, rsi, findSupportResistance } from "../lib/indicators";
@@ -97,14 +97,15 @@ export default function CandlestickChart({
   const [showGridOverlay, setShowGridOverlay] = useState(true);
 
   // Interactive Drawing Tools state
-  type DrawingTool = "none" | "trendline" | "horizontal" | "fibonacci";
+  type DrawingTool = "none" | "trendline" | "horizontal" | "fibonacci" | "text" | "risk-reward";
   const [activeDrawingTool, setActiveDrawingTool] = useState<DrawingTool>("none");
   interface Point2D { x: number; y: number; time?: number; price?: number }
   interface UserDrawing {
     id: string;
-    type: "trendline" | "horizontal" | "fibonacci";
+    type: "trendline" | "horizontal" | "fibonacci" | "text" | "risk-reward";
     p1: Point2D;
     p2?: Point2D;
+    text?: string;
   }
   const [drawings, setDrawings] = useState<UserDrawing[]>([]);
   const [drawingInProgress, setDrawingInProgress] = useState<UserDrawing | null>(null);
@@ -318,9 +319,75 @@ export default function CandlestickChart({
       }
     }
 
-    // Draw User Interactive Drawings (Trendlines, Horizontal Ray, Fibonacci Retracement)
+    // Draw User Interactive Drawings (Trendlines, Horizontal Ray, Fibonacci Retracement, Text, Risk/Reward)
     const allDrawings = [...drawings, ...(drawingInProgress ? [drawingInProgress] : [])];
     for (const d of allDrawings) {
+      if (d.type === "text") {
+        ctx.save();
+        ctx.fillStyle = "#38bdf8";
+        ctx.font = "bold 12px 'JetBrains Mono', monospace";
+        ctx.shadowColor = "rgba(0,0,0,0.8)";
+        ctx.shadowBlur = 4;
+        ctx.fillText(d.text || "Note", d.p1.x, d.p1.y);
+        ctx.fillStyle = "#38bdf8";
+        ctx.beginPath();
+        ctx.arc(d.p1.x - 4, d.p1.y - 4, 3, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      } else if (d.type === "risk-reward" && d.p2) {
+        ctx.save();
+        const startX = Math.min(d.p1.x, d.p2.x);
+        const endX = Math.max(d.p1.x, d.p2.x) + 60;
+        const width = Math.max(endX - startX, 80);
+
+        const entryY = d.p1.y;
+        const targetY = d.p2.y;
+        const isLong = targetY < entryY; // higher price has lower Y coordinate
+
+        // Assume Stop Loss is placed symmetrical or at distance
+        const slDistance = Math.abs(targetY - entryY) / 2;
+        const slY = isLong ? entryY + slDistance : entryY - slDistance;
+
+        // Draw Profit Target Box (Green)
+        const tpHeight = Math.abs(targetY - entryY);
+        const tpTop = Math.min(entryY, targetY);
+        ctx.fillStyle = "rgba(34, 197, 94, 0.15)";
+        ctx.fillRect(startX, tpTop, width, tpHeight);
+        ctx.strokeStyle = "#22c55e";
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(startX, tpTop, width, tpHeight);
+
+        // Draw Stop Loss Box (Red)
+        const slHeight = slDistance;
+        const slTop = isLong ? entryY : slY;
+        ctx.fillStyle = "rgba(239, 68, 68, 0.15)";
+        ctx.fillRect(startX, slTop, width, slHeight);
+        ctx.strokeStyle = "#ef4444";
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(startX, slTop, width, slHeight);
+
+        // Entry Line
+        ctx.strokeStyle = "#38bdf8";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(startX, entryY);
+        ctx.lineTo(startX + width, entryY);
+        ctx.stroke();
+
+        // Calculate Prices & R:R
+        const entryPrice = activeSeries.coordinateToPrice(entryY);
+        const targetPrice = activeSeries.coordinateToPrice(targetY);
+        const slPrice = activeSeries.coordinateToPrice(slY);
+
+        ctx.font = "bold 10px 'JetBrains Mono', monospace";
+        ctx.fillStyle = "#ffffff";
+        ctx.fillText(
+          `${isLong ? "LONG" : "SHORT"} R:R 2.00 | TP: $${targetPrice ? targetPrice.toFixed(2) : ""} | SL: $${slPrice ? slPrice.toFixed(2) : ""}`,
+          startX + 4,
+          entryY - 4
+        );
+        ctx.restore();
+      }
       if (d.type === "trendline" && d.p2) {
         ctx.save();
         ctx.strokeStyle = "#38bdf8";
@@ -864,6 +931,18 @@ export default function CandlestickChart({
       return;
     }
 
+    if (activeDrawingTool === "text") {
+      const note = window.prompt("Enter chart annotation note:", "Key Liquidity Level");
+      if (note && note.trim()) {
+        setDrawings((prev) => [
+          ...prev,
+          { id: String(Date.now()), type: "text", p1: { x, y }, text: note.trim() },
+        ]);
+      }
+      setActiveDrawingTool("none");
+      return;
+    }
+
     if (!drawingInProgress) {
       setDrawingInProgress({
         id: String(Date.now()),
@@ -1035,6 +1114,26 @@ export default function CandlestickChart({
               title="Fibonacci Retracement (Click High & Low)"
             >
               <Percent className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={() => {
+                setActiveDrawingTool("risk-reward");
+                setDrawingInProgress(null);
+              }}
+              className={`p-1.5 rounded ${activeDrawingTool === "risk-reward" ? "bg-slate-700 text-cyan-400" : "text-slate-400 hover:text-white"}`}
+              title="Risk/Reward Position Tool (Click Entry, then Target)"
+            >
+              <BoxSelect className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={() => {
+                setActiveDrawingTool("text");
+                setDrawingInProgress(null);
+              }}
+              className={`p-1.5 rounded ${activeDrawingTool === "text" ? "bg-slate-700 text-cyan-400" : "text-slate-400 hover:text-white"}`}
+              title="Text Annotation (Click to place text)"
+            >
+              <Type className="w-3.5 h-3.5" />
             </button>
             {drawings.length > 0 && (
               <button

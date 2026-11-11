@@ -352,6 +352,9 @@ export default function App() {
   useEffect(() => {
     if (user) {
       loadWatchlist();
+      tradeManager.initializeUser(user.id);
+    } else {
+      tradeManager.cleanupRealtime();
     }
   }, [user, loadWatchlist]);
 

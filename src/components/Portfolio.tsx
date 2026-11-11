@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useMemo } from "react";
-import { Wallet, Plus, Trash2, Loader2, TrendingUp, TrendingDown, RefreshCw, ArrowUpRight, ArrowDownRight, Download } from "lucide-react";
+import { Wallet, Plus, Trash2, Loader2, TrendingUp, TrendingDown, RefreshCw, ArrowUpRight, ArrowDownRight, Download, Sliders, CheckCircle2, AlertCircle } from "lucide-react";
 import { COINS, PRO_COINS } from "../constants";
 import { fetchCandles } from "../lib/binance";
 import { formatPrice } from "../lib/patterns";
@@ -7,6 +7,7 @@ import { supabase } from "../lib/supabase";
 import { useAuth } from "../lib/auth";
 import { autoTradeEngine } from "../lib/BinanceAutoTrade";
 import { generateTaxReportPDF } from "../lib/TaxExportService";
+import { paperTradingEngine } from "../lib/PaperTrading";
 import type { PortfolioHolding } from "../types";
 
 const ALL_COINS = [...COINS, ...PRO_COINS];
@@ -102,6 +103,80 @@ export default function Portfolio() {
   const totalPnl = totalValue - totalCost;
   const totalPnlPercent = totalCost > 0 ? (totalPnl / totalCost) * 100 : 0;
 
+  // Portfolio Rebalancer State
+  const [showRebalancer, setShowRebalancer] = useState(false);
+  const [targetWeights, setTargetWeights] = useState<Record<string, number>>({});
+  const [rebalanceFeedback, setRebalanceFeedback] = useState<string | null>(null);
+
+  // Initialize equal weights or saved weights when holdings change
+  useEffect(() => {
+    if (computedHoldings.length > 0) {
+      setTargetWeights((prev) => {
+        const next: Record<string, number> = { ...prev };
+        const equalShare = Math.floor(100 / computedHoldings.length);
+        let remainder = 100 - equalShare * computedHoldings.length;
+        for (const h of computedHoldings) {
+          if (next[h.binance_symbol] === undefined) {
+            next[h.binance_symbol] = equalShare + (remainder > 0 ? 1 : 0);
+            if (remainder > 0) remainder--;
+          }
+        }
+        return next;
+      });
+    }
+  }, [computedHoldings]);
+
+  const totalTargetWeight = useMemo(() => {
+    return computedHoldings.reduce((acc, h) => acc + (targetWeights[h.binance_symbol] ?? 0), 0);
+  }, [computedHoldings, targetWeights]);
+
+  const rebalancePlans = useMemo(() => {
+    if (totalValue <= 0) return [];
+    return computedHoldings.map((h) => {
+      const currentPct = (h.value / totalValue) * 100;
+      const targetPct = targetWeights[h.binance_symbol] ?? 0;
+      const targetVal = (targetPct / 100) * totalValue;
+      const driftVal = targetVal - h.value; // positive = BUY, negative = SELL
+      const driftQty = h.currentPrice > 0 ? driftVal / h.currentPrice : 0;
+      const action = Math.abs(driftVal) < 1 ? "HOLD" : driftVal > 0 ? "BUY" : "SELL";
+      return {
+        symbol: h.coin_symbol,
+        binanceSymbol: h.binance_symbol,
+        currentPct,
+        targetPct,
+        currentVal: h.value,
+        targetVal,
+        driftVal,
+        driftQty,
+        action,
+        price: h.currentPrice,
+      };
+    });
+  }, [computedHoldings, targetWeights, totalValue]);
+
+  const handleExecuteRebalance = useCallback(() => {
+    if (Math.abs(totalTargetWeight - 100) > 0.1) {
+      setRebalanceFeedback("Target allocation must sum to exactly 100% before rebalancing.");
+      return;
+    }
+
+    let executedCount = 0;
+    for (const plan of rebalancePlans) {
+      if (plan.action !== "HOLD" && Math.abs(plan.driftVal) >= 10 && plan.price > 0) {
+        paperTradingEngine.executeOrder({
+          symbol: plan.binanceSymbol,
+          entryPrice: plan.price,
+          atrValue: plan.price * 0.02,
+          direction: plan.action === "BUY" ? "LONG" : "SHORT",
+        });
+        executedCount++;
+      }
+    }
+
+    setRebalanceFeedback(`Rebalance order execution completed! Placed ${executedCount} paper rebalancing orders.`);
+    setTimeout(() => setRebalanceFeedback(null), 5000);
+  }, [totalTargetWeight, rebalancePlans]);
+
   const handleExportTaxPDF = useCallback(() => {
     const allTrades = autoTradeEngine.getAllTrades();
     const closedTrades = allTrades.filter((t) => t.status === "CLOSED");
@@ -188,6 +263,22 @@ export default function Portfolio() {
           <p className="text-xs text-slate-500 mt-0.5">Track your holdings and see real-time P/L</p>
         </div>
         <div className="flex items-center gap-2">
+          {/* Rebalancer Trigger Button */}
+          {holdings.length > 0 && (
+            <button
+              onClick={() => setShowRebalancer((v) => !v)}
+              className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all border ${
+                showRebalancer
+                  ? "bg-cyan-500/20 text-cyan-300 border-cyan-500/50 shadow-md"
+                  : "bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700"
+              }`}
+              title="Toggle Portfolio Target Rebalancer"
+            >
+              <Sliders className="w-3.5 h-3.5" />
+              <span>Rebalancer</span>
+            </button>
+          )}
+
           {/* Tax Export Service Trigger Button */}
           <button
             onClick={handleExportTaxPDF}
@@ -234,6 +325,85 @@ export default function Portfolio() {
               {totalPnlPercent >= 0 ? <ArrowUpRight className="w-5 h-5" /> : <ArrowDownRight className="w-5 h-5" />}
               {Math.abs(totalPnlPercent).toFixed(2)}%
             </p>
+          </div>
+        </div>
+      )}
+
+      {/* Interactive Portfolio Rebalancer Panel */}
+      {showRebalancer && holdings.length > 0 && (
+        <div className="rounded-xl bg-slate-900 border border-cyan-500/40 p-5 mb-4 shadow-xl">
+          <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+            <div>
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                <Sliders className="w-4 h-4 text-cyan-400" />
+                Target Weight Rebalancer (Shrimpy / 3Commas Model)
+              </h3>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Adjust desired allocation percentages. Drift is calculated against current market value (${totalValue.toFixed(2)}).
+              </p>
+            </div>
+            <div className="flex items-center gap-3">
+              <span className={`text-xs font-bold px-2.5 py-1 rounded-md border ${
+                Math.abs(totalTargetWeight - 100) < 0.1
+                  ? "bg-green-500/15 text-green-400 border-green-500/40"
+                  : "bg-amber-500/15 text-amber-400 border-amber-500/40"
+              }`}>
+                Total Target: {totalTargetWeight}% / 100%
+              </span>
+              <button
+                onClick={handleExecuteRebalance}
+                disabled={Math.abs(totalTargetWeight - 100) >= 0.1}
+                className="px-4 py-1.5 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-slate-900 font-bold text-xs uppercase tracking-wider transition-all disabled:opacity-40 disabled:cursor-not-allowed shadow-md shadow-cyan-950/40"
+              >
+                Rebalance Now
+              </button>
+            </div>
+          </div>
+
+          {rebalanceFeedback && (
+            <div className="mb-4 p-3 rounded-lg bg-cyan-950/60 border border-cyan-500/40 text-cyan-300 text-xs flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-cyan-400 shrink-0" />
+              <span>{rebalanceFeedback}</span>
+            </div>
+          )}
+
+          <div className="space-y-3">
+            {rebalancePlans.map((p) => (
+              <div key={p.binanceSymbol} className="p-3 bg-slate-800/60 rounded-lg border border-slate-700/60 flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs">
+                <div className="flex items-center gap-3 min-w-[140px]">
+                  <span className="font-bold text-white text-sm">{p.symbol}</span>
+                  <span className="text-slate-400 text-[11px]">${p.price.toFixed(2)}</span>
+                </div>
+
+                <div className="flex-1 max-w-xs flex items-center gap-3">
+                  <span className="text-slate-400 w-16">Target: <strong>{p.targetPct}%</strong></span>
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    value={p.targetPct}
+                    onChange={(e) => {
+                      const val = parseInt(e.target.value, 10) || 0;
+                      setTargetWeights((prev) => ({ ...prev, [p.binanceSymbol]: val }));
+                    }}
+                    className="flex-1 accent-cyan-400 cursor-pointer"
+                  />
+                </div>
+
+                <div className="flex items-center gap-4 text-right">
+                  <div>
+                    <span className="text-slate-500 block text-[10px]">Current Weight</span>
+                    <span className="text-slate-300 font-semibold">{p.currentPct.toFixed(1)}% (${p.currentVal.toFixed(2)})</span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 block text-[10px]">Drift Delta</span>
+                    <span className={`font-bold ${p.driftVal > 0 ? "text-green-400" : p.driftVal < 0 ? "text-red-400" : "text-slate-400"}`}>
+                      {p.driftVal > 0 ? "+" : ""}${p.driftVal.toFixed(2)} ({p.action})
+                    </span>
+                  </div>
+                </div>
+              </div>
+            ))}
           </div>
         </div>
       )}

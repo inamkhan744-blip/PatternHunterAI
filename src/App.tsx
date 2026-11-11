@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, useMemo, useRef } from "react";
 import {
   Activity,
   Crown,
+  Trophy,
   Radar,
   RefreshCw,
   Loader2,
@@ -72,6 +73,8 @@ import SwarmTerminal from "./components/SwarmTerminal";
 import Backtesting from "./components/Backtesting";
 import VisionAIUpload from "./components/VisionAIUpload";
 import SettingsModal from "./components/SettingsModal";
+import AdminModal from "./components/AdminModal";
+import LeaderboardModal from "./components/LeaderboardModal";
 import OrderBook from "./components/OrderBook";
 import PnLCalendar from "./components/PnLCalendar";
 import GridBotUI from "./components/GridBotUI";
@@ -201,6 +204,8 @@ export default function App() {
   // Vision AI & Settings Modals
   const [visionAIOpen, setVisionAIOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [adminModalOpen, setAdminModalOpen] = useState(false);
+  const [leaderboardModalOpen, setLeaderboardModalOpen] = useState(false);
 
   // Admin and Pro derivation from server-side role & metadata
   const isAdmin = useMemo(() => {
@@ -1147,11 +1152,24 @@ export default function App() {
             {!effectiveIsPro && !isAdmin && <Crown className="w-3.5 h-3.5 text-amber-400 ml-auto" />}
           </button>
 
+          {/* Trader Leaderboard Button */}
+          <button
+            onClick={() => setLeaderboardModalOpen(true)}
+            className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-medium text-slate-300 transition-colors"
+          >
+            <Trophy className="w-4 h-4 text-amber-400" />
+            Leaderboard & PnL
+          </button>
+
           {/* Admin Mode Badge vs Go Pro Button */}
           {isAdmin ? (
-            <div className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-emerald-500/20 border border-emerald-500/50 text-[#00ff66] text-xs font-black uppercase tracking-wider shadow-lg shadow-emerald-950/40 font-mono">
-              <span>👑 ADMIN MODE</span>
-            </div>
+            <button
+              onClick={() => setAdminModalOpen(true)}
+              className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/50 text-[#00ff66] text-xs font-black uppercase tracking-wider shadow-lg shadow-emerald-950/40 font-mono transition-all"
+              title="Open Enterprise Admin Management Console"
+            >
+              <span>👑 ADMIN PANEL</span>
+            </button>
           ) : !effectiveIsPro ? (
             <button
               onClick={() => window.open("https://inamkhan08.gumroad.com/l/idbxpj", "_blank", "noopener,noreferrer")}
@@ -1881,6 +1899,19 @@ export default function App() {
         onClose={() => setSettingsOpen(false)}
         onOpenAutoTrade={() => setAutoTradeOpen(true)}
         onOpenVisionAI={() => setVisionAIOpen(true)}
+      />
+
+      {/* Enterprise Admin Controls Modal */}
+      <AdminModal
+        open={adminModalOpen}
+        onClose={() => setAdminModalOpen(false)}
+        userEmail={user?.email}
+      />
+
+      {/* Verified Trader Leaderboard Modal */}
+      <LeaderboardModal
+        open={leaderboardModalOpen}
+        onClose={() => setLeaderboardModalOpen(false)}
       />
 
       {/* Sleek Side Drawer Navigation */}

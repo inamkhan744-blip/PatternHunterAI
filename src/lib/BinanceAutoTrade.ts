@@ -564,6 +564,13 @@ export class BinanceAutoTradeEngine {
     this.saveCircuitBreaker();
   }
 
+  public tripCircuitBreaker(reason: string = "Admin manual circuit breaker trip"): void {
+    this.circuitBreaker.isTripped = true;
+    this.circuitBreaker.trippedAt = Date.now();
+    this.circuitBreaker.reason = reason;
+    this.saveCircuitBreaker();
+  }
+
   // --- Post-Loss Cooldown (30 Minutes) ---
   private loadPostLossCooldown(): number {
     try {

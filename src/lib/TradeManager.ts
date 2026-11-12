@@ -14,7 +14,13 @@
  */
 
 import { RealtimeChannel } from "@supabase/supabase-js";
-import { MarketType, TradeDirection, proxyBinanceFetch } from "./BinanceAutoTrade";
+import {
+  AUTOPILOT_COOLDOWN_SECONDS,
+  MarketType,
+  TradeDirection,
+  autoTradeEngine,
+  proxyBinanceFetch,
+} from "./BinanceAutoTrade";
 import { isLiveTradingConfigured } from "./CredentialVault";
 import { paperTradingEngine } from "./PaperTrading";
 import { pushNotificationService } from "./PushNotification";
@@ -817,6 +823,10 @@ export class TradeManager {
     this.activeTrades = this.activeTrades.filter((t) => t.id !== tradeId);
     this.tradeHistory = [closed, ...this.tradeHistory];
     this.saveState();
+
+    // Any close (TP / SL / manual / kill switch) starts the 30-second Auto-Pilot
+    // cooldown, so the bot cannot immediately re-enter the same or another symbol.
+    autoTradeEngine.startAutoPilotCooldown(AUTOPILOT_COOLDOWN_SECONDS);
 
     // Settle the mirrored position in the paper account so the virtual balance and
     // win/loss counters stay in step with the trade history. Never touches Binance.

@@ -84,7 +84,7 @@ import { dcaBotEngine } from "./lib/DCABot";
 import { webhookService, type TradingViewSignal } from "./lib/WebhookService";
 import { useSubscription } from "./lib/useSubscription";
 import { isLiveTradingConfigured, refreshCredentialStatus } from "./lib/CredentialVault";
-import { autoTradeEngine } from "./lib/BinanceAutoTrade";
+import { autoTradeEngine, MAX_SLIPPAGE_PCT } from "./lib/BinanceAutoTrade";
 import { liveWorkerLogStore } from "./lib/LiveWorkerLogStore";
 import { getActiveExchange, setActiveExchange, SUPPORTED_EXCHANGES, type ExchangeId } from "./lib/MultiExchange";
 import { paperTradingEngine } from "./lib/PaperTrading";
@@ -153,6 +153,24 @@ const MOBILE_TABS: { key: AppTab; label: string; icon: React.ComponentType<{ cla
 
 const ALL_COINS = [...COINS, ...PRO_COINS];
 
+/** Auto-Pilot scans these symbols so it is not limited to the chart on screen. */
+const AUTO_PILOT_SCAN_UNIVERSE = [...COINS].slice(0, 8);
+
+interface AutoPilotCandidate {
+  symbol: string;
+  price: number;
+  signalPrice: number;
+  atr: number;
+  rsi: number | null;
+  trend: string | null;
+  patternName: string | null;
+  patternDirection: "bullish" | "bearish" | null;
+  fearGreed: number | null;
+  dataTimestamp: number;
+  score: number;
+  candleKey: number;
+}
+
 function formatVolume(vol: number): string {
   if (vol >= 1e9) return `$${(vol / 1e9).toFixed(2)}B`;
   if (vol >= 1e6) return `$${(vol / 1e6).toFixed(2)}M`;
@@ -217,7 +235,14 @@ export default function App() {
 
   // Auto-Pilot master state synced with autoTradeEngine
   const [autoPilotActive, setAutoPilotActive] = useState<boolean>(() => autoTradeEngine.getConfig().autoPilotEnabled);
-  const [autoPilotStatusText, setAutoPilotStatusText] = useState<string>("Status: Auto-Pilot Idle");
+  const [autoPilotStatusText, setAutoPilotStatusText] = useState<string>(() =>
+    autoTradeEngine.getConfig().autoPilotEnabled
+      ? "Status: Armed — waiting for a fresh candle close"
+      : "Status: Auto-Pilot Idle"
+  );
+  const [autoPilotPauseReason, setAutoPilotPauseReason] = useState<string | null>(() =>
+    autoTradeEngine.getAutoPilotPauseReason()
+  );
 
   // Subscribe to liveWorkerLogStore to update autoPilotStatusText in real-time
   useEffect(() => {
@@ -226,20 +251,37 @@ export default function App() {
         if (latestLog.message.includes("Trade rejected:")) {
           const reason = latestLog.message.replace("Trade rejected:", "Blocked by").trim();
           setAutoPilotStatusText(`Status: ${reason}`);
-        } else if (latestLog.message.includes("Gemini API Failed") || latestLog.message.includes("Gemini API Timeout")) {
-          setAutoPilotStatusText("Status: Gemini API Failed - Waiting / Fallback");
-        } else if (latestLog.message.includes("Evaluating market: Waiting")) {
-          setAutoPilotStatusText("Status: Scanning for fresh signal");
+        } else if (latestLog.message.includes("Auto-Pilot Paused")) {
+          setAutoPilotStatusText("Status: Auto-Pilot Paused — AI Engine Offline");
+        } else if (latestLog.message.includes("AI Engine Offline") || latestLog.message.includes("Gemini API")) {
+          setAutoPilotStatusText("Status: AI Engine Offline — paused");
+        } else if (latestLog.message.includes("Cooldown active")) {
+          setAutoPilotStatusText("Status: Cooldown active — preventing revenge trading");
+        } else if (latestLog.message.includes("Scanning")) {
+          setAutoPilotStatusText("Status: Scanning for a fresh candle close");
         } else if (latestLog.message.includes("Auto-Pilot Armed")) {
-          setAutoPilotStatusText("Status: Scanning for fresh signal");
+          setAutoPilotStatusText("Status: Armed — waiting for a fresh candle close");
         } else if (latestLog.message.includes("Auto-Pilot Disarmed")) {
           setAutoPilotStatusText("Status: Auto-Pilot Idle");
-        } else if (latestLog.message.includes("Trade executed") || latestLog.message.includes("Auto-Pilot Confluence")) {
-          setAutoPilotStatusText("Status: Trade Executed");
+        } else if (latestLog.message.includes("Executing ")) {
+          setAutoPilotStatusText(`Status: ${latestLog.message}`);
+        } else if (latestLog.message.includes("Trade Blocked")) {
+          setAutoPilotStatusText(`Status: ${latestLog.message.replace("Trade Blocked:", "Blocked —")}`);
         }
       }
     });
     return () => unsub();
+  }, []);
+
+  // Keep the header toggle in sync with engine-initiated state changes (AI pause,
+  // kill switch, daily-loss halt) — not just user clicks.
+  useEffect(() => {
+    const sync = () => {
+      setAutoPilotActive(autoTradeEngine.getConfig().autoPilotEnabled);
+      setAutoPilotPauseReason(autoTradeEngine.getAutoPilotPauseReason());
+    };
+    const timer = setInterval(sync, 2000);
+    return () => clearInterval(timer);
   }, []);
 
   // System Status State: Live vs Paper mode, WebSocket ping latency
@@ -267,6 +309,8 @@ export default function App() {
   );
   const autoPilotArmedTimestamp = useRef<number>(Date.now());
   const lastProcessedCandleTimestamp = useRef<number>(0);
+  // One entry per (symbol, candle) across both the live tick and the scanner.
+  const processedSignalKeys = useRef<Set<string>>(new Set());
   const [rsiValue, setRsiValue] = useState<number | null>(null);
   const [trendValue, setTrendValue] = useState<string | null>(null);
   const [fearGreedValue, setFearGreedValue] = useState<number | null>(null);
@@ -738,6 +782,331 @@ export default function App() {
     return () => unsub();
   }, [user, lastPrice, selectedCoin.binanceSymbol, currentAtr, effectiveIsPro, isAdmin]);
 
+  /**
+   * Single Auto-Pilot entry point shared by the live tick (displayed symbol) and the
+   * multi-symbol scanner. Every gate lives here so both paths behave identically:
+   * ARMED state, 30s cooldown, per-symbol duplicate block, max-open capacity,
+   * real-AI verdict, direction mode and slippage protection.
+   */
+  const attemptAutoPilotEntry = useCallback(
+    async (candidate: AutoPilotCandidate) => {
+      const cfg = autoTradeEngine.getConfig();
+      if (!cfg.autoPilotEnabled) return;
+
+      const state = autoTradeEngine.getAutoPilotState();
+      if (state !== "ARMED" && state !== "WATCHING") return;
+
+      const signalKey = `${candidate.symbol}:${candidate.candleKey}`;
+      if (processedSignalKeys.current.has(signalKey)) return;
+
+      const cooldown = autoTradeEngine.getAutoPilotCooldown();
+      if (cooldown.isActive) {
+        liveWorkerLogStore.addLog(
+          `Cooldown active: Preventing revenge trading. (${cooldown.remainingSeconds}s remaining)`,
+          "warn",
+          { symbol: candidate.symbol }
+        );
+        return;
+      }
+
+      const postLoss = autoTradeEngine.getPostLossCooldown();
+      if (postLoss.isActive) {
+        liveWorkerLogStore.addLog(
+          `Cooldown active: Preventing revenge trading. (${postLoss.remainingSeconds}s post-loss remaining)`,
+          "warn",
+          { symbol: candidate.symbol }
+        );
+        return;
+      }
+
+      if (candidate.score <= 85) {
+        liveWorkerLogStore.addLog(
+          `Signal Found (Score ${candidate.score}/85) - Skipping`,
+          "info",
+          { symbol: candidate.symbol, score: candidate.score }
+        );
+        return;
+      }
+
+      // Duplicate protection is scoped to the symbol: other symbols remain tradable.
+      const executionMode: "REAL" | "PAPER" = isLiveTradingConfigured() ? "REAL" : "PAPER";
+      if (
+        tradeManager.hasActivePosition(candidate.symbol, executionMode) ||
+        autoTradeEngine.getOpenTrades().some((t) => t.symbol === candidate.symbol)
+      ) {
+        liveWorkerLogStore.addLog("Trade Blocked: Duplicate symbol", "warn", { symbol: candidate.symbol });
+        return;
+      }
+
+      const openCount = autoTradeEngine.getOpenTrades().length;
+      if (openCount >= cfg.maxOpenTrades) {
+        liveWorkerLogStore.addLog(
+          `Trade Blocked: Max open trades reached (${openCount}/${cfg.maxOpenTrades})`,
+          "warn",
+          { symbol: candidate.symbol }
+        );
+        return;
+      }
+
+      // Debounce: one execution evaluation at a time across all symbols.
+      const storedLock = localStorage.getItem("fortress_autopilot_execution_lock");
+      const isPersistentlyLocked = storedLock ? parseInt(storedLock, 10) > Date.now() : false;
+      if (autoTradeExecutionLock.current || isPersistentlyLocked) {
+        liveWorkerLogStore.addLog("Scanning... execution lock active (debounce)", "info", {
+          symbol: candidate.symbol,
+        });
+        return;
+      }
+
+      autoTradeExecutionLock.current = true;
+      localStorage.setItem("fortress_autopilot_execution_lock", String(Date.now() + 15000));
+
+      try {
+        // Real AI verdict only. If the AI layer is down the engine pauses itself.
+        const signal = await autoTradeEngine.evaluateAutoPilotSignal({
+          symbol: candidate.symbol,
+          price: candidate.price,
+          rsi: candidate.rsi,
+          trend: candidate.trend,
+          patternName: candidate.patternName,
+          patternDirection: candidate.patternDirection,
+          fearGreed: candidate.fearGreed,
+          atrValue: candidate.atr,
+          dataTimestamp: candidate.dataTimestamp,
+          minScore: 85,
+        });
+
+        if (!signal.proceed) return;
+
+        const direction = signal.direction;
+        const directionMode = cfg.tradeDirectionMode || "BOTH";
+        if (directionMode === "LONG_ONLY" && direction === "SHORT") {
+          liveWorkerLogStore.addLog("Trade Blocked: Auto-Pilot direction mode is LONG ONLY", "warn", {
+            symbol: candidate.symbol,
+          });
+          return;
+        }
+        if (directionMode === "SHORT_ONLY" && direction === "LONG") {
+          liveWorkerLogStore.addLog("Trade Blocked: Auto-Pilot direction mode is SHORT ONLY", "warn", {
+            symbol: candidate.symbol,
+          });
+          return;
+        }
+
+        // Slippage guard against the *live* market price, not a stale tick/candle.
+        const livePrice = await autoTradeEngine.fetchLivePrice(candidate.symbol, cfg.marketType);
+        if (livePrice === null) {
+          liveWorkerLogStore.addLog("Trade cancelled: live price unavailable.", "warn", {
+            symbol: candidate.symbol,
+          });
+          return;
+        }
+
+        const slippagePct =
+          (Math.abs(livePrice - candidate.signalPrice) / candidate.signalPrice) * 100;
+        if (slippagePct > MAX_SLIPPAGE_PCT) {
+          liveWorkerLogStore.addLog(
+            `Trade cancelled due to high slippage. (${slippagePct.toFixed(3)}% > ${MAX_SLIPPAGE_PCT}%)`,
+            "warn",
+            {
+              symbol: candidate.symbol,
+              signalPrice: candidate.signalPrice,
+              currentPrice: livePrice,
+            }
+          );
+          return;
+        }
+
+        // Mark this candle as handled so a tick flood cannot double-enter.
+        processedSignalKeys.current.add(signalKey);
+        if (processedSignalKeys.current.size > 500) processedSignalKeys.current.clear();
+        lastProcessedCandleTimestamp.current = candidate.candleKey;
+
+        liveWorkerLogStore.addLog(
+          `Executing ${direction} on ${candidate.symbol} (Score ${signal.score}/85)`,
+          "success",
+          { symbol: candidate.symbol, direction, score: signal.score }
+        );
+
+        if (executionMode === "PAPER") {
+          const pResult = paperTradingEngine.executeOrder({
+            symbol: candidate.symbol,
+            entryPrice: livePrice,
+            atrValue: candidate.atr,
+            direction,
+            marketType: cfg.marketType,
+            leverage: cfg.leverage,
+            riskPercent: cfg.riskPercent,
+          });
+
+          if (pResult.success && pResult.trade) {
+            tradeManager.addTrade({
+              symbol: pResult.trade.symbol,
+              entryPrice: pResult.trade.entryPrice,
+              currentPrice: livePrice,
+              quantity: pResult.trade.quantity,
+              stopLossPrice: pResult.trade.stopLossPrice,
+              takeProfitPrice: pResult.trade.takeProfitPrice,
+              direction: pResult.trade.direction,
+              marketType: pResult.trade.marketType,
+              leverage: pResult.trade.leverage,
+              source: "AUTO-PILOT",
+              mode: "PAPER",
+              customId: pResult.trade.id,
+              atrAtEntry: candidate.atr,
+            });
+            pushNotificationService
+              .notifyTradeExecution({
+                symbol: pResult.trade.symbol,
+                direction: pResult.trade.direction,
+                entryPrice: pResult.trade.entryPrice,
+                source: "Auto-Pilot AI Confluence",
+                mode: "PAPER",
+              })
+              .catch(() => {});
+          } else {
+            liveWorkerLogStore.addLog(
+              `Paper execution blocked: ${pResult.error || "unknown error"}`,
+              "warn",
+              { symbol: candidate.symbol }
+            );
+          }
+          return;
+        }
+
+        const res = await autoTradeEngine.executeTrade({
+          symbol: candidate.symbol,
+          entryPrice: livePrice,
+          atrValue: candidate.atr,
+          direction,
+          marketType: cfg.marketType,
+          autoPilot: true,
+          signalPrice: candidate.signalPrice,
+          orderType: "MARKET",
+        });
+
+        if (res.success && res.trade) {
+          tradeManager.addTrade({
+            symbol: res.trade.symbol,
+            entryPrice: res.trade.entryPrice,
+            currentPrice: livePrice,
+            quantity: res.trade.quantity,
+            stopLossPrice: res.trade.stopLossPrice,
+            takeProfitPrice: res.trade.takeProfitPrice,
+            direction: res.trade.direction,
+            marketType: res.trade.marketType,
+            leverage: res.trade.leverage,
+            source: "AUTO-PILOT",
+            mode: res.trade.executionMode === "PAPER" ? "PAPER" : "REAL",
+            customId: res.trade.id,
+            slOrderId: res.trade.slOrderId,
+            tpOrderId: res.trade.tpOrderId,
+            atrAtEntry: candidate.atr,
+          });
+          pushNotificationService
+            .notifyTradeExecution({
+              symbol: res.trade.symbol,
+              direction: res.trade.direction,
+              entryPrice: res.trade.entryPrice,
+              source: "Auto-Pilot AI Confluence",
+              mode: res.trade.executionMode === "PAPER" ? "PAPER" : "REAL",
+            })
+            .catch(() => {});
+        } else {
+          liveWorkerLogStore.addLog(
+            `Trade Blocked: ${res.error || "exchange rejected the order"}`,
+            "warn",
+            { symbol: candidate.symbol }
+          );
+        }
+      } finally {
+        setTimeout(() => {
+          autoTradeExecutionLock.current = false;
+          localStorage.removeItem("fortress_autopilot_execution_lock");
+        }, 15000);
+      }
+    },
+    []
+  );
+
+  // Multi-symbol scanner: Auto-Pilot is not limited to the chart currently on screen.
+  // It scans the top market list and can hold positions on different symbols
+  // simultaneously, up to maxOpenTrades.
+  useEffect(() => {
+    if (!user) return;
+
+    const scanOnce = async () => {
+      const cfg = autoTradeEngine.getConfig();
+      if (!cfg.autoPilotEnabled) return;
+      const state = autoTradeEngine.getAutoPilotState();
+      if (state !== "ARMED" && state !== "WATCHING") return;
+      if (autoTradeEngine.getOpenTrades().length >= cfg.maxOpenTrades) return;
+      if (autoTradeEngine.getAutoPilotCooldown().isActive) return;
+      if (autoTradeEngine.getPostLossCooldown().isActive) return;
+
+      for (const coin of AUTO_PILOT_SCAN_UNIVERSE) {
+        if (autoTradeEngine.getOpenTrades().length >= cfg.maxOpenTrades) break;
+        if (tradeManager.hasActivePosition(coin.binanceSymbol)) continue;
+
+        try {
+          const data = await fetchCandles(coin.binanceSymbol, 120, timeframe);
+          if (data.length < 30) continue;
+
+          const smcData = scanSMC(data);
+          const conf = evaluateConfluence(data, smcData, htfTrendState);
+          if (!conf || conf.score <= 85) continue;
+
+          const atrSeries = atr(data, 14);
+          const atrVal = atrSeries[atrSeries.length - 1];
+          if (!atrVal || atrVal <= 0) continue;
+
+          const closes = data.map((c) => c.close);
+          const rsiSeries = rsi(closes, 14);
+          const lastRsi = rsiSeries[rsiSeries.length - 1];
+
+          const ma7 = sma(closes, 7);
+          const ma25 = sma(closes, 25);
+          const lastMa7 = ma7[ma7.length - 1];
+          const lastMa25 = ma25[ma25.length - 1];
+          let trend: string | null = null;
+          if (lastMa7 !== null && lastMa25 !== null && lastMa25 !== undefined && lastMa7 !== undefined) {
+            const diff = ((lastMa7 - lastMa25) / lastMa25) * 100;
+            trend = diff > 0.3 ? "uptrend" : diff < -0.3 ? "downtrend" : "sideways";
+          }
+
+          const lastCandle = data[data.length - 1];
+          const candleMs = lastCandle.time > 1e11 ? lastCandle.time : lastCandle.time * 1000;
+          // Same rule as the live tick: only candles that closed after arming.
+          if (candleMs <= autoPilotArmedTimestamp.current) continue;
+
+          const detected = detectPattern(data);
+
+          await attemptAutoPilotEntry({
+            symbol: coin.binanceSymbol,
+            price: lastCandle.close,
+            signalPrice: lastCandle.close,
+            atr: atrVal,
+            rsi: lastRsi ?? null,
+            trend,
+            patternName: detected?.name ?? null,
+            patternDirection: detected?.direction ?? null,
+            fearGreed: null,
+            dataTimestamp: Date.now(),
+            score: conf.score,
+            candleKey: lastCandle.time,
+          });
+        } catch {
+          // A single symbol failing must not stop the scan.
+        }
+      }
+    };
+
+    const timer = setInterval(() => {
+      void scanOnce();
+    }, 60_000);
+    return () => clearInterval(timer);
+  }, [user, timeframe, htfTrendState, attemptAutoPilotEntry]);
+
   // Real-time WebSocket Price Subscription & Auto-Pilot Execution Loop
   useEffect(() => {
     if (!user) return;
@@ -756,156 +1125,70 @@ export default function App() {
       dcaBotEngine.onPriceTick(price, selectedCoin.binanceSymbol);
       paperTradingEngine.evaluatePrice(price, selectedCoin.binanceSymbol);
 
-      // Auto-Pilot execution check on real-time price tick
+      // ===================== Auto-Pilot execution loop =====================
+      // The heavy lifting lives in attemptAutoPilotEntry(); this tick only decides
+      // whether the displayed symbol has a *fresh* candle worth evaluating.
       const config = autoTradeEngine.getConfig();
       if (!config.autoPilotEnabled) return;
 
-      // Prevent instant execution using stale signals from the current candle when Auto-Pilot is armed:
-      // Must only execute when a new pattern is detected or a fresh signal is generated after arming.
+      const apState = autoTradeEngine.getAutoPilotState();
+      if (apState !== "ARMED" && apState !== "WATCHING") return;
+
       if (candles.length < 5) return;
+      if (!(currentAtr > 0)) {
+        liveWorkerLogStore.addLog("Scanning... waiting for volatility (ATR) data", "info", {
+          symbol: selectedCoin.binanceSymbol,
+        });
+        return;
+      }
+
       const latestCandle = candles[candles.length - 1];
       const candleTimeMs = latestCandle.time > 1e11 ? latestCandle.time : latestCandle.time * 1000;
-      const isFreshCandle = candleTimeMs > autoPilotArmedTimestamp.current && latestCandle.time !== lastProcessedCandleTimestamp.current;
+      const isFreshCandle =
+        candleTimeMs > autoPilotArmedTimestamp.current &&
+        latestCandle.time !== lastProcessedCandleTimestamp.current;
 
-      // Check if an active position already exists for this symbol (Execution Lock)
-      if (tradeManager.hasActivePosition(selectedCoin.binanceSymbol)) {
-        liveWorkerLogStore.addLog("Trade rejected: Active position exists", "warn", { symbol: selectedCoin.binanceSymbol });
-        return;
-      }
-
-      // Check cooldown
-      const cooldown = autoTradeEngine.getPostLossCooldown();
-      if (cooldown.isActive) {
-        liveWorkerLogStore.addLog(`Trade rejected: Cooldown active (${cooldown.remainingSeconds}s remaining)`, "warn", { symbol: selectedCoin.binanceSymbol });
-        return;
-      }
-
-      // Check memory and persistent lock
-      const storedLock = localStorage.getItem("fortress_autopilot_execution_lock");
-      const isPersistentlyLocked = storedLock ? parseInt(storedLock, 10) > Date.now() : false;
-      if (autoTradeExecutionLock.current || isPersistentlyLocked) {
-        liveWorkerLogStore.addLog("Trade rejected: Execution locked (flood debounce)", "info", { symbol: selectedCoin.binanceSymbol });
+      if (!isFreshCandle) {
+        liveWorkerLogStore.addLog("Scanning... waiting for the current candle to close", "info", {
+          symbol: selectedCoin.binanceSymbol,
+        });
         return;
       }
 
       const smcData = scanSMC(candles);
       const confluence = evaluateConfluence(candles, smcData, htfTrendState);
 
-      if (!isFreshCandle) {
-        liveWorkerLogStore.addLog("Evaluating market: Waiting for fresh candle signal", "info", { symbol: selectedCoin.binanceSymbol });
-      } else if (confluence && confluence.score <= 85) {
-        liveWorkerLogStore.addLog(`Trade rejected: Confluence score ${confluence.score}/85`, "warn", { symbol: selectedCoin.binanceSymbol, score: confluence.score });
-      }
-
-      // Auto-Pilot Execution hurdle: fresh signal with score > 85
-      if (isFreshCandle && confluence && confluence.score > 85) {
-        // Dynamic direction determination:
-        // If Pattern = Bearish OR AI Verdict / Confluence setupBias = SHORT / Bearish -> SHORT
-        // If Pattern = Bullish OR AI Verdict / Confluence setupBias = LONG / Bullish -> LONG
-        let dynamicDirection: "LONG" | "SHORT" = "LONG";
-        if (pattern?.direction === "bearish" || confluence.setupBias === "Bearish") {
-          dynamicDirection = "SHORT";
-        } else if (pattern?.direction === "bullish" || confluence.setupBias === "Bullish") {
-          dynamicDirection = "LONG";
-        }
-
-        // Check against trade direction mode setting
-        const mode = config.tradeDirectionMode || "BOTH";
-        if (mode === "LONG_ONLY" && dynamicDirection === "SHORT") {
-          liveWorkerLogStore.addLog("Trade rejected: Auto-Pilot trade direction mode is set to LONG ONLY", "warn", { symbol: selectedCoin.binanceSymbol });
-          return;
-        }
-        if (mode === "SHORT_ONLY" && dynamicDirection === "LONG") {
-          liveWorkerLogStore.addLog("Trade rejected: Auto-Pilot trade direction mode is set to SHORT ONLY", "warn", { symbol: selectedCoin.binanceSymbol });
-          return;
-        }
-
-        lastProcessedCandleTimestamp.current = latestCandle.time;
-        autoTradeExecutionLock.current = true;
-        const lockExpiration = Date.now() + 10000;
-        localStorage.setItem("fortress_autopilot_execution_lock", String(lockExpiration));
-
-        const atrVal = currentAtr || (price * 0.02);
-
-        // Check if demo/paper trading or live execution
-        if (!config.apiKey || !config.apiSecret) {
-          const pResult = paperTradingEngine.executeOrder({
-            symbol: selectedCoin.binanceSymbol,
-            entryPrice: price,
-            atrValue: atrVal,
-            direction: dynamicDirection,
-            marketType: config.marketType,
-            leverage: config.leverage,
-            riskPercent: config.riskPercent,
-          });
-
-          if (pResult.success && pResult.trade) {
-            tradeManager.addTrade({
-              symbol: pResult.trade.symbol,
-              entryPrice: pResult.trade.entryPrice,
-              currentPrice: price,
-              quantity: pResult.trade.quantity,
-              stopLossPrice: pResult.trade.stopLossPrice,
-              takeProfitPrice: pResult.trade.takeProfitPrice,
-              direction: pResult.trade.direction,
-              marketType: pResult.trade.marketType,
-              leverage: pResult.trade.leverage,
-              source: "AUTO-PILOT",
-              mode: "PAPER",
-              customId: pResult.trade.id,
-            });
-            pushNotificationService.notifyTradeExecution({
-              symbol: pResult.trade.symbol,
-              direction: pResult.trade.direction,
-              entryPrice: pResult.trade.entryPrice,
-              source: "Auto-Pilot Confluence",
-              mode: "PAPER",
-            }).catch(() => {});
-          }
-        } else {
-          autoTradeEngine.executeTrade({
-            symbol: selectedCoin.binanceSymbol,
-            entryPrice: price,
-            atrValue: atrVal,
-            direction: dynamicDirection,
-            marketType: config.marketType,
-          }).then((res) => {
-            if (res.success && res.trade) {
-              tradeManager.addTrade({
-                symbol: res.trade.symbol,
-                entryPrice: res.trade.entryPrice,
-                currentPrice: price,
-                quantity: res.trade.quantity,
-                stopLossPrice: res.trade.stopLossPrice,
-                takeProfitPrice: res.trade.takeProfitPrice,
-                direction: res.trade.direction,
-                marketType: res.trade.marketType,
-                leverage: res.trade.leverage,
-                source: "AUTO-PILOT",
-                mode: "REAL",
-                customId: res.trade.id,
-              });
-              pushNotificationService.notifyTradeExecution({
-                symbol: res.trade.symbol,
-                direction: res.trade.direction,
-                entryPrice: res.trade.entryPrice,
-                source: "Auto-Pilot Confluence",
-                mode: "REAL",
-              }).catch(() => {});
-            }
-          }).catch(() => {});
-        }
-
-        // Lock execution for 10 seconds to prevent tick flooding
-        setTimeout(() => {
-          autoTradeExecutionLock.current = false;
-          localStorage.removeItem("fortress_autopilot_execution_lock");
-        }, 10000);
-      }
+      void attemptAutoPilotEntry({
+        symbol: selectedCoin.binanceSymbol,
+        price,
+        signalPrice: latestCandle.close,
+        atr: currentAtr,
+        rsi: rsiValue,
+        trend: trendValue,
+        patternName: pattern?.name ?? null,
+        patternDirection: pattern?.direction ?? null,
+        fearGreed: fearGreedValue,
+        dataTimestamp: Date.now(),
+        score: confluence?.score ?? 0,
+        candleKey: latestCandle.time,
+      });
     });
 
     return () => unsub();
-  }, [user, selectedCoin.binanceSymbol, candles, pattern, htfTrendState, currentAtr, effectiveIsPro, isAdmin]);
+  }, [
+    user,
+    selectedCoin.binanceSymbol,
+    candles,
+    pattern,
+    htfTrendState,
+    currentAtr,
+    effectiveIsPro,
+    isAdmin,
+    rsiValue,
+    trendValue,
+    fearGreedValue,
+    attemptAutoPilotEntry,
+  ]);
 
   useEffect(() => {
     if (!user) return;
@@ -1223,8 +1506,19 @@ export default function App() {
         lastProcessedCandleTimestamp.current = candles[candles.length - 1].time;
       }
     }
+    if (nextState) {
+      // Clear any previous AI/risk pause so a re-arm genuinely starts fresh.
+      autoTradeEngine.setAutoPilotState("ARMED");
+      setAutoPilotPauseReason(null);
+    }
     const updated = autoTradeEngine.saveConfig({ autoPilotEnabled: nextState });
     setAutoPilotActive(updated.autoPilotEnabled);
+    setAutoPilotPauseReason(updated.autoPilotEnabled ? null : autoTradeEngine.getAutoPilotPauseReason());
+    setAutoPilotStatusText(
+      updated.autoPilotEnabled
+        ? "Status: Armed — waiting for a fresh candle close"
+        : "Status: Auto-Pilot Idle"
+    );
   }, [effectiveIsPro, isAdmin, candles]);
 
   const inWatch = watchSymbols.has(selectedCoin.binanceSymbol);
@@ -1813,8 +2107,12 @@ export default function App() {
                     );
                     if (confirmed) {
                       await autoTradeEngine.emergencyStop();
+                      // Settle paper positions too so the UI reflects a flat book.
+                      tradeManager.closeAllTrades("KILL_SWITCH");
+                      autoTradeEngine.setAutoPilotState(autoTradeEngine.getAutoPilotPauseReason() ? "PAUSED" : "IDLE");
                       setAutoPilotActive(false);
-                      alert("Emergency stop triggered. All auto-trading paused.");
+                      setAutoPilotPauseReason(autoTradeEngine.getAutoPilotPauseReason());
+                      alert("Emergency stop triggered. Orders cancelled, positions closed, Auto-Pilot paused.");
                     }
                   }}
                   className="px-2 sm:px-2.5 py-1.5 rounded-lg bg-red-600/20 hover:bg-red-600/40 border border-red-500/60 text-[#ff3344] font-black text-[11px] sm:text-xs uppercase tracking-wider flex items-center gap-1 sm:gap-1.5 transition font-mono shadow-sm shadow-red-950/40 shrink-0"
@@ -1837,6 +2135,15 @@ export default function App() {
                   <Power className={`w-3.5 h-3.5 ${autoPilotActive ? "text-[#00ff66]" : "text-red-400"}`} />
                   <span>AUTO-PILOT: {autoPilotActive ? "ON" : "OFF"}</span>
                 </button>
+
+                {autoPilotPauseReason && (
+                  <span
+                    className="px-2.5 py-1.5 rounded-lg bg-red-600/20 border border-red-500/70 text-red-300 font-black text-[11px] uppercase tracking-wider animate-pulse shrink-0"
+                    title="Auto-Pilot halted itself for safety. Re-arm from the header once the issue is resolved."
+                  >
+                    Auto-Pilot Paused: {autoPilotPauseReason}
+                  </span>
+                )}
 
                 {/* Real-Time Auto-Pilot Status Indicator */}
                 <div

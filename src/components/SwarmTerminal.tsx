@@ -29,6 +29,8 @@ interface Props {
   patternDirection?: "bullish" | "bearish" | null;
   fearGreed?: number | null;
   onExecuteTrade?: (direction: "LONG" | "SHORT", leverage: number) => void;
+  /** Epoch ms of the newest candle backing the supplied indicators. */
+  dataTimestamp?: number | null;
 }
 
 export default function SwarmTerminal({
@@ -42,26 +44,38 @@ export default function SwarmTerminal({
   patternDirection,
   fearGreed,
   onExecuteTrade,
+  dataTimestamp,
 }: Props) {
   const [result, setResult] = useState<SwarmDebateResult | null>(null);
   const [visibleMessages, setVisibleMessages] = useState<SwarmAgentMessage[]>([]);
   const [debating, setDebating] = useState<boolean>(false);
   const [activeStep, setActiveStep] = useState<number>(0);
+  const [error, setError] = useState<string | null>(null);
 
   const startDebate = async () => {
-    const effectivePrice = price || 65000;
-    setDebating(true);
+    setError(null);
+    setResult(null);
     setVisibleMessages([]);
     setActiveStep(0);
 
+    // Never substitute a hardcoded price for a missing one.
+    if (typeof price !== "number" || !Number.isFinite(price) || price <= 0) {
+      setError("Live price unavailable for this symbol — the swarm cannot debate without market data.");
+      return;
+    }
+
+    setDebating(true);
+
     const debate = await runRealSwarmDebate({
       symbol,
-      price: effectivePrice,
-      rsi: rsi || 52,
-      trend: trend || "UPTREND",
-      patternName: patternName || "Consolidation Breakout",
-      patternDirection: patternDirection || "bullish",
-      fearGreed: fearGreed || 60,
+      price,
+      // Missing indicators are passed as null rather than invented defaults.
+      rsi: typeof rsi === "number" ? rsi : null,
+      trend: trend ?? null,
+      patternName: patternName ?? null,
+      patternDirection: patternDirection ?? null,
+      fearGreed: typeof fearGreed === "number" ? fearGreed : null,
+      dataTimestamp: dataTimestamp ?? null,
     });
     setResult(debate);
 
@@ -137,9 +151,9 @@ export default function SwarmTerminal({
         {/* Bloomberg Status Bar */}
         <div className="px-5 py-2 bg-[#020408] border-b border-emerald-900/40 flex items-center justify-between text-[11px] text-slate-400 flex-wrap gap-2">
           <div className="flex items-center gap-4">
-            <span>RSI(14): <strong className="text-white font-bold">{rsi ? rsi.toFixed(1) : "52.0"}</strong></span>
-            <span>Trend: <strong className="text-emerald-400 font-bold uppercase">{trend || "UPTREND"}</strong></span>
-            <span>Pattern: <strong className="text-amber-400 font-bold">{patternName || "Accumulation Base"}</strong></span>
+            <span>RSI(14): <strong className="text-white font-bold">{typeof rsi === "number" ? rsi.toFixed(1) : "Unavailable"}</strong></span>
+            <span>Trend: <strong className="text-emerald-400 font-bold uppercase">{trend || "Unavailable"}</strong></span>
+            <span>Pattern: <strong className="text-amber-400 font-bold">{patternName || "None detected"}</strong></span>
           </div>
 
           {result && (
@@ -158,6 +172,19 @@ export default function SwarmTerminal({
 
         {/* Debate Transcript Log */}
         <div className="flex-1 p-5 overflow-y-auto space-y-4 bg-[#03060c]">
+          {error && (
+            <div className="p-3 rounded-xl border border-amber-500/40 bg-amber-950/30 text-amber-200 text-xs">
+              {error}
+            </div>
+          )}
+
+          {result?.isFallback && (
+            <div className="p-3 rounded-xl border border-amber-500/40 bg-amber-950/30 text-amber-200 text-xs">
+              <strong>AI unavailable — deterministic engine active.</strong> These verdicts are computed by local
+              quant rules, not by the AI committee, and are shown for reference only.
+            </div>
+          )}
+
           {visibleMessages.length === 0 && debating && (
             <div className="py-20 flex flex-col items-center justify-center text-center space-y-3">
               <Activity className="w-8 h-8 text-emerald-400 animate-spin" />
@@ -254,7 +281,7 @@ export default function SwarmTerminal({
                   </div>
                 </div>
 
-                {result.verdict === "GO" && onExecuteTrade && (
+                {result.verdict === "GO" && !result.isFallback && onExecuteTrade && (
                   <button
                     onClick={() => {
                       onExecuteTrade(
@@ -268,6 +295,13 @@ export default function SwarmTerminal({
                     <Zap className="w-4 h-4 fill-slate-950" />
                     Execute Swarm Consensus Trade
                   </button>
+                )}
+
+                {result.verdict === "GO" && result.isFallback && (
+                  <span className="text-[11px] text-amber-300 max-w-[220px] text-right">
+                    Execution from this terminal requires an AI-verified consensus. The fallback verdict cannot be
+                    confirmed as a signal.
+                  </span>
                 )}
               </div>
             </div>

@@ -34,6 +34,7 @@ import {
 } from "../lib/BinanceAutoTrade";
 import { paperTradingEngine, PaperTrade } from "../lib/PaperTrading";
 import { tradeManager } from "../lib/TradeManager";
+import { isLiveTradingConfigured } from "../lib/CredentialVault";
 import { formatPrice } from "../lib/patterns";
 import RiskDisclaimerModal from "./RiskDisclaimerModal";
 import { useAuth } from "../lib/auth";
@@ -144,6 +145,13 @@ export default function AutoTradeModal({
     try {
       const bal = await autoTradeEngine.fetchAccountBalance(marketType);
       setAccountBalance(bal.freeBalance);
+      if (!bal.ok && !bal.simulated) {
+        // Never show a made-up $10,000 balance as if it were real funds.
+        setStatusMessage({
+          type: "error",
+          text: `Binance balance unavailable${bal.error ? ` (${bal.error})` : ""}. Position sizing is disabled until the balance can be read.`,
+        });
+      }
     } finally {
       setBalanceLoading(false);
     }
@@ -264,6 +272,12 @@ export default function AutoTradeModal({
             text: pResult.error || "Paper trade execution failed.",
           });
         }
+      } else if (!isLiveTradingConfigured()) {
+        // Fail closed and say why — never pretend a simulated fill was a live order.
+        setStatusMessage({
+          type: "error",
+          text: "Live trading unavailable: no Binance API credentials are configured in the server-side vault. Add them in Settings, or enable Paper Trading to simulate.",
+        });
       } else {
         // Execute Real/Sandbox Engine Trade with God-Mode Checks
         const result = await autoTradeEngine.executeTrade({
@@ -287,13 +301,19 @@ export default function AutoTradeModal({
             marketType: result.trade.marketType,
             leverage: result.trade.leverage,
             source: "MANUAL",
-            mode: "REAL",
+            mode: result.trade.executionMode === "PAPER" ? "PAPER" : "REAL",
             customId: result.trade.id,
+            slOrderId: result.trade.slOrderId,
+            tpOrderId: result.trade.tpOrderId,
           });
 
+          const bracketWarning =
+            result.trade.slOrderError || result.trade.tpOrderError
+              ? ` ⚠ ${[result.trade.slOrderError, result.trade.tpOrderError].filter(Boolean).join(" / ")}.`
+              : "";
           setStatusMessage({
-            type: "success",
-            text: `LIMIT Order placed: ${result.trade.marketType} ${result.trade.direction} ${result.trade.quantity} ${result.trade.symbol} @ ${formatPrice(result.trade.entryPrice)}`,
+            type: bracketWarning ? "info" : "success",
+            text: `${result.trade.executionMode === "PAPER" ? "[PAPER] Simulated" : "[LIVE] Filled"} limit order: ${result.trade.marketType} ${result.trade.direction} ${result.trade.quantity} ${result.trade.symbol} @ ${formatPrice(result.trade.entryPrice)}.${bracketWarning}`,
           });
           setOpenTrades(autoTradeEngine.getOpenTrades());
           void refreshTradeQuota().then(() => setDailyTradeCount(getDailyTradeCount()));

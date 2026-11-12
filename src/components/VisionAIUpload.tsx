@@ -43,17 +43,80 @@ interface Props {
   activeSymbol?: string;
 }
 
-const SAMPLE_CHART_PRESETS = [
-  {
-    name: "BTC/USDT Breakout",
-    url: "https://images.unsplash.com/photo-1642543492481-44e81e3914a7?w=800&auto=format&fit=crop&q=80",
-  },
-  {
-    name: "ETH Reversal Pattern",
-    url: "https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?w=800&auto=format&fit=crop&q=80",
-  },
-];
+const VALID_TRENDS = new Set(["Bullish", "Bearish", "Sideways/Consolidation"]);
+const VALID_ACTIONS = new Set(["LONG", "SHORT", "WAIT"]);
+const MAX_LIST_ITEMS = 12;
 
+function asText(value: unknown, maxChars: number): string {
+  if (typeof value !== "string") return "";
+  const cleaned = Array.from(value)
+    .filter((ch) => {
+      const code = ch.charCodeAt(0);
+      return code === 9 || code === 10 || code === 13 || (code >= 32 && code !== 127);
+    })
+    .join("")
+    .trim();
+  return cleaned.slice(0, maxChars);
+}
+
+function asLevelList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((v) => (typeof v === "string" ? asText(v, 40) : typeof v === "number" ? String(v) : ""))
+    .filter(Boolean)
+    .slice(0, MAX_LIST_ITEMS);
+}
+
+/**
+ * Vision output is model-generated, so it is schema-validated before rendering.
+ * Anything outside the documented enums/ranges is rejected instead of displayed.
+ */
+function parseVisionResult(raw: unknown): VisionAnalysisResult {
+  if (!raw || typeof raw !== "object") throw new Error("Vision AI returned an empty result.");
+  const obj = raw as Record<string, unknown>;
+
+  const trend = asText(obj.trend, 40) as VisionAnalysisResult["trend"];
+  if (!VALID_TRENDS.has(trend)) {
+    throw new Error("Vision AI returned an unrecognized trend value. Analysis discarded.");
+  }
+
+  const sr = (obj.supportResistance ?? {}) as Record<string, unknown>;
+  const patternsRaw = Array.isArray(obj.patterns) ? obj.patterns : [];
+  const patterns = patternsRaw
+    .slice(0, MAX_LIST_ITEMS)
+    .map((p) => {
+      const pat = (p ?? {}) as Record<string, unknown>;
+      const direction = asText(pat.direction, 16).toLowerCase();
+      const confidence = Number(pat.confidence);
+      return {
+        name: asText(pat.name, 80) || "Unnamed pattern",
+        direction: (direction === "bullish" || direction === "bearish" ? direction : "neutral") as
+          | "bullish"
+          | "bearish"
+          | "neutral",
+        confidence: Number.isFinite(confidence) ? Math.min(100, Math.max(0, Math.round(confidence))) : 0,
+        description: asText(pat.description, 400),
+      };
+    });
+
+  const actionRaw = asText(obj.suggestedAction, 16).toUpperCase();
+  const suggestedAction = VALID_ACTIONS.has(actionRaw)
+    ? (actionRaw as "LONG" | "SHORT" | "WAIT")
+    : "WAIT";
+
+  return {
+    trend,
+    trendReason: asText(obj.trendReason, 600),
+    supportResistance: {
+      support: asLevelList(sr.support),
+      resistance: asLevelList(sr.resistance),
+    },
+    patterns,
+    keyTakeaway: asText(obj.keyTakeaway, 900),
+    suggestedAction,
+    invalidationLevel: asText(obj.invalidationLevel, 60) || undefined,
+  };
+}
 export default function VisionAIUpload({ open, onClose, activeSymbol = "BTCUSDT" }: Props) {
   const [dragActive, setDragActive] = useState(false);
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
@@ -113,29 +176,6 @@ export default function VisionAIUpload({ open, onClose, activeSymbol = "BTCUSDT"
     }
   }, [handleFileProcess]);
 
-  // Load sample preset
-  const loadPreset = async (url: string, name: string) => {
-    try {
-      setAnalyzing(true);
-      setError(null);
-      const res = await fetch(url);
-      const blob = await res.blob();
-      const reader = new FileReader();
-      reader.onload = (ev) => {
-        const dataUrl = ev.target?.result as string;
-        setSelectedImage(dataUrl);
-        setFileName(`${name}.png`);
-        setImageMime("image/png");
-        setResult(null);
-        setAnalyzing(false);
-      };
-      reader.readAsDataURL(blob);
-    } catch {
-      setAnalyzing(false);
-      setError("Failed to load sample image. Please upload a screenshot directly.");
-    }
-  };
-
   /**
    * Run Gemini Vision AI analysis via backend Supabase Edge Function.
    */
@@ -168,7 +208,7 @@ export default function VisionAIUpload({ open, onClose, activeSymbol = "BTCUSDT"
       }
 
       if (data?.data) {
-        const parsed: VisionAnalysisResult = data.data;
+        const parsed = parseVisionResult(data.data);
         parsed.modelUsed = data.modelUsed ? `Gemini Vision (${data.modelUsed})` : "Gemini Multimodal";
         setResult(parsed);
       } else {
@@ -176,7 +216,12 @@ export default function VisionAIUpload({ open, onClose, activeSymbol = "BTCUSDT"
       }
     } catch (err) {
       console.warn("Vision AI analysis failed:", err);
-      setError(err instanceof Error ? err.message : "Vision AI analysis failed.");
+      setResult(null);
+      setError(
+        err instanceof Error
+          ? `Vision analysis unavailable: ${err.message}`
+          : "Vision analysis unavailable. Please retry."
+      );
     } finally {
       setAnalyzing(false);
     }
@@ -282,20 +327,10 @@ export default function VisionAIUpload({ open, onClose, activeSymbol = "BTCUSDT"
                       </p>
                     </div>
 
-                    {/* Presets */}
-                    <div className="mt-3 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
-                      <span className="text-[11px] text-slate-500">Or try a sample:</span>
-                      {SAMPLE_CHART_PRESETS.map((preset) => (
-                        <button
-                          key={preset.name}
-                          type="button"
-                          onClick={() => loadPreset(preset.url, preset.name)}
-                          className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] text-slate-300 border border-slate-700 transition"
-                        >
-                          {preset.name}
-                        </button>
-                      ))}
-                    </div>
+                    <p className="text-[11px] text-slate-600 mt-1">
+                      Use a real screenshot from your TradingView/Binance chart — sample images are not analysed
+                      as if they were live charts.
+                    </p>
                   </div>
                 )}
               </div>

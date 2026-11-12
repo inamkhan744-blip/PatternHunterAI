@@ -16,6 +16,8 @@ export interface PaperTrade {
   entryPrice: number;
   quantity: number;
   positionValue: number;
+  /** Collateral committed from the virtual balance (positionValue / leverage). */
+  marginRequired: number;
   stopLossPrice: number;
   takeProfitPrice: number;
   openTime: number;
@@ -120,20 +122,34 @@ export class PaperTradingEngine {
     const leverage = marketType === "Futures" ? Math.max(1, Math.min(10, params.leverage ?? 1)) : 1;
     const riskPercent = params.riskPercent ?? 1.5;
 
+    if (!Number.isFinite(params.entryPrice) || params.entryPrice <= 0) {
+      return { success: false, error: "Invalid paper entry price." };
+    }
+    if (marketType === "Spot" && direction === "SHORT") {
+      return { success: false, error: "SHORT paper positions require Futures market type." };
+    }
+
+    // Compute the stop first so the position is sized from risk, not from margin.
+    const { stopLossPrice, takeProfitPrice } = calculateAtrStopLoss(
+      params.entryPrice,
+      params.atrValue,
+      direction
+    );
+
     // Check virtual margin
-    const sizing = calculatePositionSize(riskPercent, this.account.balance, leverage, params.entryPrice);
+    const sizing = calculatePositionSize(
+      riskPercent,
+      this.account.balance,
+      leverage,
+      params.entryPrice,
+      stopLossPrice
+    );
     if (sizing.quantity <= 0 || sizing.marginRequired > this.account.balance) {
       return {
         success: false,
         error: `Insufficient virtual balance ($${this.account.balance.toFixed(2)}) for margin required ($${sizing.marginRequired.toFixed(2)}).`,
       };
     }
-
-    const { stopLossPrice, takeProfitPrice } = calculateAtrStopLoss(
-      params.entryPrice,
-      params.atrValue,
-      direction
-    );
 
     const trade: PaperTrade = {
       id: `PAPER-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
@@ -144,6 +160,7 @@ export class PaperTradingEngine {
       entryPrice: params.entryPrice,
       quantity: sizing.quantity,
       positionValue: sizing.positionValue,
+      marginRequired: sizing.marginRequired,
       stopLossPrice,
       takeProfitPrice,
       openTime: Date.now(),
@@ -189,6 +206,7 @@ export class PaperTradingEngine {
   public closeTrade(tradeId: string, exitPrice: number, exitReason: "TP" | "SL" | "MANUAL"): PaperTrade | null {
     const trade = this.account.trades.find((t) => t.id === tradeId);
     if (!trade || trade.status !== "OPEN") return null;
+    if (!Number.isFinite(exitPrice) || exitPrice <= 0) return null;
 
     trade.status = "CLOSED";
     trade.closePrice = exitPrice;
@@ -199,8 +217,9 @@ export class PaperTradingEngine {
       ? exitPrice - trade.entryPrice
       : trade.entryPrice - exitPrice;
 
-    const rawPnl = diff * trade.quantity;
-    const realizedPnl = Number((trade.marketType === "Futures" ? rawPnl * trade.leverage : rawPnl).toFixed(2));
+    // `quantity` already includes leverage (notional / price); multiplying by
+    // leverage here would overstate paper P/L by the leverage factor.
+    const realizedPnl = Number((diff * trade.quantity).toFixed(2));
     trade.realizedPnl = realizedPnl;
 
     this.account.balance = Number((this.account.balance + realizedPnl).toFixed(2));

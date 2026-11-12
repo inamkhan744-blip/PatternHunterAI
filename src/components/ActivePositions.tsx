@@ -58,19 +58,43 @@ export default function ActivePositions({ currentSymbol, currentPrice }: Props) 
     }
   }, [currentSymbol, currentPrice]);
 
-  const handleCloseTrade = (trade: ActiveTrade) => {
-    tradeManager.closeTrade(trade.id, trade.currentPrice, "MANUAL");
+  const [closeError, setCloseError] = useState<string | null>(null);
+
+  const handleCloseTrade = async (trade: ActiveTrade) => {
+    setCloseError(null);
+    const { closed, error } = await tradeManager.closeTradeWithExchange(
+      trade.id,
+      trade.currentPrice,
+      "MANUAL"
+    );
+    if (!closed) {
+      setCloseError(error || "Could not close the position.");
+    }
   };
 
-  const handleCloseAll = () => {
+  const handleCloseAll = async () => {
     if (activeTrades.length === 0) return;
-    if (confirm("Close all active open positions immediately at current market prices?")) {
-      tradeManager.closeAllTrades("MANUAL");
+    if (!confirm("Close all active open positions immediately at current market prices?")) return;
+    setCloseError(null);
+    const failures: string[] = [];
+    for (const trade of activeTrades) {
+      const { closed, error } = await tradeManager.closeTradeWithExchange(
+        trade.id,
+        trade.currentPrice,
+        "MANUAL"
+      );
+      if (!closed) failures.push(`${trade.symbol}: ${error || "close failed"}`);
     }
+    if (failures.length > 0) setCloseError(failures.join(" · "));
   };
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6 font-sans text-white">
+      {closeError && (
+        <div className="rounded-xl border border-red-500/40 bg-red-950/40 px-4 py-3 text-xs text-red-200">
+          {closeError}
+        </div>
+      )}
       {/* Top Header & Summary Stats */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
         <div>

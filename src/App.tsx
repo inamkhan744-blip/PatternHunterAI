@@ -57,11 +57,7 @@ import { fetchCandles, fetchMarketStats } from "./lib/binance";
 import { detectPattern, detectAllPatterns, formatPrice } from "./lib/patterns";
 import { rsi, sma, atr } from "./lib/indicators";
 import AutoTradeModal from "./components/AutoTradeModal";
-import {
-  generateFallbackAnalysis,
-  parseAnalysisPrices,
-  getFallbackPrices,
-} from "./lib/fallback";
+import { parseAnalysisPrices, getFallbackPrices } from "./lib/fallback";
 import { supabase } from "./lib/supabase";
 import { canScan, incrementScanCount, getRemainingScans, FREE_LIMIT } from "./lib/scanLimit";
 import { useAuth } from "./lib/auth";
@@ -141,6 +137,7 @@ const NAV_GROUPS: NavGroup[] = [
       { key: "history", label: "Signals", icon: HistoryIcon },
       { key: "alerts", label: "Alerts", icon: Bell },
       { key: "chat", label: "AI Chat", icon: Sparkles },
+      { key: "journal", label: "Journal", icon: BookOpen },
       { key: "portfolio", label: "Portfolio", icon: Wallet },
     ],
   },
@@ -185,6 +182,7 @@ export default function App() {
   const [explanation, setExplanation] = useState<string | null>(null);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
+  const [chartError, setChartError] = useState<string | null>(null);
   const [entryPrice, setEntryPrice] = useState<number | null>(null);
   const [slPrice, setSlPrice] = useState<number | null>(null);
   const [tpPrice, setTpPrice] = useState<number | null>(null);
@@ -246,7 +244,16 @@ export default function App() {
 
   // System Status State: Live vs Paper mode, WebSocket ping latency
   const [isPaperMode, setIsPaperMode] = useState<boolean>(() => !isLiveTradingConfigured());
-  const [wsLatency, setWsLatency] = useState<number>(28);
+  // Real stream health: time of the last received tick (no synthetic latency).
+  const [lastTickAt, setLastTickAt] = useState<number | null>(null);
+  const [streamAgeSec, setStreamAgeSec] = useState<number | null>(null);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setStreamAgeSec(lastTickAt === null ? null : Math.round((Date.now() - lastTickAt) / 1000));
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [lastTickAt]);
 
   // Collapsible panels state for Chart UI optimization
   const [lowerPanelsOpen, setLowerPanelsOpen] = useState(true);
@@ -325,11 +332,26 @@ export default function App() {
     return () => clearInterval(timer);
   }, [fomoLocked]);
 
+  const [watchlistError, setWatchlistError] = useState<string | null>(null);
+
   const loadWatchlist = useCallback(async () => {
-    const { data } = await supabase.from("watchlist").select("*").order("created_at", { ascending: false });
-    if (data) {
-      setWatchlist(data as WatchlistItem[]);
-      setWatchSymbols(new Set((data as WatchlistItem[]).map((w) => w.binance_symbol)));
+    try {
+      const { data, error } = await supabase
+        .from("watchlist")
+        .select("*")
+        .order("created_at", { ascending: false });
+      if (error) throw new Error(error.message);
+      if (data) {
+        setWatchlist(data as WatchlistItem[]);
+        setWatchSymbols(new Set((data as WatchlistItem[]).map((w) => w.binance_symbol)));
+      }
+      setWatchlistError(null);
+    } catch (err) {
+      // Keep whatever is on screen; tell the user instead of silently showing an
+      // empty watchlist as if nothing were saved.
+      setWatchlistError(
+        `Watchlist sync failed: ${err instanceof Error ? err.message : "network error"}. Showing the last loaded list.`
+      );
     }
   }, []);
 
@@ -339,30 +361,81 @@ export default function App() {
       tradeManager.initializeUser(user.id);
     } else {
       tradeManager.cleanupRealtime();
+      setWatchlist([]);
+      setWatchSymbols(new Set());
     }
+  }, [user, loadWatchlist]);
+
+  // Cross-device watchlist sync: another device's add/remove lands here within seconds.
+  useEffect(() => {
+    if (!user) return;
+    const channel = supabase
+      .channel(`watchlist-sync-${user.id}`)
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "watchlist", filter: `user_id=eq.${user.id}` },
+        () => {
+          void loadWatchlist();
+        }
+      )
+      .subscribe();
+    return () => {
+      try {
+        channel.unsubscribe();
+      } catch {
+        // ignore
+      }
+    };
   }, [user, loadWatchlist]);
 
   const toggleWatch = useCallback(
     async (coin: Coin) => {
-      const existing = watchlist.find((w) => w.binance_symbol === coin.binanceSymbol);
-      if (existing) {
-        await supabase.from("watchlist").delete().eq("id", existing.id);
-      } else {
-        await supabase.from("watchlist").insert({
-          coin_symbol: coin.symbol,
-          coin_label: coin.label,
-          binance_symbol: coin.binanceSymbol,
-        });
+      if (!user) {
+        setWatchlistError("Sign in to sync your watchlist across devices.");
+        return;
       }
-      loadWatchlist();
+
+      const existing = watchlist.find((w) => w.binance_symbol === coin.binanceSymbol);
+      try {
+        if (existing) {
+          const { error } = await supabase.from("watchlist").delete().eq("id", existing.id);
+          if (error) throw new Error(error.message);
+        } else {
+          // Upsert on (user_id, binance_symbol) makes double-taps and retries harmless.
+          const { error } = await supabase.from("watchlist").upsert(
+            {
+              user_id: user.id,
+              coin_symbol: coin.symbol,
+              coin_label: coin.label,
+              binance_symbol: coin.binanceSymbol,
+            },
+            { onConflict: "user_id,binance_symbol", ignoreDuplicates: true }
+          );
+          if (error) throw new Error(error.message);
+        }
+        setWatchlistError(null);
+      } catch (err) {
+        setWatchlistError(
+          `Could not update watchlist: ${err instanceof Error ? err.message : "network error"}. Nothing was lost — retry when back online.`
+        );
+      }
+      await loadWatchlist();
     },
-    [watchlist, loadWatchlist]
+    [watchlist, loadWatchlist, user]
   );
 
   const removeWatch = useCallback(
     async (item: WatchlistItem) => {
-      await supabase.from("watchlist").delete().eq("id", item.id);
-      loadWatchlist();
+      try {
+        const { error } = await supabase.from("watchlist").delete().eq("id", item.id);
+        if (error) throw new Error(error.message);
+        setWatchlistError(null);
+      } catch (err) {
+        setWatchlistError(
+          `Could not remove ${item.coin_symbol}: ${err instanceof Error ? err.message : "network error"}.`
+        );
+      }
+      await loadWatchlist();
     },
     [loadWatchlist]
   );
@@ -371,6 +444,7 @@ export default function App() {
     setLoading(true);
     setExplanation(null);
     setAiError(null);
+    setChartError(null);
     setEntryPrice(null);
     setSlPrice(null);
     setTpPrice(null);
@@ -454,10 +528,14 @@ export default function App() {
       }
       const stats = await fetchMarketStats(binanceSymbol);
       setMarketStats(stats);
-    } catch {
+    } catch (err) {
       setCandles([]);
       setPattern(null);
       setAllPatterns([]);
+      // Say the data is unavailable instead of rendering a blank chart silently.
+      setChartError(
+        `Market data unavailable for ${binanceSymbol} (${err instanceof Error ? err.message : "network error"}). Retry with Refresh.`
+      );
     } finally {
       setLoading(false);
     }
@@ -582,8 +660,9 @@ export default function App() {
 
       console.log(`[TradingView Webhook Received] ${signal.direction} for ${targetSymbol} at $${currentPrice}`);
 
-      // Check if paper trading or live execution
-      if (!config.apiKey || !config.apiSecret) {
+      // Check if paper trading or live execution. API keys never live in the
+      // browser, so the server-side vault is the only source of truth.
+      if (!isLiveTradingConfigured()) {
         const pResult = paperTradingEngine.executeOrder({
           symbol: targetSymbol,
           entryPrice: currentPrice,
@@ -663,10 +742,10 @@ export default function App() {
   useEffect(() => {
     if (!user) return;
     const unsub = subscribeTicker(selectedCoin.binanceSymbol, (price, changePct) => {
-      // Simulate live jitter for WebSocket round-trip display
-      setWsLatency(Math.floor(22 + Math.random() * 18));
-      const cfg = autoTradeEngine.getConfig();
-      setIsPaperMode(!cfg.apiKey || !cfg.apiSecret || !cfg.apiKey.trim() || !cfg.apiSecret.trim());
+      setLastTickAt(Date.now());
+      // Credentials live only in the server-side vault; never infer mode from
+      // browser storage, which always holds empty strings.
+      setIsPaperMode(!isLiveTradingConfigured());
 
       setLastPrice(price);
       setPriceChange(changePct);
@@ -947,19 +1026,52 @@ export default function App() {
         throw new Error("AI returned empty analysis");
       }
 
-      // Successfully resolved real AI analysis - no error and no fallback message
-      setExplanation(text);
-      setAiError(null);
+      // --- Validate AI-authored levels before they reach the UI/trade modal ---
+      // A hallucinated price (wrong side of the market, zero, NaN, or >50% away)
+      // must never be presented as a confirmed trade level.
       const parsed = parseAnalysisPrices(text);
-      setEntryPrice(entryVal ?? parsed?.entry ?? getFallbackPrices(pattern, lastPrice).entry);
-      setSlPrice(slVal ?? parsed?.sl ?? getFallbackPrices(pattern, lastPrice).sl);
-      setTpPrice(tpVal ?? parsed?.tp ?? getFallbackPrices(pattern, lastPrice).tp);
+      const sane = (v: number | null | undefined): number | null =>
+        typeof v === "number" && Number.isFinite(v) && v > 0 && Math.abs(v - lastPrice) / lastPrice <= 0.5
+          ? v
+          : null;
+
+      const deterministic = getFallbackPrices(pattern, lastPrice);
+      const nextEntry = sane(entryVal) ?? sane(parsed?.entry) ?? deterministic.entry;
+      const aiSl = sane(slVal) ?? sane(parsed?.sl);
+      const aiTp = sane(tpVal) ?? sane(parsed?.tp);
+
+      // Stop must sit on the protective side of entry; otherwise discard it.
+      const slOnCorrectSide =
+        aiSl !== null && (pattern.direction === "bullish" ? aiSl < nextEntry : aiSl > nextEntry);
+      const tpOnCorrectSide =
+        aiTp !== null && (pattern.direction === "bullish" ? aiTp > nextEntry : aiTp < nextEntry);
+
+      setExplanation(text);
+      setAiError(
+        (aiSl && !slOnCorrectSide) || (aiTp && !tpOnCorrectSide)
+          ? "AI returned stop/target levels on the wrong side of entry — those levels were discarded and recalculated from ATR."
+          : null
+      );
+      setEntryPrice(nextEntry);
+      setSlPrice(slOnCorrectSide ? aiSl : deterministic.sl);
+      setTpPrice(tpOnCorrectSide ? aiTp : deterministic.tp);
     } catch (err) {
       console.error("Pattern Analysis error:", err);
-      const fallback = generateFallbackAnalysis(pattern, selectedCoin.symbol, lastPrice);
-      setExplanation(fallback);
-      setAiError("Live AI analysis unavailable — showing automated estimate.");
+      const reason = err instanceof Error ? err.message : "AI services unreachable";
+
+      // No fabricated AI narrative: say the service is unavailable and clearly label
+      // the deterministic ATR/pattern projection as calculated, not AI-generated.
       const prices = getFallbackPrices(pattern, lastPrice);
+      setExplanation(
+        [
+          `Pattern: ${pattern.name} on ${selectedCoin.symbol}/USDT at $${lastPrice.toFixed(2)}.`,
+          `Entry (calculated): $${prices.entry.toFixed(2)}`,
+          `SL (calculated): $${prices.sl.toFixed(2)}`,
+          `TP (calculated): $${prices.tp.toFixed(2)}`,
+          "These are deterministic percentage projections from the detected pattern — not AI analysis.",
+        ].join("\n")
+      );
+      setAiError(`AI analysis unavailable (${reason}). Levels below are calculated, not AI-generated.`);
       setEntryPrice(prices.entry);
       setSlPrice(prices.sl);
       setTpPrice(prices.tp);
@@ -974,20 +1086,54 @@ export default function App() {
     if (!prices) {
       prices = getFallbackPrices(pattern, lastPrice);
     }
-    await supabase.from("signal_history").insert({
-      coin_symbol: selectedCoin.symbol,
-      coin_label: selectedCoin.label,
-      binance_symbol: selectedCoin.binanceSymbol,
-      pattern_name: pattern.name,
-      pattern_type: pattern.type,
-      direction: pattern.direction,
-      timeframe,
-      entry_price: prices.entry,
-      sl_price: prices.sl,
-      tp_price: prices.tp,
-      outcome: "pending",
-    });
-    setHistoryRefresh((k) => k + 1);
+
+    if (
+      ![prices.entry, prices.sl, prices.tp].every((v) => Number.isFinite(v) && v > 0)
+    ) {
+      setAiError("Cannot save signal: entry/SL/TP levels are invalid.");
+      return;
+    }
+
+    try {
+      // Duplicate guard: the same pattern on the same symbol/timeframe within one
+      // candle window is one signal, not five (protects the win-rate statistics).
+      const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+      const { data: existing, error: lookupError } = await supabase
+        .from("signal_history")
+        .select("id")
+        .eq("binance_symbol", selectedCoin.binanceSymbol)
+        .eq("pattern_name", pattern.name)
+        .eq("timeframe", timeframe)
+        .gte("created_at", fiveMinutesAgo)
+        .limit(1);
+
+      if (lookupError) throw new Error(lookupError.message);
+      if (existing && existing.length > 0) {
+        setAiError("This signal was already saved for the current candle — duplicate skipped.");
+        return;
+      }
+
+      const { error } = await supabase.from("signal_history").insert({
+        coin_symbol: selectedCoin.symbol,
+        coin_label: selectedCoin.label,
+        binance_symbol: selectedCoin.binanceSymbol,
+        pattern_name: pattern.name,
+        pattern_type: pattern.type,
+        direction: pattern.direction,
+        timeframe,
+        entry_price: prices.entry,
+        sl_price: prices.sl,
+        tp_price: prices.tp,
+        outcome: "pending",
+      });
+
+      if (error) throw new Error(error.message);
+      setHistoryRefresh((k) => k + 1);
+    } catch (err) {
+      setAiError(
+        `Signal not saved: ${err instanceof Error ? err.message : "database write failed"}. Your chart data is unaffected.`
+      );
+    }
   }, [pattern, lastPrice, selectedCoin, explanation, timeframe]);
 
   const runScan = useCallback(async () => {
@@ -1348,7 +1494,7 @@ export default function App() {
                   {coinDropdownOpen && (
                     <>
                       <div className="fixed inset-0 z-10" onClick={() => setCoinDropdownOpen(false)} />
-                      <div className="absolute top-full mt-2 left-0 z-20 w-72 rounded-xl bg-slate-800 border border-slate-700 shadow-2xl overflow-hidden">
+                      <div className="absolute top-full mt-2 left-0 z-20 w-72 max-w-[calc(100vw-2rem)] rounded-xl bg-slate-800 border border-slate-700 shadow-2xl overflow-hidden">
                         <div className="p-2 border-b border-slate-700">
                           <div className="relative">
                             <Search className="w-4 h-4 text-slate-500 absolute left-2.5 top-1/2 -translate-y-1/2" />
@@ -1499,7 +1645,9 @@ export default function App() {
                       <div className="absolute left-0 top-full mt-2 z-40 w-64 rounded-xl bg-slate-900 border border-slate-700 shadow-2xl p-3 space-y-2 font-mono text-xs">
                         <div className="flex items-center justify-between pb-2 border-b border-slate-800">
                           <span className="text-[10px] uppercase font-bold text-slate-400">Trading Tools</span>
-                          <span className="text-[10px] text-cyan-400">{wsLatency}ms</span>
+                          <span className={`text-[10px] ${streamAgeSec !== null && streamAgeSec <= 10 ? "text-emerald-400" : "text-amber-400"}`}>
+                            {lastTickAt === null ? "CONNECTING" : streamAgeSec !== null && streamAgeSec <= 10 ? "LIVE" : "STALE"}
+                          </span>
                         </div>
 
                         {/* Vision AI in Mobile Tools */}
@@ -1557,7 +1705,7 @@ export default function App() {
                           <span className="flex items-center gap-1">
                             <Sparkles className="w-3 h-3 text-cyan-400" /> AI Edge
                           </span>
-                          <span className="text-emerald-400 font-bold">ONLINE</span>
+                          <span className="text-slate-400 font-bold">SERVER-SIDE</span>
                         </div>
                       </div>
                     </>
@@ -1608,19 +1756,42 @@ export default function App() {
                     {isPaperMode ? "🟡 PAPER TRADING" : `🔴 LIVE ${currentExchange.toUpperCase()}`}
                   </span>
 
-                  {/* Latency & Stream Health */}
-                  <span className="px-2 py-1 rounded bg-slate-800/80 border border-slate-700 text-slate-300 flex items-center gap-1" title="Binance WebSocket Stream Ping Latency">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                    <span>{wsLatency}ms</span>
+                  {/* Stream Health (based on the age of the last real tick) */}
+                  <span
+                    className={`px-2 py-1 rounded border flex items-center gap-1 ${
+                      lastTickAt !== null && streamAgeSec !== null && streamAgeSec <= 10
+                        ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300"
+                        : "bg-amber-500/10 border-amber-500/30 text-amber-300"
+                    }`}
+                    title={
+                      lastTickAt === null
+                        ? "Waiting for the Binance ticker stream"
+                        : `Last tick received ${streamAgeSec ?? "?"}s ago`
+                    }
+                  >
+                    <span
+                      className={`w-1.5 h-1.5 rounded-full ${
+                        lastTickAt !== null && streamAgeSec !== null && streamAgeSec <= 10
+                          ? "bg-emerald-400 animate-pulse"
+                          : "bg-amber-400"
+                      }`}
+                    />
+                    <span>
+                      {lastTickAt === null
+                        ? "CONNECTING"
+                        : streamAgeSec !== null && streamAgeSec <= 10
+                          ? "STREAM LIVE"
+                          : `STALE ${streamAgeSec ?? "?"}s`}
+                    </span>
                   </span>
 
                   {/* AI Status Badge */}
                   <span
                     className="px-2 py-1 rounded border border-cyan-500/40 bg-cyan-500/10 text-cyan-300 flex items-center gap-1 cursor-default font-mono"
-                    title="Backend Gemini Multimodal AI Edge Active"
+                    title="AI requests are proxied through the backend; live availability is reported per request"
                   >
                     <Sparkles className="w-3 h-3 text-cyan-400" />
-                    <span>AI: EDGE</span>
+                    <span>AI: SERVER</span>
                   </span>
                 </div>
 
@@ -1726,6 +1897,12 @@ export default function App() {
         <main className="flex-1 max-w-7xl mx-auto w-full">
           {activeTab === "chart" && (
             <div className="px-4 sm:px-6 py-4 space-y-4">
+              {chartError && (
+                <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-xs text-amber-200 flex items-start gap-2">
+                  <Zap className="w-4 h-4 shrink-0 mt-0.5" />
+                  <span>{chartError}</span>
+                </div>
+              )}
               {/* Main Chart and Optional Pattern Panel Grid */}
               <div className={`grid grid-cols-1 ${patternPanelOpen ? "lg:grid-cols-3" : "grid-cols-1"} gap-4`}>
                 {/* Chart - min-height 500px or 60vh */}
@@ -1855,6 +2032,14 @@ export default function App() {
             />
           )}
 
+          {activeTab === "watchlist" && watchlistError && (
+            <div className="max-w-7xl mx-auto w-full px-4 sm:px-6 pt-3">
+              <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+                {watchlistError}
+              </div>
+            </div>
+          )}
+
           {activeTab === "watchlist" && (
             <Watchlist
               timeframe={timeframe}
@@ -1885,6 +2070,13 @@ export default function App() {
               pattern={pattern?.name ?? null}
               fearGreed={fearGreedValue}
               onShowCoin={showCoinBySymbol}
+              dataTimestamp={
+                candles.length > 0
+                  ? candles[candles.length - 1].time > 1e11
+                    ? candles[candles.length - 1].time
+                    : candles[candles.length - 1].time * 1000
+                  : null
+              }
             />
           )}
 
@@ -1970,6 +2162,15 @@ export default function App() {
               </button>
             );
           })}
+          {/* Full navigation on every tab (watchlist, signals, journal, settings…) */}
+          <button
+            onClick={() => setIsDrawerOpen(true)}
+            className="flex flex-col items-center gap-1 px-2 sm:px-3 py-1.5 rounded-lg text-slate-500 hover:text-slate-300 transition-colors"
+            aria-label="Open all navigation"
+          >
+            <Menu className="w-5 h-5" />
+            <span className="text-[10px] font-medium">More</span>
+          </button>
         </div>
       </nav>
 
@@ -1999,6 +2200,13 @@ export default function App() {
         patternName={pattern?.name}
         patternDirection={pattern?.direction}
         fearGreed={fearGreedValue}
+        dataTimestamp={
+          candles.length > 0
+            ? candles[candles.length - 1].time > 1e11
+              ? candles[candles.length - 1].time
+              : candles[candles.length - 1].time * 1000
+            : null
+        }
         onExecuteTrade={(_direction, _leverage) => {
           void _direction; void _leverage;
           setAutoTradeOpen(true);

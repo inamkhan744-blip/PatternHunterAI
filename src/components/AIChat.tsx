@@ -13,7 +13,11 @@ interface Props {
   pattern: string | null;
   fearGreed: number | null;
   onShowCoin: (symbol: string) => void;
+  /** Epoch ms of the newest candle backing `price` / `rsi` / `pattern`. */
+  dataTimestamp?: number | null;
 }
+
+const MAX_CONTEXT_AGE_MS = 10 * 60 * 1000;
 
 const ALL_COINS = [...COINS, ...PRO_COINS];
 
@@ -26,6 +30,7 @@ export default function AIChat({
   pattern,
   fearGreed,
   onShowCoin,
+  dataTimestamp,
 }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
@@ -84,9 +89,47 @@ export default function AIChat({
       }
     }
 
+    // --- Market-context freshness gate -------------------------------------
+    // Never let the model analyse stale or missing data: that is how hallucinated
+    // "live" prices end up presented as current market state.
+    const contextAgeMs =
+      typeof dataTimestamp === "number" && Number.isFinite(dataTimestamp) ? Date.now() - dataTimestamp : null;
+    const hasPrice = typeof price === "number" && Number.isFinite(price) && price > 0;
+
+    if (!hasPrice) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content:
+            "Market data unavailable for this symbol right now, so I will not guess. Reload the chart once live prices are back and ask again.",
+          timestamp: Date.now(),
+        },
+      ]);
+      setError("Live market data unavailable — AI analysis skipped.");
+      setLoading(false);
+      return;
+    }
+
+    if (contextAgeMs === null || contextAgeMs > MAX_CONTEXT_AGE_MS) {
+      const ageText =
+        contextAgeMs === null ? "unknown" : `${Math.max(1, Math.round(contextAgeMs / 60000))} min`;
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content: `The market data I have is stale (${ageText} old, limit 10 min), so I won't analyse it as if it were live. Refresh the chart and ask again.`,
+          timestamp: Date.now(),
+        },
+      ]);
+      setError("Stale market data — AI analysis skipped. Refresh the chart to continue.");
+      setLoading(false);
+      return;
+    }
+
     const currentContext = {
       coin: coin.symbol,
-      price: price ?? undefined,
+      price,
       change24h: change24h ?? undefined,
       rsi: rsi ?? undefined,
       trend: trend ?? undefined,
@@ -100,6 +143,7 @@ export default function AIChat({
           action: "chat",
           message: text,
           marketContext: currentContext,
+          dataTimestamp,
           conversationHistory: messages.slice(-8).map((m) => ({ role: m.role, content: m.content })),
         },
       });
@@ -118,7 +162,7 @@ export default function AIChat({
         throw new Error(data?.error || "AI edge unavailable");
       }
 
-      const replyText: string = resolvedReply;
+      const replyText: string = String(resolvedReply).slice(0, 6000);
       const actionTag = replyText.match(/\[ACTION:show_chart:(\w+)\]/);
       if (actionTag) {
         const sym = actionTag[1].toUpperCase();
@@ -127,17 +171,27 @@ export default function AIChat({
       const cleanText = replyText.replace(/\[ACTION:show_chart:\w+\]/g, "").trim();
       const reply: ChatMessage = { role: "assistant", content: cleanText, timestamp: Date.now() };
       setMessages((prev) => [...prev, reply]);
-    } catch {
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : "AI service unavailable";
+      // Do not impersonate the assistant. State plainly that AI is unavailable and
+      // show only raw, attributable metrics the app itself measured.
       const reply: ChatMessage = {
         role: "assistant",
-        content: `Direct Technical Overview: ${coin.symbol} is currently trading at ${price ? "$" + price.toFixed(2) : "N/A"}. Market metrics show RSI: ${rsi?.toFixed(1) ?? "N/A"}, Trend structure: ${trend ?? "Consolidation"}, Active Pattern: ${pattern ?? "None detected"}.`,
+        content:
+          `⚠ AI assistant unavailable (${reason}).\n\n` +
+          `Measured market snapshot for ${coin.symbol}/USDT — not AI analysis:\n` +
+          `• Price: ${price ? "$" + price.toFixed(2) : "unavailable"}\n` +
+          `• RSI(14): ${rsi !== null ? rsi.toFixed(1) : "unavailable"}\n` +
+          `• Trend: ${trend ?? "unavailable"}\n` +
+          `• Pattern: ${pattern ?? "none detected"}`,
         timestamp: Date.now(),
       };
       setMessages((prev) => [...prev, reply]);
+      setError(`AI chat unavailable: ${reason}`);
     } finally {
       setLoading(false);
     }
-  }, [loading, messages, coin, price, rsi, trend, pattern, onShowCoin, change24h, fearGreed]);
+  }, [loading, messages, coin, price, rsi, trend, pattern, onShowCoin, change24h, fearGreed, dataTimestamp]);
 
   const toggleVoice = useCallback(() => {
     const win = window as unknown as {

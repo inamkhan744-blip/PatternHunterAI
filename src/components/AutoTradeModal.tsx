@@ -83,7 +83,7 @@ export default function AutoTradeModal({
   const [, setBalanceLoading] = useState(false);
   const [disclaimerOpen, setDisclaimerOpen] = useState(false);
   const [executing, setExecuting] = useState(false);
-  const [statusMessage, setStatusMessage] = useState<{ type: "success" | "error" | "info"; text: string } | null>(null);
+  const [statusMessage, setStatusMessage] = useState<{ type: "success" | "error" | "info" | "warning"; text: string } | null>(null);
   const [emergencyLoading, setEmergencyLoading] = useState(false);
   const [cooldownRemaining, setCooldownRemaining] = useState<number>(0);
   const [apCooldownRemaining, setApCooldownRemaining] = useState<number>(0);
@@ -236,10 +236,21 @@ export default function AutoTradeModal({
       return;
     }
 
-    const check = await checkTradeExecutionAllowance({ consume: false });
-    if (!check.allowed) {
-      setStatusMessage({ type: "error", text: check.reason || "Daily trade limit reached." });
-      return;
+    // Admins bypass the server quota check entirely — no network call, no blocking.
+    if (!isAdmin) {
+      const check = await checkTradeExecutionAllowance({ consume: false });
+      if (!check.allowed) {
+        setStatusMessage({
+          type: check.stale ? "warning" : "error",
+          text: check.stale
+            ? check.warning || "Trade allowance could not be verified. Please sign in and retry."
+            : check.reason || "Daily trade limit reached.",
+        });
+        return;
+      }
+      if (check.stale && check.warning) {
+        setStatusMessage({ type: "warning", text: check.warning });
+      }
     }
 
     if (!config.disclaimerAgreed) {
@@ -482,12 +493,15 @@ export default function AutoTradeModal({
                   ? "bg-green-500/15 border-green-500/30 text-[#00ff66]"
                   : statusMessage.type === "error"
                   ? "bg-red-500/15 border-red-500/30 text-[#ff3344]"
+                  : statusMessage.type === "warning"
+                  ? "bg-amber-500/10 border-amber-500/25 text-amber-300"
                   : "bg-cyan-500/15 border-cyan-500/30 text-cyan-300"
               }`}
             >
               <div className="flex items-center gap-2">
                 {statusMessage.type === "success" && <CheckCircle className="w-4 h-4 text-[#00ff66] shrink-0" />}
                 {statusMessage.type === "error" && <XCircle className="w-4 h-4 text-[#ff3344] shrink-0" />}
+                {statusMessage.type === "warning" && <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />}
                 {statusMessage.type === "info" && <Zap className="w-4 h-4 text-cyan-400 shrink-0" />}
                 <span>{statusMessage.text}</span>
               </div>

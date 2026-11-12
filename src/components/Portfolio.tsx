@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useMemo } from "react";
-import { Wallet, Plus, Trash2, Loader2, TrendingUp, TrendingDown, RefreshCw, ArrowUpRight, ArrowDownRight, Download, Sliders, CheckCircle2, AlertCircle } from "lucide-react";
+import { Wallet, Plus, Trash2, Loader2, TrendingUp, TrendingDown, RefreshCw, ArrowUpRight, ArrowDownRight, Download, Sliders, CheckCircle2 } from "lucide-react";
 import { COINS, PRO_COINS } from "../constants";
 import { fetchCandles } from "../lib/binance";
 import { formatPrice } from "../lib/patterns";

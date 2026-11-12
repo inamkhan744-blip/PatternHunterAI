@@ -138,23 +138,23 @@ export function setActiveExchange(exchangeId: ExchangeId): void {
   }
 }
 
-export function saveExchangeCredentials(
+export async function saveExchangeCredentials(
   exchangeId: ExchangeId,
   credentials: ExchangeCredentials
-): void {
+): Promise<void> {
   if (typeof localStorage === "undefined") return;
   const serialized = JSON.stringify(credentials);
-  const encrypted = encryptData(serialized);
+  const encrypted = await encryptData(serialized);
   localStorage.setItem(`${STORAGE_KEY_EXCHANGE_KEYS_PREFIX}${exchangeId}`, encrypted);
 }
 
-export function getExchangeCredentials(exchangeId: ExchangeId): ExchangeCredentials {
+export async function getExchangeCredentials(exchangeId: ExchangeId): Promise<ExchangeCredentials> {
   if (typeof localStorage === "undefined") return { apiKey: "", apiSecret: "" };
   const raw = localStorage.getItem(`${STORAGE_KEY_EXCHANGE_KEYS_PREFIX}${exchangeId}`);
   if (!raw) return { apiKey: "", apiSecret: "" };
 
   try {
-    const decrypted = decryptData(raw);
+    const decrypted = await decryptData(raw);
     if (!decrypted) return { apiKey: "", apiSecret: "" };
     return JSON.parse(decrypted) as ExchangeCredentials;
   } catch {
@@ -162,8 +162,8 @@ export function getExchangeCredentials(exchangeId: ExchangeId): ExchangeCredenti
   }
 }
 
-export function isExchangeConnected(exchangeId: ExchangeId): boolean {
-  const creds = getExchangeCredentials(exchangeId);
+export async function isExchangeConnected(exchangeId: ExchangeId): Promise<boolean> {
+  const creds = await getExchangeCredentials(exchangeId);
   return Boolean(creds.apiKey?.trim() && creds.apiSecret?.trim());
 }
 
@@ -231,7 +231,7 @@ export class UnifiedExchangeAdapter {
    * Fetches unified account wallet balances
    */
   public async fetchBalances(): Promise<UnifiedBalance[]> {
-    const creds = getExchangeCredentials(this.exchangeId);
+    const creds = await getExchangeCredentials(this.exchangeId);
     if (!creds.apiKey || !creds.apiSecret) {
       throw new Error(`API keys missing for ${this.exchangeId}. Connect credentials in Settings.`);
     }
@@ -295,7 +295,7 @@ export class UnifiedExchangeAdapter {
    * Places an order across supported live exchanges
    */
   public async placeOrder(req: UnifiedOrderRequest): Promise<UnifiedOrderResult> {
-    const creds = getExchangeCredentials(this.exchangeId);
+    const creds = await getExchangeCredentials(this.exchangeId);
     if (!creds.apiKey || !creds.apiSecret) {
       throw new Error(`API keys missing for ${this.exchangeId}. Connect credentials in Settings.`);
     }

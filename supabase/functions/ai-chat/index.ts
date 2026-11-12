@@ -1,11 +1,33 @@
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, Authorization, X-Client-Info, Apikey, Content-Type",
-};
+/**
+ * ai-chat — PatternHunter AI assistant, swarm debate, pattern explanation and
+ * vision analysis.
+ *
+ * Security controls:
+ *  - Requires a valid Supabase JWT (no anonymous use of platform AI credits).
+ *  - Per-user durable rate limits (20/min, 300/hour).
+ *  - Strict input validation: action allow-list, bounded string lengths, bounded
+ *    history/candle arrays, bounded base64 image size.
+ *  - Prompt-injection resistant: user text is length-limited and control chars are
+ *    stripped before being embedded in prompts.
+ *  - Errors are returned without leaking upstream payloads.
+ */
+
+import {
+  clampString,
+  enforceRateLimit,
+  finiteNumber,
+  json,
+  normalizeSymbol,
+  preflight,
+  requireUser,
+} from "../_shared/security.ts";
 
 const GEMINI_TIMEOUT_MS = 25000;
 const GEMINI_MODELS = ["gemini-1.5-flash", "gemini-2.0-flash"];
+const MAX_MESSAGE_CHARS = 2000;
+const MAX_HISTORY_ITEMS = 10;
+const MAX_IMAGE_BASE64_CHARS = 4_000_000; // ~3 MB binary
+const ALLOWED_ACTIONS = new Set(["swarm", "explain", "vision", "chat"]);
 
 function stripMarkdownJson(raw: string): string {
   return raw
@@ -15,24 +37,51 @@ function stripMarkdownJson(raw: string): string {
     .trim();
 }
 
+function parseJsonResponse(text: string): unknown {
+  return JSON.parse(stripMarkdownJson(text));
+}
+
 Deno.serve(async (req: Request) => {
-  if (req.method === "OPTIONS") {
-    return new Response(null, { status: 200, headers: corsHeaders });
+  const pre = preflight(req);
+  if (pre) return pre;
+
+  if (req.method !== "POST") {
+    return json({ error: "Method not allowed" }, 405);
   }
 
   try {
-    const payload = await req.json();
-    const { action } = payload;
+    // --- 1. Authentication -------------------------------------------------
+    const auth = await requireUser(req);
+    if (!auth.user) return auth.response!;
+
+    // --- 2. Rate limiting --------------------------------------------------
+    const perMinute = await enforceRateLimit(auth.user.id, "ai-chat:min", 20, 60);
+    if (!perMinute) {
+      return json({ error: "Rate limit exceeded (20 requests/minute). Please slow down." }, 429);
+    }
+    const perHour = await enforceRateLimit(auth.user.id, "ai-chat:hour", 300, 3600);
+    if (!perHour) {
+      return json({ error: "Hourly AI request limit reached (300/hour). Try again later." }, 429);
+    }
+
+    // --- 3. Input validation ----------------------------------------------
+    let payload: Record<string, unknown>;
+    try {
+      payload = (await req.json()) as Record<string, unknown>;
+    } catch {
+      return json({ error: "Invalid JSON body" }, 400);
+    }
+
+    const action = clampString(payload.action ?? "chat", 24) || "chat";
+    if (!ALLOWED_ACTIONS.has(action)) {
+      return json({ error: "Unsupported action" }, 400);
+    }
 
     const geminiKey = Deno.env.get("GEMINI_API_KEY");
     if (!geminiKey) {
-      return new Response(
-        JSON.stringify({ unavailable: true, error: "Backend GEMINI_API_KEY is not configured in Supabase secrets." }),
-        { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+      return json({ unavailable: true, error: "Backend GEMINI_API_KEY is not configured." }, 503);
     }
 
-    // Helper to query Gemini with fallback array ["gemini-1.5-flash", "gemini-2.0-flash"]
     async function callGemini(contents: unknown[], generationConfig?: Record<string, unknown>) {
       let lastError = "";
       for (const model of GEMINI_MODELS) {
@@ -40,7 +89,7 @@ Deno.serve(async (req: Request) => {
         const timeoutId = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
         try {
           const res = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(geminiKey)}`,
+            `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(geminiKey!)}`,
             {
               method: "POST",
               headers: { "Content-Type": "application/json" },
@@ -54,42 +103,39 @@ Deno.serve(async (req: Request) => {
           clearTimeout(timeoutId);
 
           if (!res.ok) {
-            const errBody = await res.text().catch(() => "");
-            lastError = `Gemini API error (${res.status}) on ${model}: ${errBody}`;
+            lastError = `Gemini API error (${res.status}) on ${model}`;
             console.warn(lastError);
             continue;
           }
 
           const data = await res.json();
           const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-          if (text && text.trim().length > 0) {
+          if (typeof text === "string" && text.trim().length > 0) {
             return { text: text.trim(), model };
           }
           lastError = `Empty response from model ${model}`;
         } catch (fetchErr) {
           clearTimeout(timeoutId);
           lastError = fetchErr instanceof Error ? fetchErr.message : "Unknown fetch error";
-          console.warn(`Fetch error on ${model}:`, lastError);
+          console.warn(`Fetch error on ${model}: ${lastError}`);
           continue;
         }
       }
       throw new Error(lastError || "All Gemini fallback models failed");
     }
 
-    // Case 1: Swarm Debate Generation
+    // --- 4. Dispatch -------------------------------------------------------
     if (action === "swarm") {
-      const {
-        symbol,
-        price,
-        rsi = 50,
-        trend = "neutral",
-        patternName = "Consolidation",
-        patternDirection = "neutral",
-        fearGreed = 50,
-        atrValue = "N/A",
-        spreadPct = "0.02%",
-        confluenceScore = 50,
-      } = payload;
+      const symbol = normalizeSymbol(payload.symbol) ?? "BTCUSDT";
+      const price = finiteNumber(payload.price, 0, 1e12) ?? 0;
+      const rsi = finiteNumber(payload.rsi, 0, 100) ?? 50;
+      const fearGreed = finiteNumber(payload.fearGreed, 0, 100) ?? 50;
+      const confluenceScore = finiteNumber(payload.confluenceScore, 0, 100) ?? 50;
+      const trend = clampString(payload.trend, 32) || "neutral";
+      const patternName = clampString(payload.patternName, 64) || "Consolidation";
+      const patternDirection = clampString(payload.patternDirection, 16) || "neutral";
+      const atrValue = finiteNumber(payload.atrValue, 0, 1e12) ?? "N/A";
+      const spreadPct = clampString(payload.spreadPct, 16) || "0.02%";
 
       const prompt = `You are an elite hedge fund investment committee debating an algorithmic trade setup.
 Asset: ${symbol}
@@ -116,43 +162,35 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
 }`;
 
       try {
-        const { text, model } = await callGemini(
-          [{ parts: [{ text: prompt }] }],
-          {
-            temperature: 0.3,
-            maxOutputTokens: 600,
-            responseMimeType: "application/json",
-          }
-        );
-
-        const cleaned = stripMarkdownJson(text);
-        const parsed = JSON.parse(cleaned);
-
-        return new Response(
-          JSON.stringify({ success: true, data: parsed, modelUsed: model }),
-          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
-      } catch (err) {
-        return new Response(
-          JSON.stringify({ unavailable: true, error: err instanceof Error ? err.message : "Swarm debate failed" }),
-          { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
+        const { text, model } = await callGemini([{ parts: [{ text: prompt }] }], {
+          temperature: 0.3,
+          maxOutputTokens: 600,
+          responseMimeType: "application/json",
+        });
+        return json({ success: true, data: parseJsonResponse(text), modelUsed: model });
+      } catch {
+        return json({ unavailable: true, error: "Swarm debate is temporarily unavailable." }, 502);
       }
     }
 
-    // Case 1.5: Pattern Explanation
     if (action === "explain") {
-      const { patternName, direction, description, coin, price, recentCandles } = payload;
-      if (!patternName || !coin || price === undefined) {
-        return new Response(
-          JSON.stringify({ error: "Missing required fields: patternName, coin, price" }),
-          { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
+      const patternName = clampString(payload.patternName, 80);
+      const coin = normalizeSymbol(payload.coin);
+      const price = finiteNumber(payload.price, 0, 1e12);
+      const direction = clampString(payload.direction, 16) || "bullish";
+      const description = clampString(payload.description, 600);
+
+      if (!patternName || !coin || price === null) {
+        return json({ error: "Missing or invalid required fields: patternName, coin, price" }, 400);
       }
 
-      const candleSummary = Array.isArray(recentCandles)
-        ? recentCandles.slice(-15).map((c: { close: number }) => (typeof c.close === "number" ? c.close.toFixed(2) : String(c.close))).join(", ")
-        : "N/A";
+      const rawCandles = Array.isArray(payload.recentCandles) ? payload.recentCandles.slice(-15) : [];
+      const candleSummary =
+        rawCandles
+          .map((c) => (c && typeof c === "object" ? finiteNumber((c as { close?: unknown }).close, 0, 1e12) : null))
+          .filter((v): v is number => v !== null)
+          .map((v) => v.toFixed(2))
+          .join(", ") || "N/A";
 
       const prompt = `You are a Senior Quantitative Analyst & Pattern Specialist.
 A technical pattern has been detected on ${coin}/USDT.
@@ -164,75 +202,60 @@ Recent Close Prices: ${candleSummary}
 
 Produce a JSON response strictly matching this schema with NO markdown code fences:
 {
-  "explanation": "Pattern found: ${patternName} at $${Number(price).toFixed(2)}. ${direction === "bearish" ? "Expect a reversal to the downside." : "Expect a reversal to the upside."}\\nEntry: $<entry>\\nSL: $<sl>\\nTP: $<tp>\\nReasoning: <concise institutional rationale>",
+  "explanation": "Pattern found: ${patternName} at $${price.toFixed(2)}. <concise summary>",
   "entry": <calculated numeric entry price>,
   "sl": <calculated numeric stop loss price>,
   "tp": <calculated numeric take profit price>,
-  "reasoning": "<1-2 sentences explaining why this pattern has institutional edge and the invalidation conditions>"
+  "reasoning": "<1-2 sentences explaining the institutional edge and invalidation conditions>"
 }`;
 
       try {
-        const { text, model } = await callGemini(
-          [{ parts: [{ text: prompt }] }],
-          {
-            temperature: 0.2,
-            maxOutputTokens: 600,
-            responseMimeType: "application/json",
-          }
-        );
-
-        const cleaned = stripMarkdownJson(text);
-        const parsed = JSON.parse(cleaned);
-
-        return new Response(
-          JSON.stringify({ success: true, data: parsed, modelUsed: model }),
-          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
-      } catch (err) {
-        return new Response(
-          JSON.stringify({ unavailable: true, error: err instanceof Error ? err.message : "Pattern explanation failed" }),
-          { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
+        const { text, model } = await callGemini([{ parts: [{ text: prompt }] }], {
+          temperature: 0.2,
+          maxOutputTokens: 600,
+          responseMimeType: "application/json",
+        });
+        return json({ success: true, data: parseJsonResponse(text), modelUsed: model });
+      } catch {
+        return json({ unavailable: true, error: "Pattern explanation is temporarily unavailable." }, 502);
       }
     }
 
-    // Case 2: Vision Analysis
     if (action === "vision") {
-      const { imageBase64, mimeType = "image/png", activeSymbol = "BTCUSDT" } = payload;
+      const imageBase64 = typeof payload.imageBase64 === "string" ? payload.imageBase64 : "";
+      const mimeType = clampString(payload.mimeType, 64) || "image/png";
+      const activeSymbol = normalizeSymbol(payload.activeSymbol) ?? "BTCUSDT";
+
       if (!imageBase64) {
-        return new Response(
-          JSON.stringify({ error: "Missing required field: imageBase64" }),
-          { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
+        return json({ error: "Missing required field: imageBase64" }, 400);
+      }
+      if (imageBase64.length > MAX_IMAGE_BASE64_CHARS) {
+        return json({ error: "Image too large. Please upload a chart under ~3 MB." }, 413);
+      }
+      if (!/^[A-Za-z0-9+/=\r\n]+$/.test(imageBase64)) {
+        return json({ error: "imageBase64 is not valid base64 data" }, 400);
+      }
+      if (!/^image\/(png|jpeg|webp)$/.test(mimeType)) {
+        return json({ error: "Unsupported image type" }, 415);
       }
 
       const prompt = `You are a Senior Crypto Technical Analyst & Vision AI specialized in reading candlestick charts, order books, SMC liquidity zones, and technical patterns.
 Carefully examine this candlestick chart image for ${activeSymbol}.
 Identify:
 1. Trend: Overall trend ("Bullish", "Bearish", or "Sideways/Consolidation") with an explanation.
-2. Support & Resistance: The key visible support levels/zones and resistance levels/zones on the chart.
-3. Patterns: All visible chart patterns (e.g. Double Bottom/Top, Head & Shoulders, Flags, Wedges, Fair Value Gaps, Order Blocks, Liquidity Sweeps) with direction ("bullish"|"bearish"|"neutral"), confidence (50-99), and description.
+2. Support & Resistance: The key visible support levels/zones and resistance levels/zones.
+3. Patterns: All visible chart patterns with direction ("bullish"|"bearish"|"neutral"), confidence (50-99), and description.
 4. Key Takeaway: Concise trading recommendation, suggested action ("LONG"|"SHORT"|"WAIT"), and invalidation/stop-loss level.
 
 Respond STRICTLY in valid JSON matching this schema:
 {
   "trend": "Bullish" | "Bearish" | "Sideways/Consolidation",
-  "trendReason": "Brief explanation of price structure and moving averages visible",
-  "supportResistance": {
-    "support": ["Level 1", "Level 2"],
-    "resistance": ["Level 1", "Level 2"]
-  },
-  "patterns": [
-    {
-      "name": "Pattern Name",
-      "direction": "bullish" | "bearish" | "neutral",
-      "confidence": 85,
-      "description": "Details regarding location and breakout target"
-    }
-  ],
+  "trendReason": "Brief explanation of price structure",
+  "supportResistance": { "support": ["Level 1"], "resistance": ["Level 1"] },
+  "patterns": [{ "name": "Pattern Name", "direction": "bullish", "confidence": 85, "description": "Details" }],
   "suggestedAction": "LONG" | "SHORT" | "WAIT",
   "invalidationLevel": "Price level that invalidates this setup",
-  "keyTakeaway": "1-2 sentence actionable summary for execution."
+  "keyTakeaway": "1-2 sentence actionable summary."
 }`;
 
       try {
@@ -241,67 +264,54 @@ Respond STRICTLY in valid JSON matching this schema:
             {
               parts: [
                 { text: prompt },
-                {
-                  inline_data: {
-                    mime_type: mimeType,
-                    data: imageBase64,
-                  },
-                },
+                { inline_data: { mime_type: mimeType, data: imageBase64 } },
               ],
             },
           ],
-          {
-            temperature: 0.2,
-            maxOutputTokens: 800,
-            responseMimeType: "application/json",
-          }
+          { temperature: 0.2, maxOutputTokens: 800, responseMimeType: "application/json" }
         );
-
-        const cleaned = stripMarkdownJson(text);
-        const parsed = JSON.parse(cleaned);
-
-        return new Response(
-          JSON.stringify({ success: true, data: parsed, modelUsed: model }),
-          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
-      } catch (err) {
-        return new Response(
-          JSON.stringify({ unavailable: true, error: err instanceof Error ? err.message : "Vision analysis failed" }),
-          { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
+        return json({ success: true, data: parseJsonResponse(text), modelUsed: model });
+      } catch {
+        return json({ unavailable: true, error: "Vision analysis is temporarily unavailable." }, 502);
       }
     }
 
-    // Case 3: Standard PatternHunter AI Chat (Default)
-    const { message, marketContext, conversationHistory } = payload;
+    // Default: conversational chat
+    const message = clampString(payload.message, MAX_MESSAGE_CHARS);
     if (!message) {
-      return new Response(
-        JSON.stringify({ error: "Missing required field: message" }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+      return json({ error: "Missing required field: message" }, 400);
     }
 
-    const contextStr = marketContext
-      ? `Current market context:
-- Coin: ${marketContext.coin || "N/A"}
-- Price: ${marketContext.price ? "$" + marketContext.price : "N/A"}
-- 24h Change: ${marketContext.change24h ? marketContext.change24h + "%" : "N/A"}
-- RSI: ${marketContext.rsi || "N/A"}
-- Trend: ${marketContext.trend || "N/A"}
-- Detected Pattern: ${marketContext.pattern || "None"}
-- Fear & Greed Index: ${marketContext.fearGreed || "N/A"}`
-      : "";
+    const context = payload.marketContext;
+    const contextStr =
+      context && typeof context === "object"
+        ? `Current market context:
+- Coin: ${normalizeSymbol((context as Record<string, unknown>).coin) ?? "N/A"}
+- Price: ${clampString((context as Record<string, unknown>).price, 24) || "N/A"}
+- 24h Change: ${clampString((context as Record<string, unknown>).change24h, 24) || "N/A"}
+- RSI: ${clampString((context as Record<string, unknown>).rsi, 12) || "N/A"}
+- Trend: ${clampString((context as Record<string, unknown>).trend, 24) || "N/A"}
+- Detected Pattern: ${clampString((context as Record<string, unknown>).pattern, 64) || "None"}
+- Fear & Greed Index: ${clampString((context as Record<string, unknown>).fearGreed, 12) || "N/A"}`
+        : "";
 
-    const historyStr = Array.isArray(conversationHistory) && conversationHistory.length > 0
-      ? "Previous conversation:\n" + conversationHistory
-          .slice(-8)
-          .map((m: { role: string; content: string }) => `${m.role}: ${m.content}`)
+    const history = Array.isArray(payload.conversationHistory)
+      ? payload.conversationHistory.slice(-MAX_HISTORY_ITEMS)
+      : [];
+    const historyStr = history.length
+      ? "Previous conversation:\n" +
+        history
+          .map((item) => {
+            if (!item || typeof item !== "object") return "";
+            const role = clampString((item as Record<string, unknown>).role, 16) === "assistant" ? "assistant" : "user";
+            return `${role}: ${clampString((item as Record<string, unknown>).content, 600)}`;
+          })
+          .filter(Boolean)
           .join("\n")
       : "";
 
     const systemPrompt = `You are PatternHunter AI, an expert cryptocurrency trading assistant integrated into a real-time crypto pattern detection app.
 You help users understand market conditions, analyze patterns, and make informed trading decisions.
-You have access to real-time market data that is provided as context.
 
 ${contextStr}
 
@@ -309,29 +319,22 @@ ${historyStr}
 
 Guidelines:
 - Be concise but thorough. Use clear, professional language.
-- When users ask to "show" or "display" a coin chart, respond with: [ACTION:show_chart:SYMBOL] where SYMBOL is the coin symbol (e.g., BTC, ETH).
-- When users mention "buy" or "sell" a coin, acknowledge and provide analysis but remind them this is educational, not financial advice.
-- Always include a disclaimer when giving trade-related advice.
-- If asked about specific price levels, use the provided market context.
-- Keep responses under 150 words unless the user specifically asks for detail.
-- Use simple formatting — no markdown headers, just plain text with line breaks.`;
+- When users ask to "show" or "display" a coin chart, respond with: [ACTION:show_chart:SYMBOL].
+- Trading guidance is educational, never financial advice. Always include a disclaimer for trade-related questions.
+- Keep responses under 150 words unless the user asks for detail.
+- Use plain text with line breaks, no markdown headers.`;
 
-    const prompt = `${systemPrompt}\n\nUser: ${message}\n\nPatternHunter AI:`;
-
-    const { text, model } = await callGemini(
-      [{ parts: [{ text: prompt }] }],
-      { temperature: 0.6, maxOutputTokens: 500 }
-    );
-
-    return new Response(
-      JSON.stringify({ response: text, modelUsed: model }),
-      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
-
+    try {
+      const { text, model } = await callGemini(
+        [{ parts: [{ text: `${systemPrompt}\n\nUser: ${message}\n\nPatternHunter AI:` }] }],
+        { temperature: 0.6, maxOutputTokens: 500 }
+      );
+      return json({ response: text, modelUsed: model });
+    } catch {
+      return json({ unavailable: true, error: "AI assistant is temporarily unavailable." }, 502);
+    }
   } catch (err) {
-    return new Response(
-      JSON.stringify({ unavailable: true, error: err instanceof Error ? err.message : "Unknown error" }),
-      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
+    console.error("[ai-chat] unexpected error:", err instanceof Error ? err.message : err);
+    return json({ unavailable: true, error: "AI service internal error" }, 500);
   }
 });

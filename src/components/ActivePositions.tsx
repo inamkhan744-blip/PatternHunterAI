@@ -20,7 +20,7 @@ import {
   TradeStats,
 } from "../lib/TradeManager";
 import { formatPrice } from "../lib/patterns";
-import { getDecryptedApiKeys } from "../lib/CryptoSecurity";
+import { isLiveTradingConfigured } from "../lib/CredentialVault";
 
 interface Props {
   currentSymbol?: string;
@@ -33,15 +33,8 @@ export default function ActivePositions({ currentSymbol, currentPrice }: Props) 
   const [tradeHistory, setTradeHistory] = useState<ClosedTrade[]>(() => tradeManager.getTradeHistory());
   const [stats, setStats] = useState<TradeStats>(() => tradeManager.getStats());
 
-  // Check if real Binance API credentials exist in localStorage
-  const hasValidBinanceKeys = useMemo(() => {
-    try {
-      const keys = getDecryptedApiKeys();
-      return Boolean(keys.apiKey && keys.apiSecret && keys.apiKey.trim().length > 0 && keys.apiSecret.trim().length > 0);
-    } catch {
-      return false;
-    }
-  }, []);
+  // Real-money mode requires server-side encrypted credentials to exist.
+  const hasValidBinanceKeys = useMemo(() => isLiveTradingConfigured(), []);
 
   useEffect(() => {
     const sync = () => {

@@ -24,9 +24,15 @@ import {
 import { usePWAInstall } from "../lib/pwa";
 import { pushNotificationService } from "../lib/PushNotification";
 import { webhookService } from "../lib/WebhookService";
-import { storeEncryptedApiKeys } from "../lib/CryptoSecurity";
+import {
+  getCachedCredentialStatus,
+  refreshCredentialStatus,
+  saveExchangeCredentials as saveVaultCredentials,
+  deleteExchangeCredentials,
+  clearCredentialCache,
+  type CredentialStatus,
+} from "../lib/CredentialVault";
 import { loadTelegramConfig, saveTelegramConfig } from "../lib/TelegramService";
-import { autoTradeEngine } from "../lib/BinanceAutoTrade";
 import {
   SUPPORTED_EXCHANGES,
   type ExchangeId,
@@ -36,9 +42,6 @@ import {
   saveExchangeCredentials,
   testExchangeConnectivity,
 } from "../lib/MultiExchange";
-import { useAuth } from "../lib/auth";
-import { isUserAdmin } from "../lib/SubscriptionManager";
-
 interface Props {
   open: boolean;
   onClose: () => void;
@@ -59,12 +62,11 @@ export default function SettingsModal({
   onOpenAutoTrade,
   onOpenVisionAI,
 }: Props) {
-  const { user } = useAuth();
-  const isAdmin = propIsAdmin ?? isUserAdmin(user?.email);
+  // Admin badge is decided by the server-verified profile passed down from App.
+  const isAdmin = propIsAdmin === true;
 
   const { isStandalone, triggerInstall } = usePWAInstall();
   const [installStatus, setInstallStatus] = useState<string | null>(null);
-  const [notificationsEnabled, setNotificationsEnabled] = useState(true);
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [hapticFeedback, setHapticFeedback] = useState(true);
   const [pushPermission, setPushPermission] = useState<NotificationPermission>(() => pushNotificationService.getPermission());
@@ -74,6 +76,7 @@ export default function SettingsModal({
   const [exchangeKey, setExchangeKey] = useState<string>("");
   const [exchangeSecret, setExchangeSecret] = useState<string>("");
   const [exchangePassphrase, setExchangePassphrase] = useState<string>("");
+  const [credentialStatus, setCredentialStatus] = useState<CredentialStatus>(getCachedCredentialStatus());
   const [testingPing, setTestingPing] = useState(false);
   const [pingResult, setPingResult] = useState<{ success: boolean; latencyMs: number } | null>(null);
 
@@ -102,10 +105,20 @@ export default function SettingsModal({
   // Load stored credentials when opening modal or changing exchange
   useEffect(() => {
     if (!open) return;
-    const creds = getExchangeCredentials(selectedExchange);
-    setExchangeKey(creds.apiKey || "");
-    setExchangeSecret(creds.apiSecret || "");
-    setExchangePassphrase(creds.passphrase || "");
+    setCredentialStatus(getCachedCredentialStatus());
+    if (selectedExchange === "binance") {
+      // Server-side vault: stored secrets are never returned to the browser.
+      setExchangeKey("");
+      setExchangeSecret("");
+      setExchangePassphrase("");
+      void refreshCredentialStatus().then(setCredentialStatus);
+    } else {
+      void getExchangeCredentials(selectedExchange).then((creds) => {
+        setExchangeKey(creds.apiKey || "");
+        setExchangeSecret(creds.apiSecret || "");
+        setExchangePassphrase(creds.passphrase || "");
+      });
+    }
 
     const tg = loadTelegramConfig();
     setTelegramTokenState(tg.botToken || "");
@@ -155,12 +168,21 @@ export default function SettingsModal({
     setTimeout(() => setCopiedPayload(false), 2000);
   };
 
-  const handleRegenerateWebhookToken = () => {
-    const confirmed = window.confirm("Regenerate Webhook token? You will need to update your TradingView alert webhook URL.");
-    if (confirmed) {
-      webhookService.regenerateToken();
+    const handleRegenerateWebhookToken = async () => {
+    const confirmed = window.confirm(
+      "Regenerate the webhook token? Existing TradingView alerts will stop working until you update them."
+    );
+    if (!confirmed) return;
+
+    try {
+      await webhookService.regenerateToken();
       setWebhookUrl(webhookService.getWebhookUrl());
-      setToast({ type: "success", message: "New Webhook token generated!" });
+      setToast({ type: "success", message: "New server-issued webhook token generated!" });
+    } catch (err) {
+      setToast({
+        type: "error",
+        message: err instanceof Error ? err.message : "Failed to rotate the webhook token.",
+      });
     }
   };
 
@@ -188,22 +210,54 @@ export default function SettingsModal({
 
   if (!open) return null;
 
-  const handleSaveApiConfiguration = (e?: React.FormEvent) => {
+  const handleDeleteStoredCredentials = async () => {
+    if (!window.confirm("Delete the stored Binance API credentials? Live trading will stop until new keys are saved.")) {
+      return;
+    }
+    try {
+      await deleteExchangeCredentials("binance");
+      clearCredentialCache();
+      setCredentialStatus(getCachedCredentialStatus());
+      setToast({ type: "success", message: "Stored Binance credentials deleted from the server vault." });
+    } catch (err) {
+      setToast({ type: "error", message: err instanceof Error ? err.message : "Failed to delete stored credentials." });
+    }
+  };
+
+  const handleSaveApiConfiguration = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
 
-    // 1. Encrypt and Save Exchange API Keys
-    saveExchangeCredentials(selectedExchange, {
-      apiKey: exchangeKey.trim(),
-      apiSecret: exchangeSecret.trim(),
-      passphrase: exchangePassphrase.trim() || undefined,
-    });
     setActiveExchange(selectedExchange);
 
+    // 1. Persist exchange API keys
     if (selectedExchange === "binance") {
-      storeEncryptedApiKeys(exchangeKey.trim(), exchangeSecret.trim());
-      autoTradeEngine.saveConfig({
+      if (!exchangeKey.trim() || !exchangeSecret.trim()) {
+        setToast({ type: "error", message: "Enter both the API key and secret so they can be stored securely." });
+        return;
+      }
+      try {
+        // Sent once over TLS to the `binance-credentials` edge function, which
+        // encrypts with AES-256-GCM using a server-only key. Never stored locally.
+        const status = await saveVaultCredentials({
+          exchange: "binance",
+          apiKey: exchangeKey,
+          apiSecret: exchangeSecret,
+        });
+        setCredentialStatus(status);
+        setExchangeKey("");
+        setExchangeSecret("");
+      } catch (err) {
+        setToast({
+          type: "error",
+          message: err instanceof Error ? err.message : "Failed to store credentials in the server vault.",
+        });
+        return;
+      }
+    } else {
+      await saveExchangeCredentials(selectedExchange, {
         apiKey: exchangeKey.trim(),
         apiSecret: exchangeSecret.trim(),
+        passphrase: exchangePassphrase.trim() || undefined,
       });
     }
 
@@ -217,7 +271,10 @@ export default function SettingsModal({
     setSaveSuccess(true);
     setToast({
       type: "success",
-      message: `${SUPPORTED_EXCHANGES.find((x) => x.id === selectedExchange)?.name} API credentials saved securely with AES-256 encryption!`,
+      message:
+        selectedExchange === "binance"
+          ? "Binance credentials encrypted server-side with AES-256-GCM and stored in your vault."
+          : `${SUPPORTED_EXCHANGES.find((x) => x.id === selectedExchange)?.name} API credentials saved with AES-256-GCM.`,
     });
     setTimeout(() => setSaveSuccess(false), 3000);
   };
@@ -317,7 +374,7 @@ export default function SettingsModal({
                 Multi-Exchange Router (15+ Markets)
               </span>
               <span className="text-[10px] text-cyan-400 font-mono bg-cyan-950/60 px-2 py-0.5 rounded border border-cyan-500/30">
-                AES-256 Encrypted
+                AES-256-GCM · Server Vault
               </span>
             </div>
 
@@ -345,6 +402,31 @@ export default function SettingsModal({
             <p className="text-[11px] text-slate-400 font-sans">
               {SUPPORTED_EXCHANGES.find((x) => x.id === selectedExchange)?.description}
             </p>
+
+            {selectedExchange === "binance" && (
+              <div
+                className={`flex items-center justify-between gap-2 px-3 py-2 rounded-lg border font-mono text-[11px] ${
+                  credentialStatus.configured
+                    ? "bg-emerald-950/40 border-emerald-500/40 text-emerald-300"
+                    : "bg-slate-950 border-slate-700 text-slate-400"
+                }`}
+              >
+                <span>
+                  {credentialStatus.configured
+                    ? `✓ Encrypted credentials on server · ••••${credentialStatus.apiKeyLast4 ?? "----"}`
+                    : "No Binance credentials stored yet (paper mode)"}
+                </span>
+                {credentialStatus.configured && (
+                  <button
+                    type="button"
+                    onClick={handleDeleteStoredCredentials}
+                    className="text-[10px] font-bold uppercase text-red-300 hover:text-red-200 border border-red-500/40 rounded px-2 py-1"
+                  >
+                    Remove
+                  </button>
+                )}
+              </div>
+            )}
 
             <div className="space-y-3">
               {/* API Key */}

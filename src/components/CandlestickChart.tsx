@@ -375,7 +375,6 @@ export default function CandlestickChart({
         ctx.stroke();
 
         // Calculate Prices & R:R
-        const entryPrice = activeSeries.coordinateToPrice(entryY);
         const targetPrice = activeSeries.coordinateToPrice(targetY);
         const slPrice = activeSeries.coordinateToPrice(slY);
 

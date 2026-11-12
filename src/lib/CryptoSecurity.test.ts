@@ -1,4 +1,4 @@
-import { encryptData, decryptData, storeEncryptedApiKeys, getDecryptedApiKeys, clearApiKeys, rotateStoredApiKeys } from "./CryptoSecurity";
+import { encryptData, decryptData } from "./CryptoSecurity";
 
 function assert(condition: boolean, msg: string) {
   if (!condition) {
@@ -17,34 +17,37 @@ const mockStorage = new Map<string, string>();
 };
 
 async function runTests() {
-  console.log("Running CryptoSecurity Test Suite...");
+  console.log("Running CryptoSecurity (AES-256-GCM) Test Suite...");
 
   const secretData = "my_binance_super_secret_api_key_123456";
-  const encrypted = encryptData(secretData);
-  assert(encrypted.startsWith("v2_aes_gcm::"), "Ciphertext uses authenticated V2 format prefix");
+  const passphrase = "operator-supplied-passphrase";
+
+  const encrypted = await encryptData(secretData, passphrase);
+  assert(encrypted.startsWith("v3_aes_gcm::"), "Ciphertext uses the AES-256-GCM v3 format prefix");
   assert(encrypted !== secretData, "Encrypted output is distinct from plaintext");
 
-  const decrypted = decryptData(encrypted);
+  const bundle = encrypted.slice("v3_aes_gcm::".length);
+  const [ivB64] = bundle.split(":");
+  assert(Buffer.from(ivB64, "base64").length === 12, "A 96-bit random IV is used");
+
+  const decrypted = await decryptData(encrypted, passphrase);
   assert(decrypted === secretData, "Decrypted text exactly matches original plaintext");
 
-  const tampered = encrypted.slice(0, -4) + "abcd";
-  const tamperedResult = decryptData(tampered);
-  assert(tamperedResult === "", "Tampered ciphertext is rejected and returns empty string");
+  const tampered = encrypted.slice(0, -4) + "AAAA";
+  const tamperedResult = await decryptData(tampered, passphrase);
+  assert(tamperedResult === "", "Tampered ciphertext is rejected (GCM auth tag failure)");
 
-  storeEncryptedApiKeys("test_key_abc", "test_secret_xyz");
-  const retrieved = getDecryptedApiKeys();
-  assert(retrieved.apiKey === "test_key_abc", "Stored apiKey retrieved and decrypted accurately");
-  assert(retrieved.apiSecret === "test_secret_xyz", "Stored apiSecret retrieved and decrypted accurately");
+  const wrongKeyResult = await decryptData(encrypted, "a-different-passphrase");
+  assert(wrongKeyResult === "", "Decryption with the wrong key fails closed");
 
-  const rotated = rotateStoredApiKeys(undefined, "new_rotation_key_999");
-  assert(rotated === true, "Key rotation succeeds");
-  const storedEncrypted = mockStorage.get("fortress_encrypted_api_credentials");
-  const decryptedWithNewKey = decryptData(storedEncrypted!, "new_rotation_key_999");
-  assert(JSON.parse(decryptedWithNewKey).apiKey === "test_key_abc", "Credentials preserved after rotation");
-
-  clearApiKeys();
-  const cleared = getDecryptedApiKeys();
-  assert(cleared.apiKey === "" && cleared.apiSecret === "", "Clearing credentials removes all traces");
+  // Device-key path (random per-browser key, never derived from origin or VITE_*).
+  const deviceEncrypted = await encryptData(secretData);
+  const deviceDecrypted = await decryptData(deviceEncrypted);
+  assert(deviceDecrypted === secretData, "Device-key encryption round-trips");
+  assert(
+    mockStorage.get("fortress_device_key_v3") !== undefined,
+    "Device key is generated locally as random bytes"
+  );
 
   console.log("All CryptoSecurity tests passed successfully!");
 }

@@ -1,10 +1,22 @@
 project_id = ""
 
-[functions.explain-pattern]
-verify_jwt = false
-
+# Every user-facing function requires a verified Supabase JWT at the gateway.
+# The functions also re-verify the token server-side (defence in depth).
 [functions.ai-chat]
-verify_jwt = false
+verify_jwt = true
 
+[functions.explain-pattern]
+verify_jwt = true
+
+[functions.binance-proxy]
+verify_jwt = true
+
+[functions.binance-credentials]
+verify_jwt = true
+
+# TradingView cannot send a Supabase JWT, so the gateway check is disabled.
+# This function authenticates every request itself: 256-bit per-user token
+# (hashed lookup + constant-time compare), mandatory timestamp within +/- 300 s,
+# optional HMAC-SHA256 signature, and a replay guard table.
 [functions.tradingview-webhook]
 verify_jwt = false

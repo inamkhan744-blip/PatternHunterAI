@@ -32,7 +32,12 @@ import {
   clearCredentialCache,
   type CredentialStatus,
 } from "../lib/CredentialVault";
-import { loadTelegramConfig, saveTelegramConfig } from "../lib/TelegramService";
+import {
+  loadTelegramConfig,
+  saveTelegramConfig,
+  saveTelegramCredentials,
+  refreshTelegramStatus,
+} from "../lib/TelegramService";
 import {
   SUPPORTED_EXCHANGES,
   type ExchangeId,
@@ -120,9 +125,13 @@ export default function SettingsModal({
       });
     }
 
+    // The bot token is no longer stored in the browser; only its status is known.
     const tg = loadTelegramConfig();
-    setTelegramTokenState(tg.botToken || "");
+    setTelegramTokenState("");
     setTelegramChatIdState(tg.chatId || "");
+    void refreshTelegramStatus().then((status) => {
+      setTelegramChatIdState(status.chatId || "");
+    });
 
     setWebhookUrl(webhookService.getWebhookUrl());
 
@@ -261,12 +270,28 @@ export default function SettingsModal({
       });
     }
 
-    // 2. Save Telegram Bot Configuration
-    saveTelegramConfig({
-      botToken: telegramToken.trim(),
-      chatId: telegramChatId.trim(),
-      enabled: Boolean(telegramToken.trim() && telegramChatId.trim()),
-    });
+    // 2. Save Telegram Bot Configuration. The token is encrypted by the edge
+    // function and never written to localStorage.
+    const tgToken = telegramToken.trim();
+    const tgChat = telegramChatId.trim();
+    if (tgToken) {
+      const tgResult = await saveTelegramCredentials({
+        botToken: tgToken,
+        chatId: tgChat,
+        enabled: Boolean(tgToken && tgChat),
+      });
+      if (!tgResult.success) {
+        setToast({
+          type: "error",
+          message: tgResult.error || "Failed to store Telegram credentials.",
+        });
+        return;
+      }
+      setTelegramTokenState("");
+    } else if (tgChat !== loadTelegramConfig().chatId) {
+      // Chat id changes only; the stored token stays server-side.
+      saveTelegramConfig({ chatId: tgChat, enabled: Boolean(tgChat) });
+    }
 
     setSaveSuccess(true);
     setToast({
@@ -529,7 +554,7 @@ export default function SettingsModal({
                     type={showTelegramToken ? "text" : "password"}
                     value={telegramToken}
                     onChange={(e) => setTelegramTokenState(e.target.value)}
-                    placeholder="123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ"
+                    placeholder="Enter a bot token to store it encrypted (never saved in the browser)"
                     className="w-full px-3 py-2 pr-9 rounded-lg bg-slate-950 border border-slate-700 focus:border-cyan-400 focus:outline-none text-xs text-white placeholder-slate-600 font-mono"
                   />
                   <button

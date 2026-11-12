@@ -65,8 +65,8 @@ class PushNotificationService {
 
     const options: NotificationOptions = {
       body: payload.body,
-      icon: payload.icon || "https://images.unsplash.com/photo-1622979135225-d2ba269bc1df?w=192&auto=format&fit=crop&q=80",
-      badge: payload.badge || "https://images.unsplash.com/photo-1622979135225-d2ba269bc1df?w=192&auto=format&fit=crop&q=80",
+      icon: payload.icon || "/pwa-192x192.png",
+      badge: payload.badge || "/pwa-192x192.png",
       tag: payload.tag || `fortress-${Date.now()}`,
       data: payload.data,
     };

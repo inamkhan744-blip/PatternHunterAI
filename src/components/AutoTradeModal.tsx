@@ -158,6 +158,10 @@ export default function AutoTradeModal({
     try {
       const bal = await autoTradeEngine.fetchAccountBalance(marketType);
       setAccountBalance(bal.freeBalance);
+      // Seed today's starting equity so the daily-loss breaker measures real drawdown.
+      if (bal.ok && bal.freeBalance > 0) {
+        autoTradeEngine.ensureDailyStartingBalance(bal.freeBalance);
+      }
       if (!bal.ok && !bal.simulated) {
         // Never show a made-up $10,000 balance as if it were real funds.
         setStatusMessage({
@@ -326,7 +330,7 @@ export default function AutoTradeModal({
               : "";
           setStatusMessage({
             type: bracketWarning ? "info" : "success",
-            text: `${result.trade.executionMode === "PAPER" ? "[PAPER] Simulated" : "[LIVE] Filled"} limit order: ${result.trade.marketType} ${result.trade.direction} ${result.trade.quantity} ${result.trade.symbol} @ ${formatPrice(result.trade.entryPrice)}.${bracketWarning}`,
+            text: `${result.trade.executionMode === "PAPER" ? "[PAPER] Simulated" : "[LIVE] Filled"} ${result.trade.orderType === "MARKET" ? "market" : "limit"} order: ${result.trade.marketType} ${result.trade.direction} ${result.trade.quantity} ${result.trade.symbol} @ ${formatPrice(result.trade.entryPrice)}.${bracketWarning}`,
           });
           setOpenTrades(autoTradeEngine.getOpenTrades());
           void refreshTradeQuota().then(() => setDailyTradeCount(getDailyTradeCount()));
@@ -354,7 +358,11 @@ export default function AutoTradeModal({
       setConfig(autoTradeEngine.getConfig());
       setStatusMessage({
         type: "error",
-        text: `EMERGENCY KILL SWITCH ENGAGED: Cancelled ${res.cancelledOrdersCount} orders, terminated ${res.closedPositionsCount} positions. Auto-Pilot DISABLED.`,
+        text:
+          `EMERGENCY KILL SWITCH ENGAGED: Cancelled ${res.cancelledOrdersCount} order group(s), closed ${res.closedPositionsCount} position(s). Auto-Pilot DISABLED.` +
+          (res.failures.length > 0
+            ? ` WARNING: ${res.failures.length} position(s) could not be closed: ${res.failures.join("; ")}`
+            : ""),
       });
     } finally {
       setEmergencyLoading(false);
@@ -365,8 +373,33 @@ export default function AutoTradeModal({
   const positionPreview = useMemo(() => {
     if (!currentPrice || currentPrice <= 0) return null;
     const lev = config.marketType === "Futures" ? config.leverage : 1;
-    return calculatePositionSize(config.riskPercent, accountBalance, lev, currentPrice);
-  }, [config.riskPercent, accountBalance, config.leverage, config.marketType, currentPrice]);
+    const direction = config.marketType === "Futures" ? config.direction : "LONG";
+    // Size from the same ATR stop the order will use, otherwise the preview and the
+    // executed quantity disagree.
+    const atrForSizing = currentAtr > 0 ? currentAtr : currentPrice * 0.01;
+    const { stopLossPrice } = calculateAtrStopLoss(
+      currentPrice,
+      atrForSizing,
+      direction,
+      config.atrMultiplier
+    );
+    return calculatePositionSize(
+      config.riskPercent,
+      accountBalance,
+      lev,
+      currentPrice,
+      stopLossPrice
+    );
+  }, [
+    config.riskPercent,
+    config.atrMultiplier,
+    config.direction,
+    accountBalance,
+    config.leverage,
+    config.marketType,
+    currentPrice,
+    currentAtr,
+  ]);
 
   // ATR SL & TP Preview
   const atrPreview = useMemo(() => {

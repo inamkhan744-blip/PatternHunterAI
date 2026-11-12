@@ -1,5 +1,6 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { Calculator, Gauge, AlertTriangle } from "lucide-react";
+import { calculateLiquidationPrice } from "../lib/BinanceAutoTrade";
 
 interface Props {
   entryPrice: number | null;
@@ -21,10 +22,24 @@ export default function RiskCalculator({ entryPrice: defaultEntry, direction: pr
     }
   }, [propDirection]);
 
-  // Recalculate default SL & TP whenever defaultEntry or direction changes
+  // Seed sensible SL/TP defaults only when the side flips or the market entry moves
+  // materially (>1%). A live price tick must never overwrite what the user is typing.
+  const lastSeededEntry = useRef<number | null>(null);
+  const lastSeededDirection = useRef<"long" | "short" | null>(null);
+
   useEffect(() => {
-    const baseEntry = defaultEntry || parseFloat(entryPriceInput) || 65000;
-    if (defaultEntry) {
+    const baseEntry = defaultEntry && defaultEntry > 0 ? defaultEntry : parseFloat(entryPriceInput) || 65000;
+    const changedSide = direction !== lastSeededDirection.current;
+    const movedMaterially =
+      lastSeededEntry.current === null ||
+      Math.abs(baseEntry - lastSeededEntry.current) / lastSeededEntry.current > 0.01;
+
+    if (!changedSide && !movedMaterially) return;
+
+    lastSeededDirection.current = direction;
+    lastSeededEntry.current = baseEntry;
+
+    if (defaultEntry && defaultEntry > 0) {
       setEntryPriceInput(String(defaultEntry));
     }
     if (direction === "short") {
@@ -34,7 +49,7 @@ export default function RiskCalculator({ entryPrice: defaultEntry, direction: pr
       setStopLossInput(String(Number((baseEntry * 0.98).toFixed(2))));
       setTakeProfitInput(String(Number((baseEntry * 1.04).toFixed(2))));
     }
-  }, [defaultEntry, direction]);
+  }, [defaultEntry, direction, entryPriceInput]);
 
   const parsedBalance = parseFloat(balance) || 10000;
   const parsedRisk = Math.min(Math.max(parseFloat(riskPct) || 1, 0.1), 10);
@@ -45,15 +60,19 @@ export default function RiskCalculator({ entryPrice: defaultEntry, direction: pr
 
   const maxLoss = useMemo(() => parsedBalance * (parsedRisk / 100), [parsedBalance, parsedRisk]);
 
+  // Stop and target must be on the correct side of entry for the chosen direction,
+  // otherwise the "risk" is meaningless and sizing would be nonsense.
+  const sideValid = direction === "long" ? sl < entry && tp > entry : sl > entry && tp < entry;
+
   const slDistancePct = useMemo(() => {
     if (entry <= 0) return 0.02;
     return Math.abs(entry - sl) / entry;
   }, [entry, sl]);
 
   const positionNotional = useMemo(() => {
-    if (slDistancePct <= 0) return 0;
+    if (slDistancePct <= 0 || !sideValid) return 0;
     return maxLoss / slDistancePct;
-  }, [maxLoss, slDistancePct]);
+  }, [maxLoss, slDistancePct, sideValid]);
 
   const tokenQuantity = useMemo(() => {
     if (entry <= 0) return 0;
@@ -64,20 +83,20 @@ export default function RiskCalculator({ entryPrice: defaultEntry, direction: pr
     return positionNotional / lev;
   }, [positionNotional, lev]);
 
-  const liquidationPrice = useMemo(() => {
-    if (direction === "long") {
-      return entry * (1 - (1 / lev) * 0.9);
-    } else {
-      return entry * (1 + (1 / lev) * 0.9);
-    }
-  }, [entry, lev, direction]);
+  // Same isolated-margin formula the execution engine uses, so the calculator and the
+  // actual order never disagree.
+  const liquidation = useMemo(
+    () => calculateLiquidationPrice(entry, lev, direction === "long" ? "LONG" : "SHORT"),
+    [entry, lev, direction]
+  );
+  const liquidationPrice = liquidation.liquidationPrice;
 
   const riskReward = useMemo(() => {
     const slDist = Math.abs(entry - sl);
     const tpDist = Math.abs(tp - entry);
-    if (slDist <= 0) return 0;
+    if (slDist <= 0 || !sideValid) return 0;
     return Number((tpDist / slDist).toFixed(2));
-  }, [entry, sl, tp]);
+  }, [entry, sl, tp, sideValid]);
 
   const isLiqNearStopLoss = useMemo(() => {
     if (direction === "long") {
@@ -97,7 +116,7 @@ export default function RiskCalculator({ entryPrice: defaultEntry, direction: pr
           </h3>
         </div>
         <span className="text-[10px] text-cyan-400 bg-cyan-950/60 px-2 py-0.5 rounded border border-cyan-500/30">
-          KELLY CRITERION READY
+          ISOLATED MARGIN MODEL
         </span>
       </div>
 
@@ -132,8 +151,7 @@ export default function RiskCalculator({ entryPrice: defaultEntry, direction: pr
             <option value="2">2x</option>
             <option value="3">3x</option>
             <option value="5">5x (Institutional Safe)</option>
-            <option value="10">10x</option>
-            <option value="20">20x (High Risk)</option>
+            <option value="10">10x (Max supported by the engine)</option>
           </select>
         </div>
         <div>
@@ -181,6 +199,18 @@ export default function RiskCalculator({ entryPrice: defaultEntry, direction: pr
           />
         </div>
       </div>
+
+      {!sideValid && (
+        <div className="mb-3 p-2.5 rounded-lg bg-red-950/50 border border-red-500/40 text-[11px] text-red-300 flex items-start gap-2 font-sans">
+          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+          <span>
+            Invalid bracket for a {direction.toUpperCase()}: stop loss must be{" "}
+            {direction === "long" ? "below" : "above"} entry and take profit must be{" "}
+            {direction === "long" ? "above" : "below"} it. Position sizing is disabled until the
+            levels are corrected.
+          </span>
+        </div>
+      )}
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 my-4">
         <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800">

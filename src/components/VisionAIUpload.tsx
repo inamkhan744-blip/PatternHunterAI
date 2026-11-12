@@ -128,6 +128,43 @@ export default function VisionAIUpload({ open, onClose, activeSymbol = "BTCUSDT"
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  /**
+   * The vision edge function accepts ~3 MB of base64. Charts are usually far larger
+   * than that, so images are downscaled locally before upload instead of being
+   * rejected with a 413 after the user picked a perfectly valid screenshot.
+   */
+  const downscaleDataUrl = useCallback(async (dataUrl: string, originalMime: string): Promise<string> => {
+    const MAX_CHARS = 3_000_000; // ≈2.2 MB binary, below the backend's 4M-char cap
+    if (dataUrl.length <= MAX_CHARS) return dataUrl;
+
+    try {
+      const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+        const image = new Image();
+        image.onload = () => resolve(image);
+        image.onerror = () => reject(new Error("Could not read the selected image."));
+        image.src = dataUrl;
+      });
+
+      const maxDimension = 1600;
+      const scale = Math.min(1, maxDimension / Math.max(img.width, img.height));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(img.width * scale));
+      canvas.height = Math.max(1, Math.round(img.height * scale));
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return dataUrl;
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+      // Charts stay legible as high-quality JPEG and compress far better than PNG.
+      const outputMime = originalMime === "image/png" ? "image/jpeg" : originalMime;
+      let out = canvas.toDataURL(outputMime, 0.88);
+      if (out.length > MAX_CHARS) out = canvas.toDataURL("image/jpeg", 0.72);
+      if (out.length > MAX_CHARS) out = canvas.toDataURL("image/jpeg", 0.55);
+      return out;
+    } catch {
+      return dataUrl;
+    }
+  }, []);
+
   const handleFileProcess = useCallback((file: File) => {
     if (!file.type.startsWith("image/")) {
       setError("Please upload an image file (PNG, JPG, WEBP).");
@@ -140,16 +177,19 @@ export default function VisionAIUpload({ open, onClose, activeSymbol = "BTCUSDT"
 
     setError(null);
     setFileName(file.name);
-    setImageMime(file.type || "image/png");
 
     const reader = new FileReader();
-    reader.onload = (e) => {
+    reader.onload = async (e) => {
       const dataUrl = e.target?.result as string;
-      setSelectedImage(dataUrl);
+      const prepared = await downscaleDataUrl(dataUrl, file.type || "image/png");
+      const resolvedMime =
+        prepared.slice(5, prepared.indexOf(";")) || file.type || "image/png";
+      setImageMime(resolvedMime === "image/jpg" ? "image/jpeg" : resolvedMime);
+      setSelectedImage(prepared);
       setResult(null);
     };
     reader.readAsDataURL(file);
-  }, []);
+  }, [downscaleDataUrl]);
 
   const handleDrag = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -220,7 +260,7 @@ export default function VisionAIUpload({ open, onClose, activeSymbol = "BTCUSDT"
       setError(
         err instanceof Error
           ? `Vision analysis unavailable: ${err.message}`
-          : "Vision analysis unavailable. Please retry."
+          : "Vision analysis unavailable. Please retry with a smaller PNG/JPG screenshot."
       );
     } finally {
       setAnalyzing(false);

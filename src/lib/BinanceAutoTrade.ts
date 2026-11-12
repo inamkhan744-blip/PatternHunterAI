@@ -74,6 +74,8 @@ export interface ManagedTrade {
   tpOrderId?: string;
   orderType: "LIMIT" | "MARKET";
   isStuck?: boolean;
+  exitReason?: "TP" | "SL" | "MANUAL";
+  closedAt?: number;
   /**
    * Whether this position was actually opened on Binance (REAL) or only simulated
    * locally (PAPER). Every exchange-side action must be gated on this flag so a
@@ -466,11 +468,14 @@ export class BinanceAutoTradeEngine {
   private postLossCooldownUntil: number = 0;
   private dailyStats: DailyTradeStats = {
     date: new Date().toISOString().slice(0, 10),
-    startingBalance: 10000,
+    // 0 = unknown until the real balance is read (see ensureDailyStartingBalance).
+    startingBalance: 0,
     realizedPnlToday: 0,
     tradesOpened: 0,
   };
   private autoPilotCooldownUntil: number = 0;
+  /** Guards against recursive halts while emergencyStop() is settling positions. */
+  private emergencyInProgress = false;
   private autoPilotPauseReason: string | null = null;
 
   constructor() {
@@ -625,7 +630,19 @@ export class BinanceAutoTradeEngine {
   private loadCircuitBreaker(): CircuitBreakerState {
     try {
       const stored = localStorage.getItem(STORAGE_KEY_CIRCUIT);
-      if (stored) return JSON.parse(stored);
+      if (stored) {
+        const parsed = JSON.parse(stored) as CircuitBreakerState;
+        // A daily-loss trip is a one-day halt: a new UTC day clears it so the user is
+        // never locked out of the app forever.
+        const tripDay = parsed.trippedAt
+          ? new Date(parsed.trippedAt).toISOString().slice(0, 10)
+          : null;
+        const today = new Date().toISOString().slice(0, 10);
+        if (parsed.isTripped && tripDay && tripDay !== today) {
+          return { consecutiveLosses: 0, isTripped: false };
+        }
+        return parsed;
+      }
     } catch {
       // fallback
     }
@@ -889,23 +906,123 @@ export class BinanceAutoTradeEngine {
     }
     return {
       date: today,
-      startingBalance: 10000,
+      startingBalance: 0,
       realizedPnlToday: 0,
       tradesOpened: 0,
     };
   }
 
   public getDailyTradeCount(): number {
-    const today = new Date().toISOString().slice(0, 10);
-    if (this.dailyStats.date !== today) {
-      this.dailyStats = { date: today, startingBalance: 10000, realizedPnlToday: 0, tradesOpened: 0 };
-      this.saveDailyStats();
-    }
+    this.rollDailyStats();
     return this.dailyStats.tradesOpened;
+  }
+
+  /** Open, non-stuck positions. Stuck trades stay visible but stop consuming capacity. */
+  public getPositionCount(): number {
+    return this.trades.filter((t) => t.status === "OPEN" && !t.isStuck).length;
+  }
+
+  public getTradeById(tradeId: string): ManagedTrade | undefined {
+    return this.trades.find((t) => t.id === tradeId);
+  }
+
+  /**
+   * Settles a position that was closed outside the engine (exchange bracket fill,
+   * manual close from the Positions tab, kill switch) without placing another order.
+   */
+  public settleClosedTrade(
+    tradeId: string,
+    exitPrice: number,
+    exitReason: "TP" | "SL" | "MANUAL" = "MANUAL"
+  ): ManagedTrade | null {
+    const trade = this.trades.find((t) => t.id === tradeId);
+    if (!trade || trade.status !== "OPEN") return null;
+    if (!Number.isFinite(exitPrice) || exitPrice <= 0) return null;
+
+    const priceDiff =
+      trade.direction === "LONG" ? exitPrice - trade.entryPrice : trade.entryPrice - exitPrice;
+    trade.status = "CLOSED";
+    trade.closePrice = exitPrice;
+    trade.closedAt = Date.now();
+    trade.exitReason = exitReason;
+    trade.realizedPnl = Number((priceDiff * trade.quantity).toFixed(2));
+
+    this.startAutoPilotCooldown(AUTOPILOT_COOLDOWN_SECONDS);
+    this.recordRealizedPnl(trade.realizedPnl);
+
+    if (trade.realizedPnl < 0) this.circuitBreaker.consecutiveLosses += 1;
+    else if (trade.realizedPnl > 0) this.circuitBreaker.consecutiveLosses = 0;
+    this.saveCircuitBreaker();
+    this.saveTrades();
+    return trade;
   }
 
   private saveDailyStats(): void {
     localStorage.setItem(STORAGE_KEY_DAILY_STATS, JSON.stringify(this.dailyStats));
+  }
+
+    private todayKey(): string {
+    return new Date().toISOString().slice(0, 10);
+  }
+
+  /** Rolls the daily counters when the UTC day changes. */
+  private rollDailyStats(): void {
+    if (this.dailyStats.date !== this.todayKey()) {
+      this.dailyStats = { date: this.todayKey(), startingBalance: 0, realizedPnlToday: 0, tradesOpened: 0 };
+      this.saveDailyStats();
+    }
+  }
+
+  /**
+   * Seeds today's starting equity from the real account balance the first time it is
+   * known, so the daily-loss breaker measures real drawdown instead of a hard-coded
+   * $10,000.
+   */
+  public ensureDailyStartingBalance(balance: number): void {
+    if (!Number.isFinite(balance) || balance <= 0) return;
+    this.rollDailyStats();
+    if (this.dailyStats.startingBalance > 0) return;
+    // Equity at the start of the day = current balance + what has already been lost today.
+    const startingEquity = Math.max(0.01, balance - this.dailyStats.realizedPnlToday);
+    this.dailyStats.startingBalance = Number(startingEquity.toFixed(2));
+    this.saveDailyStats();
+  }
+
+  public getDailyStartingBalance(): number {
+    return this.dailyStats.startingBalance;
+  }
+
+  /**
+   * Adds a realized result to today's tally and trips the daily-loss breaker when the
+   * configured percentage of the real starting equity is lost. Called by every close
+   * path (engine, TradeManager manual/paper, kill switch).
+   */
+  public recordRealizedPnl(realizedPnl: number): void {
+    if (!Number.isFinite(realizedPnl)) return;
+    this.rollDailyStats();
+    this.dailyStats.realizedPnlToday = Number(
+      (this.dailyStats.realizedPnlToday + realizedPnl).toFixed(2)
+    );
+    this.saveDailyStats();
+
+    const drawdown = this.getDailyDrawdown();
+    if (drawdown.drawdownPct >= drawdown.maxDailyLossPercent && !this.emergencyInProgress) {
+      this.pauseAutoPilot(
+        `Daily max loss reached (${drawdown.drawdownPct}% >= ${drawdown.maxDailyLossPercent}%)`
+      );
+      this.circuitBreaker.isTripped = true;
+      this.circuitBreaker.trippedAt = Date.now();
+      this.circuitBreaker.reason = `Max Daily Loss reached (${drawdown.drawdownPct}% >= ${drawdown.maxDailyLossPercent}%). Auto-Pilot disabled.`;
+      this.saveCircuitBreaker();
+
+      this.emergencyStop().catch(() => {});
+
+      sendTelegramAlert(
+        `🚨 <b>[CIRCUIT BREAKER ENGAGED]</b>\n` +
+          `Max Daily Loss reached: <b>-${drawdown.drawdownPct.toFixed(2)}%</b> of $${drawdown.startingBalance.toFixed(2)} (Limit: ${drawdown.maxDailyLossPercent}%).\n` +
+          `Auto-Pilot has been shut OFF and all active positions closed.`
+      ).catch(() => {});
+    }
   }
 
   public getDailyDrawdown(): {
@@ -914,24 +1031,15 @@ export class BinanceAutoTradeEngine {
     maxDailyLossPercent: number;
     startingBalance: number;
   } {
-    const today = new Date().toISOString().slice(0, 10);
-    if (this.dailyStats.date !== today) {
-      this.dailyStats = {
-        date: today,
-        startingBalance: 10000,
-        realizedPnlToday: 0,
-        tradesOpened: 0,
-      };
-      this.saveDailyStats();
-    }
-
-    const startBal = this.dailyStats.startingBalance > 0 ? this.dailyStats.startingBalance : 10000;
+    this.rollDailyStats();
+    // Without a known starting equity there is nothing meaningful to measure against.
+    const startBal = this.dailyStats.startingBalance > 0 ? this.dailyStats.startingBalance : 0;
     const lossAmount = Math.min(0, this.dailyStats.realizedPnlToday);
     const drawdownPct = Math.abs(lossAmount / startBal) * 100;
 
     return {
       realizedPnlToday: this.dailyStats.realizedPnlToday,
-      drawdownPct: Number(drawdownPct.toFixed(2)),
+      drawdownPct: startBal > 0 ? Number(drawdownPct.toFixed(2)) : 0,
       maxDailyLossPercent: this.config.maxDailyLossPercent ?? 3.0,
       startingBalance: startBal,
     };
@@ -1229,7 +1337,8 @@ export class BinanceAutoTradeEngine {
       }
     }
 
-    // 2. Daily Drawdown Circuit Breaker Check
+    // 2. Daily Drawdown Circuit Breaker Check (measured against the real balance)
+    this.ensureDailyStartingBalance(params.accountBalance ?? 0);
     const drawdown = this.getDailyDrawdown();
     if (drawdown.drawdownPct >= drawdown.maxDailyLossPercent) {
       this.pauseAutoPilot(
@@ -1563,10 +1672,7 @@ export class BinanceAutoTradeEngine {
     this.saveTrades();
 
     // Persisted daily execution count (survives page refresh).
-    const today = new Date().toISOString().slice(0, 10);
-    if (this.dailyStats.date !== today) {
-      this.dailyStats = { date: today, startingBalance: 10000, realizedPnlToday: 0, tradesOpened: 0 };
-    }
+    this.rollDailyStats();
     this.dailyStats.tradesOpened += 1;
     this.saveDailyStats();
 
@@ -1985,40 +2091,12 @@ export class BinanceAutoTradeEngine {
       }
     }
 
-    // Update daily PnL stats
-    const today = new Date().toISOString().slice(0, 10);
-    if (this.dailyStats.date !== today) {
-      this.dailyStats = {
-        date: today,
-        startingBalance: 10000,
-        realizedPnlToday: 0,
-        tradesOpened: 0,
-      };
-    }
-    this.dailyStats.realizedPnlToday = Number((this.dailyStats.realizedPnlToday + realizedPnl).toFixed(2));
-    this.saveDailyStats();
+    trade.closedAt = Date.now();
+    trade.exitReason = exitReason;
 
-    // Check Daily Drawdown Circuit Breaker
-    const drawdown = this.getDailyDrawdown();
-    if (drawdown.drawdownPct >= drawdown.maxDailyLossPercent) {
-      this.pauseAutoPilot(
-        `Daily max loss reached (${drawdown.drawdownPct}% >= ${drawdown.maxDailyLossPercent}%)`
-      );
-      this.circuitBreaker.isTripped = true;
-      this.circuitBreaker.trippedAt = Date.now();
-      this.circuitBreaker.reason = `Max Daily Loss % reached (${drawdown.drawdownPct}% >= ${drawdown.maxDailyLossPercent}%). Auto-Pilot disabled.`;
-      this.saveCircuitBreaker();
-
-      // Close all remaining positions
-      this.emergencyStop().catch(() => {});
-
-      // Urgent Telegram Alert
-      sendTelegramAlert(
-        `🚨 <b>[CIRCUIT BREAKER ENGAGED]</b>\n` +
-        `Max Daily Loss reached: <b>-${drawdown.drawdownPct.toFixed(2)}%</b> (Limit: ${drawdown.maxDailyLossPercent}%).\n` +
-        `Auto-Pilot has been immediately shut OFF, and all active positions have been liquidated.`
-      ).catch(() => {});
-    }
+    // Daily loss tally + drawdown breaker live in one place so engine, manual and
+    // kill-switch closes all feed the same counter.
+    this.recordRealizedPnl(realizedPnl);
 
     if (realizedPnl < 0) {
       this.circuitBreaker.consecutiveLosses += 1;
@@ -2088,11 +2166,19 @@ export class BinanceAutoTradeEngine {
     closedPositionsCount: number;
     spotSuccess: boolean;
     futuresSuccess: boolean;
+    failures: string[];
   }> {
     let spotSuccess = true;
     let futuresSuccess = true;
     let cancelledOrdersCount = 0;
     let closedPositionsCount = 0;
+    const failures: string[] = [];
+
+    // Closing positions records P/L, which can re-enter the drawdown breaker.
+    if (this.emergencyInProgress) {
+      return { cancelledOrdersCount: 0, closedPositionsCount: 0, spotSuccess: false, futuresSuccess: false, failures: ["Kill switch already in progress"] };
+    }
+    this.emergencyInProgress = true;
 
     this.config.autoPilotEnabled = false;
     this.saveConfig({ autoPilotEnabled: false });
@@ -2158,25 +2244,44 @@ export class BinanceAutoTradeEngine {
     }
 
     for (const trade of this.trades) {
-      if (trade.status === "OPEN") {
-        if (trade.executionMode === "REAL") {
-          // Close the real exchange position before marking the record closed.
-          await this.closeExchangePosition(trade).catch(() => false);
+      if (trade.status !== "OPEN") continue;
+
+      if (trade.executionMode === "REAL") {
+        // Never fabricate a flat book: if the exchange refuses the close, the record
+        // stays OPEN and the failure is reported so the user can act on it.
+        const closedOnExchange = await this.closeExchangePosition(trade).catch(() => false);
+        if (!closedOnExchange) {
+          failures.push(`${trade.symbol}: exchange refused to close the position`);
+          continue;
         }
-        trade.status = "CLOSED";
-        trade.closePrice = trade.entryPrice;
-        trade.realizedPnl = 0;
-        closedPositionsCount++;
       }
+
+      // Record the true exit price and P/L instead of zeroing it at entry.
+      const exitPrice =
+        (await this.fetchLivePrice(trade.symbol, trade.marketType)) ?? trade.entryPrice;
+      const priceDiff =
+        trade.direction === "LONG" ? exitPrice - trade.entryPrice : trade.entryPrice - exitPrice;
+      const realizedPnl = Number((priceDiff * trade.quantity).toFixed(2));
+
+      trade.status = "CLOSED";
+      trade.closePrice = exitPrice;
+      trade.closedAt = Date.now();
+      trade.exitReason = "MANUAL";
+      trade.realizedPnl = realizedPnl;
+      closedPositionsCount++;
+
+      this.recordRealizedPnl(realizedPnl);
     }
 
     this.saveTrades();
+    this.emergencyInProgress = false;
 
     return {
       cancelledOrdersCount,
       closedPositionsCount,
       spotSuccess,
       futuresSuccess,
+      failures,
     };
   }
 }

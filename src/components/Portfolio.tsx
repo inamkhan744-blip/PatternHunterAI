@@ -541,11 +541,27 @@ export default function Portfolio() {
                 <div className="text-right shrink-0 hidden sm:block">
                   <p className="text-xs text-slate-500">Current</p>
                   <p className="text-sm font-medium text-slate-200">
-                    {h.priceUnavailable ? <span className="text-amber-400">Unavailable</span> : formatPrice(h.currentPrice)}
+                    {h.priceUnavailable ? (
+                      <span
+                        className="text-amber-400"
+                        title="No live price could be fetched for this symbol, so value and P/L are withheld rather than guessed."
+                      >
+                        Unavailable
+                      </span>
+                    ) : (
+                      formatPrice(h.currentPrice)
+                    )}
                   </p>
                 </div>
                 <div className="text-right shrink-0">
-                  <p className="text-sm font-medium text-slate-200">
+                  <p
+                    className="text-sm font-medium text-slate-200"
+                    title={
+                      h.priceUnavailable
+                        ? "Value hidden: live price unavailable for this symbol."
+                        : undefined
+                    }
+                  >
                     {h.priceUnavailable ? "—" : formatPrice(h.value)}
                   </p>
                   {!h.priceUnavailable && (

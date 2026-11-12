@@ -832,14 +832,40 @@ export class TradeManager {
     // win/loss counters stay in step with the trade history. Never touches Binance.
     if (trade.mode === "PAPER") {
       try {
-        paperTradingEngine.closeTrade(
+        const settled = paperTradingEngine.closeTrade(
           trade.id,
           closePrice,
           exitReason === "TP" || exitReason === "SL" ? exitReason : "MANUAL"
         );
+        // A trade merged from Supabase on another device is unknown to the local paper
+        // account; settle it explicitly so the virtual balance still moves.
+        if (!settled) {
+          paperTradingEngine.settleExternal({
+            id: trade.id,
+            symbol: trade.symbol,
+            direction: trade.direction,
+            entryPrice: trade.entryPrice,
+            quantity: trade.quantity,
+            exitPrice: closePrice,
+            exitReason: exitReason === "TP" || exitReason === "SL" ? exitReason : "MANUAL",
+          });
+        }
       } catch {
         // paper account is best-effort bookkeeping
       }
+    }
+
+    // Keep the engine ledger in step. If the engine owns this position, settle it there
+    // (it may already have been closed on the exchange by this call) so both ledgers
+    // agree; otherwise feed the shared daily-loss tally directly.
+    if (autoTradeEngine.getTradeById(trade.id)) {
+      autoTradeEngine.settleClosedTrade(
+        trade.id,
+        closePrice,
+        exitReason === "KILL_SWITCH" ? "MANUAL" : exitReason
+      );
+    } else {
+      autoTradeEngine.recordRealizedPnl(closed.realizedPnl);
     }
 
     this.queueWrite(this.closePayload(closed, this.currentUserId));

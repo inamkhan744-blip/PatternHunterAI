@@ -1,20 +1,33 @@
 /**
  * Telegram Bot Alert Service for Real-Time Hedge Fund Notifications.
- * Dispatches trade execution, stop-loss hits, profit vault triggers, and liquidation alerts.
+ *
+ * The bot token is NOT stored in the browser. It is sent once over TLS to the
+ * `telegram-alert` edge function, encrypted with AES-256-GCM and kept in a
+ * service-role-only table. Delivery also happens server-side, because the Telegram
+ * Bot API sends no CORS headers and a direct browser call can never succeed.
+ *
+ * Only non-sensitive UI state (chat id, enabled flag, configured flag) is cached
+ * locally so the settings screens can render instantly.
  */
+
+import { supabase } from "./supabase";
 
 const STORAGE_KEY_TG_CONFIG = "fortress_telegram_bot_config";
 
 export interface TelegramConfig {
+  /** Never populated from storage — only from what the user just typed. */
   botToken: string;
   chatId: string;
   enabled: boolean;
+  /** True when a token is stored server-side. */
+  configured?: boolean;
 }
 
 export const DEFAULT_TELEGRAM_CONFIG: TelegramConfig = {
   botToken: "",
   chatId: "",
   enabled: false,
+  configured: false,
 };
 
 export function loadTelegramConfig(): TelegramConfig {
@@ -24,7 +37,13 @@ export function loadTelegramConfig(): TelegramConfig {
   try {
     const raw = localStorage.getItem(STORAGE_KEY_TG_CONFIG);
     if (raw) {
-      return { ...DEFAULT_TELEGRAM_CONFIG, ...JSON.parse(raw) };
+      const parsed = JSON.parse(raw) as Partial<TelegramConfig>;
+      return {
+        botToken: "",
+        chatId: typeof parsed.chatId === "string" ? parsed.chatId : "",
+        enabled: parsed.enabled === true,
+        configured: parsed.configured === true,
+      };
     }
   } catch {
     // fallback
@@ -32,59 +51,150 @@ export function loadTelegramConfig(): TelegramConfig {
   return { ...DEFAULT_TELEGRAM_CONFIG };
 }
 
-export function saveTelegramConfig(config: Partial<TelegramConfig>): TelegramConfig {
-  const current = loadTelegramConfig();
-  const updated = { ...current, ...config };
-  if (typeof localStorage !== "undefined") {
-    try {
-      localStorage.setItem(STORAGE_KEY_TG_CONFIG, JSON.stringify(updated));
-    } catch (e) {
-      console.error("Failed to save Telegram config:", e);
-    }
+function persistLocalNonSecrets(config: TelegramConfig): void {
+  if (typeof localStorage === "undefined") return;
+  try {
+    localStorage.setItem(
+      STORAGE_KEY_TG_CONFIG,
+      JSON.stringify({
+        chatId: config.chatId,
+        enabled: config.enabled,
+        configured: config.configured === true,
+      })
+    );
+  } catch {
+    // private mode — server remains the source of truth
   }
-  return updated;
 }
 
 /**
- * Dispatches a formatted alert message via Telegram Bot API.
+ * Local, synchronous update for non-secret fields. A typed bot token is forwarded to
+ * the vault asynchronously; it is never written to localStorage.
+ */
+export function saveTelegramConfig(config: Partial<TelegramConfig>): TelegramConfig {
+  const current = loadTelegramConfig();
+  const updated: TelegramConfig = { ...current, ...config, botToken: "" };
+  if (typeof config.chatId === "string") updated.chatId = config.chatId.trim();
+  persistLocalNonSecrets(updated);
+
+  const typedToken = config.botToken?.trim();
+  if (typedToken) {
+    void saveTelegramCredentials({
+      botToken: typedToken,
+      chatId: updated.chatId,
+      enabled: updated.enabled,
+    });
+  }
+
+  return updated;
+}
+
+async function invokeTelegram<T>(body: Record<string, unknown>): Promise<T> {
+  const { data, error } = await supabase.functions.invoke("telegram-alert", { body });
+  if (error) throw new Error(error.message || "Telegram service request failed");
+  if (!data || typeof data !== "object") throw new Error("Telegram service returned an empty response");
+  return data as T;
+}
+
+/** Reads the server-side status (configured / chat id / enabled). */
+export async function refreshTelegramStatus(): Promise<TelegramConfig> {
+  const { data: session } = await supabase.auth.getSession();
+  if (!session?.session) return { ...DEFAULT_TELEGRAM_CONFIG };
+
+  try {
+    const payload = await invokeTelegram<{
+      status?: { configured?: boolean; chatId?: string; enabled?: boolean };
+    }>({ action: "status" });
+    const status = payload.status;
+    const config: TelegramConfig = {
+      botToken: "",
+      chatId: status?.chatId ?? "",
+      enabled: status?.enabled === true,
+      configured: status?.configured === true,
+    };
+    persistLocalNonSecrets(config);
+    return config;
+  } catch {
+    return loadTelegramConfig();
+  }
+}
+
+/** Stores (or rotates) the bot token server-side. */
+export async function saveTelegramCredentials(params: {
+  botToken: string;
+  chatId: string;
+  enabled: boolean;
+}): Promise<{ success: boolean; error?: string; config: TelegramConfig }> {
+  const config: TelegramConfig = {
+    botToken: "",
+    chatId: params.chatId.trim(),
+    enabled: params.enabled,
+    configured: false,
+  };
+
+  try {
+    if (!params.botToken.trim()) {
+      throw new Error("A Telegram bot token is required.");
+    }
+    const payload = await invokeTelegram<{
+      status?: { configured?: boolean; chatId?: string; enabled?: boolean };
+    }>({
+      action: "save",
+      botToken: params.botToken.trim(),
+      chatId: params.chatId.trim(),
+      enabled: params.enabled,
+    });
+
+    config.configured = payload.status?.configured === true;
+    config.chatId = payload.status?.chatId ?? config.chatId;
+    config.enabled = payload.status?.enabled ?? config.enabled;
+    persistLocalNonSecrets(config);
+    return { success: true, config };
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : "Failed to store Telegram credentials.",
+      config: loadTelegramConfig(),
+    };
+  }
+}
+
+/** Removes the stored Telegram configuration. */
+export async function deleteTelegramConfig(): Promise<boolean> {
+  try {
+    await invokeTelegram({ action: "delete" });
+    persistLocalNonSecrets({ ...DEFAULT_TELEGRAM_CONFIG });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Dispatches a formatted alert message through the server-side edge function.
  */
 export async function sendTelegramAlert(
   message: string,
   parseMode: "Markdown" | "HTML" = "HTML"
 ): Promise<{ success: boolean; error?: string }> {
-  const config = loadTelegramConfig();
-  if (!config.enabled || !config.botToken.trim() || !config.chatId.trim()) {
+  // Messages are always delivered as HTML by the edge function.
+  void parseMode;
+  const local = loadTelegramConfig();
+  if (!local.enabled || !local.configured) {
     return { success: false, error: "Telegram bot not configured or disabled" };
   }
 
-  const endpoint = `https://api.telegram.org/bot${encodeURIComponent(config.botToken.trim())}/sendMessage`;
-
   try {
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        chat_id: config.chatId.trim(),
-        text: message,
-        parse_mode: parseMode,
-      }),
+    const payload = await invokeTelegram<{ ok?: boolean; error?: string }>({
+      action: "send",
+      message,
     });
-
-    const data = await response.json();
-    if (!response.ok || !data.ok) {
-      return {
-        success: false,
-        error: data.description || "Failed to send Telegram message",
-      };
-    }
-
-    return { success: true };
+    if (payload.ok) return { success: true };
+    return { success: false, error: payload.error || "Telegram rejected the message" };
   } catch (err) {
     return {
       success: false,
-      error: err instanceof Error ? err.message : "Network error contacting Telegram API",
+      error: err instanceof Error ? err.message : "Network error contacting the Telegram service",
     };
   }
 }
@@ -163,7 +273,6 @@ export async function sendDiscordWebhook(
     if (isDiscord) {
       bodyData = {
         username: "Fortress Hedge Fund AI",
-        avatar_url: "https://images.unsplash.com/photo-1642543492481-44e81e3914a7?w=128",
         embeds: [
           {
             title: payload.title,
@@ -176,7 +285,6 @@ export async function sendDiscordWebhook(
         ],
       };
     } else {
-      // Generic JSON Webhook format
       bodyData = {
         event: "FORTRESS_ALERT",
         title: payload.title,
@@ -222,10 +330,12 @@ export async function notifyTradeClosed(trade: {
     `<b>Entry:</b> $${trade.entryPrice.toLocaleString()}`,
     `<b>Exit:</b> $${(trade.closePrice ?? 0).toLocaleString()}`,
     `<b>Reason:</b> ${trade.exitReason ?? "MANUAL"}`,
-    `<b>Realized PnL:</b> <b style="color:${isWin ? '#00ff66' : '#ff3344'}">${isWin ? '+' : ''}$${pnl.toFixed(2)}</b>`,
+    `<b>Realized PnL:</b> <b>${isWin ? "+" : ""}$${pnl.toFixed(2)}</b>`,
     trade.profitVaultAmount ? `<b>Profit Vault Swept (50%):</b> $${trade.profitVaultAmount.toFixed(2)}` : "",
     `<b>Timestamp:</b> ${new Date().toISOString()}`,
-  ].filter(Boolean).join("\n");
+  ]
+    .filter(Boolean)
+    .join("\n");
 
   await sendTelegramAlert(msg, "HTML");
 }

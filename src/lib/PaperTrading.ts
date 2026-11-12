@@ -25,6 +25,8 @@ export interface PaperTrade {
   status: "OPEN" | "CLOSED" | "CANCELLED";
   closePrice?: number;
   realizedPnl?: number;
+  /** Round-trip taker fees deducted from realized P/L. */
+  fees?: number;
   exitReason?: "TP" | "SL" | "MANUAL";
 }
 
@@ -38,6 +40,9 @@ export interface PaperAccount {
 }
 
 const STORAGE_KEY_PAPER_ACCOUNT = "fortress_paper_trading_account";
+
+/** Binance-style taker fee applied to each side of a simulated round trip. */
+export const PAPER_TAKER_FEE_RATE = 0.0004;
 
 const DEFAULT_PAPER_ACCOUNT: PaperAccount = {
   balance: 10000.0,
@@ -77,6 +82,10 @@ export class PaperTradingEngine {
 
   public getOpenTrades(): PaperTrade[] {
     return this.account.trades.filter((t) => t.status === "OPEN");
+  }
+
+  public getTradeById(id: string): PaperTrade | undefined {
+    return this.account.trades.find((t) => t.id === id);
   }
 
   public getClosedTrades(): PaperTrade[] {
@@ -219,18 +228,89 @@ export class PaperTradingEngine {
 
     // `quantity` already includes leverage (notional / price); multiplying by
     // leverage here would overstate paper P/L by the leverage factor.
-    const realizedPnl = Number((diff * trade.quantity).toFixed(2));
+    const grossPnl = diff * trade.quantity;
+    const fees = Number(
+      (trade.entryPrice * trade.quantity * PAPER_TAKER_FEE_RATE +
+        exitPrice * trade.quantity * PAPER_TAKER_FEE_RATE).toFixed(2)
+    );
+    const realizedPnl = Number((grossPnl - fees).toFixed(2));
+    trade.fees = fees;
     trade.realizedPnl = realizedPnl;
 
     this.account.balance = Number((this.account.balance + realizedPnl).toFixed(2));
     this.account.realizedPnlTotal = Number((this.account.realizedPnlTotal + realizedPnl).toFixed(2));
 
-    if (realizedPnl >= 0) {
+    if (realizedPnl > 0) {
       this.account.winCount += 1;
     } else {
       this.account.lossCount += 1;
     }
 
+    this.saveAccount();
+    return trade;
+  }
+
+  /**
+   * Settles a close for a position this device never opened (e.g. merged from Supabase
+   * on a second device) so the virtual balance still reflects the result.
+   */
+  public settleExternal(params: {
+    id: string;
+    symbol: string;
+    direction: TradeDirection;
+    entryPrice: number;
+    quantity: number;
+    exitPrice: number;
+    exitReason: "TP" | "SL" | "MANUAL";
+    marketType?: MarketType;
+    leverage?: number;
+  }): PaperTrade | null {
+    const existing = this.account.trades.find((t) => t.id === params.id && t.status === "OPEN");
+    if (existing) return this.closeTrade(params.id, params.exitPrice, params.exitReason);
+    if (this.account.trades.some((t) => t.id === params.id)) return null;
+    if (!Number.isFinite(params.entryPrice) || params.entryPrice <= 0) return null;
+    if (!Number.isFinite(params.exitPrice) || params.exitPrice <= 0) return null;
+
+    const diff =
+      params.direction === "LONG"
+        ? params.exitPrice - params.entryPrice
+        : params.entryPrice - params.exitPrice;
+    const grossPnl = diff * params.quantity;
+    const fees = Number(
+      (params.entryPrice * params.quantity * PAPER_TAKER_FEE_RATE +
+        params.exitPrice * params.quantity * PAPER_TAKER_FEE_RATE).toFixed(2)
+    );
+    const realizedPnl = Number((grossPnl - fees).toFixed(2));
+
+    this.account.balance = Number((this.account.balance + realizedPnl).toFixed(2));
+    this.account.realizedPnlTotal = Number((this.account.realizedPnlTotal + realizedPnl).toFixed(2));
+    if (realizedPnl > 0) this.account.winCount += 1;
+    else this.account.lossCount += 1;
+
+    const trade: PaperTrade = {
+      id: params.id,
+      symbol: params.symbol,
+      marketType: params.marketType ?? "Spot",
+      direction: params.direction,
+      leverage: params.leverage ?? 1,
+      entryPrice: params.entryPrice,
+      quantity: params.quantity,
+      positionValue: Number((params.entryPrice * params.quantity).toFixed(2)),
+      marginRequired: Number(
+        ((params.entryPrice * params.quantity) / Math.max(1, params.leverage ?? 1)).toFixed(2)
+      ),
+      stopLossPrice: params.entryPrice,
+      takeProfitPrice: params.entryPrice,
+      openTime: Date.now(),
+      closeTime: Date.now(),
+      status: "CLOSED",
+      closePrice: params.exitPrice,
+      realizedPnl,
+      fees,
+      exitReason: params.exitReason,
+    };
+
+    this.account.trades.unshift(trade);
     this.saveAccount();
     return trade;
   }

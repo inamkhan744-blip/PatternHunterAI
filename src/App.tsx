@@ -228,7 +228,12 @@ export default function App() {
 
   // Role & subscription come exclusively from the RLS-protected `user_profiles` row.
   // No email allow-list, no user_metadata, no URL parameter can elevate privileges.
-  const { isAdmin, isPro: effectiveIsPro, refresh: refreshSubscription } = useSubscription(user);
+  const {
+    isAdmin,
+    isPro: effectiveIsPro,
+    loading: subscriptionLoading,
+    refresh: refreshSubscription,
+  } = useSubscription(user);
 
   // Multi-Exchange State
   const [currentExchange, setCurrentExchange] = useState<ExchangeId>(() => getActiveExchange());
@@ -1761,7 +1766,7 @@ export default function App() {
             >
               <span>👑 ADMIN PANEL</span>
             </button>
-          ) : !effectiveIsPro ? (
+          ) : !effectiveIsPro && !subscriptionLoading ? (
             <button
               onClick={() => window.open("https://inamkhan08.gumroad.com/l/idbxpj", "_blank", "noopener,noreferrer")}
               className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-900 text-xs font-bold transition-all shadow-md shadow-amber-950/30"
@@ -2633,9 +2638,9 @@ export default function App() {
         }}
       />
       {/* Pro Modal only accessible if NOT admin */}
-      {!isAdmin && (
+      {!isAdmin && !subscriptionLoading && (
         <ProModal
-          open={proModalOpen && !isAdmin}
+          open={proModalOpen && !isAdmin && !subscriptionLoading}
           onClose={() => setProModalOpen(false)}
           isPro={effectiveIsPro}
           isAdmin={isAdmin}

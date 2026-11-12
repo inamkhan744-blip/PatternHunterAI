@@ -26,6 +26,8 @@ export interface UserSubscriptionProfile {
   status: SubscriptionStatus;
   expiresAt: string | null;
   dailyTradeLimit: number;
+  /** Mirrors `user_profiles.is_admin`, which some deployments use instead of `role`. */
+  adminFlag: boolean;
 }
 
 export const FREE_DAILY_MANUAL_TRADE_LIMIT = 3;
@@ -38,6 +40,7 @@ export const FREE_PROFILE: UserSubscriptionProfile = {
   status: "active",
   expiresAt: null,
   dailyTradeLimit: FREE_DAILY_MANUAL_TRADE_LIMIT,
+  adminFlag: false,
 };
 
 /** Last profile returned by the server. Display cache only — never an authorization source. */
@@ -69,9 +72,14 @@ export function isSubscriptionActive(profile: UserSubscriptionProfile | null | u
   return true;
 }
 
-/** Admin status comes from the server profile row only. */
+/**
+ * Admin status comes from the server profile row only. Both representations are
+ * honoured because `role = 'admin'` and `is_admin = true` are set independently in
+ * different dashboards/migrations.
+ */
 export function isUserAdmin(profile: UserSubscriptionProfile | null | undefined): boolean {
-  return profile?.role === "admin";
+  if (!profile) return false;
+  return profile.adminFlag === true || profile.role === "admin";
 }
 
 /** Pro status comes from the server profile row only (admins also get Pro tooling). */
@@ -80,11 +88,22 @@ export function isUserPro(profile: UserSubscriptionProfile | null | undefined): 
   return isSubscriptionActive(profile);
 }
 
+function normalizeRole(value: unknown): UserRole {
+  const role = typeof value === "string" ? value.toLowerCase() : "";
+  return role === "admin" || role === "staff" ? (role as UserRole) : "user";
+}
+
+function isTruthyFlag(value: unknown): boolean {
+  return value === true || value === "true" || value === 1 || value === "1";
+}
+
 function normalizeProfile(row: Record<string, unknown>): UserSubscriptionProfile {
   const tier = (row.subscription_tier as SubscriptionTier) || "free";
   const limit = Number(row.daily_trade_limit);
   return {
-    role: (row.role as UserRole) || "user",
+    role: normalizeRole(row.role),
+    // A row with `is_admin = true` is an admin even if `role` was never updated.
+    adminFlag: isTruthyFlag(row.is_admin),
     tier,
     status: (row.subscription_status as SubscriptionStatus) || "active",
     expiresAt: (row.subscription_expires_at as string | null) ?? null,
@@ -98,34 +117,82 @@ function normalizeProfile(row: Record<string, unknown>): UserSubscriptionProfile
 }
 
 /**
- * Reads the caller's own profile via RLS. Returns the free profile when the user
- * is anonymous, the table is unreachable, or no row exists yet.
+ * Reads the caller's own profile via RLS.
+ *
+ * `select("*")` is deliberate: a deployment may or may not have an `is_admin`
+ * column, and naming a missing column makes PostgREST fail the whole request — which
+ * is exactly how a real admin silently ends up on the free tier.
+ *
+ * A transient failure never downgrades a known admin: the last good profile is kept.
  */
-export async function fetchUserProfile(userId?: string): Promise<UserSubscriptionProfile> {
+export async function fetchUserProfile(
+  userId?: string,
+  email?: string | null
+): Promise<UserSubscriptionProfile> {
   if (!userId) {
     activeProfile = null;
     return FREE_PROFILE;
   }
 
-  try {
+  const readRow = async (column: "id" | "user_id") => {
     const { data, error } = await supabase
       .from("user_profiles")
-      .select("role, subscription_tier, subscription_status, subscription_expires_at, daily_trade_limit")
-      .eq("id", userId)
+      .select("*")
+      .eq(column, userId)
       .maybeSingle();
+    return { data, error };
+  };
 
-    if (error || !data) {
-      activeProfile = null;
-      return FREE_PROFILE;
+  let row: Record<string, unknown> | null = null;
+  let lastError: string | null = null;
+
+  // Attempt 1 — canonical key. Retried once because a cold token refresh can race
+  // the first request after login.
+  for (let attempt = 0; attempt < 2 && !row; attempt++) {
+    const { data, error } = await readRow("id");
+    if (data) {
+      row = data as Record<string, unknown>;
+      break;
     }
-
-    const profile = normalizeProfile(data as Record<string, unknown>);
-    activeProfile = profile;
-    return profile;
-  } catch {
-    activeProfile = null;
-    return FREE_PROFILE;
+    if (error) lastError = error.message;
+    if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 400));
   }
+
+  // Attempt 2 — some installations key the table on `user_id` instead of `id`.
+  if (!row) {
+    const { data, error } = await readRow("user_id");
+    if (data) row = data as Record<string, unknown>;
+    else if (error) lastError = error.message;
+  }
+
+  // Attempt 3 — match on the authenticated email (RLS still decides visibility).
+  if (!row && email) {
+    const { data, error } = await supabase
+      .from("user_profiles")
+      .select("*")
+      .eq("email", email.trim().toLowerCase())
+      .maybeSingle();
+    if (data) row = data as Record<string, unknown>;
+    else if (error) lastError = error.message;
+  }
+
+  if (!row) {
+    if (lastError) {
+      console.warn("[SubscriptionManager] profile lookup failed:", lastError);
+    } else {
+      console.warn(
+        "[SubscriptionManager] No user_profiles row is visible for the signed-in user. " +
+          "Admin/Pro flags cannot be applied until a row exists whose id (or user_id) equals the auth user id."
+      );
+    }
+    // Keep a previously resolved admin/pro profile rather than downgrading on a
+    // slow or failed fetch.
+    return activeProfile ?? FREE_PROFILE;
+  }
+
+  const profile = normalizeProfile(row);
+  activeProfile = profile;
+  return profile;
 }
 
 export interface TradeAllowance {

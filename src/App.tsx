@@ -83,6 +83,7 @@ import { gridTradingBot } from "./lib/GridBot";
 import { dcaBotEngine } from "./lib/DCABot";
 import { webhookService, type TradingViewSignal } from "./lib/WebhookService";
 import { useSubscription } from "./lib/useSubscription";
+import { useServerAutoPilot } from "./lib/ServerAutoPilot";
 import { isLiveTradingConfigured, refreshCredentialStatus } from "./lib/CredentialVault";
 import { autoTradeEngine, MAX_SLIPPAGE_PCT } from "./lib/BinanceAutoTrade";
 import { liveWorkerLogStore } from "./lib/LiveWorkerLogStore";
@@ -234,6 +235,10 @@ export default function App() {
     loading: subscriptionLoading,
     refresh: refreshSubscription,
   } = useSubscription(user);
+
+  // Server-side (24/7) Auto-Pilot. The browser only mirrors the DB flag; the
+  // execution loop lives in the auto-trade-worker edge function.
+  const { enabled: serverAutoPilot, setEnabled: setServerAutoPilot } = useServerAutoPilot(user);
 
   // Multi-Exchange State
   const [currentExchange, setCurrentExchange] = useState<ExchangeId>(() => getActiveExchange());
@@ -810,6 +815,8 @@ export default function App() {
    */
   const attemptAutoPilotEntry = useCallback(
     async (candidate: AutoPilotCandidate) => {
+      // Server Auto-Pilot owns execution; the browser must never also trade.
+      if (serverAutoPilot) return;
       const cfg = autoTradeEngine.getConfig();
       if (!cfg.autoPilotEnabled) return;
 
@@ -1052,14 +1059,14 @@ export default function App() {
         }, 15000);
       }
     },
-    [autoPilotOpenSymbolCount]
+    [autoPilotOpenSymbolCount, serverAutoPilot]
   );
 
   // Multi-symbol scanner: Auto-Pilot is not limited to the chart currently on screen.
   // It scans the top market list and can hold positions on different symbols
   // simultaneously, up to maxOpenTrades.
   useEffect(() => {
-    if (!user) return;
+    if (!user || serverAutoPilot) return;
 
     const scanOnce = async () => {
       const cfg = autoTradeEngine.getConfig();
@@ -1139,7 +1146,7 @@ export default function App() {
       void scanOnce();
     }, 60_000);
     return () => clearInterval(timer);
-  }, [user, timeframe, htfTrendState, attemptAutoPilotEntry, autoPilotOpenSymbolCount]);
+  }, [user, timeframe, htfTrendState, attemptAutoPilotEntry, autoPilotOpenSymbolCount, serverAutoPilot]);
 
   // Position supervision loop: every open position on every symbol is marked to
   // market (SL/TP, trailing stops, P/L) — not just the chart currently on screen —
@@ -1241,6 +1248,9 @@ export default function App() {
       // ===================== Auto-Pilot execution loop =====================
       // The heavy lifting lives in attemptAutoPilotEntry(); this tick only decides
       // whether the displayed symbol has a *fresh* candle worth evaluating.
+      // The cloud worker handles Auto-Pilot; skip the browser entry path entirely.
+      if (serverAutoPilot) return;
+
       const config = autoTradeEngine.getConfig();
       if (!config.autoPilotEnabled) return;
 
@@ -1301,6 +1311,7 @@ export default function App() {
     trendValue,
     fearGreedValue,
     attemptAutoPilotEntry,
+    serverAutoPilot,
   ]);
 
   useEffect(() => {
@@ -1605,34 +1616,63 @@ export default function App() {
   const statsChange = marketStats?.priceChangePercent24h ?? changePercent;
   const tfLabel = TIMEFRAMES.find((t) => t.value === timeframe)?.label ?? "1H";
 
-  // Single top header Auto-Pilot toggle logic
-  const handleHeaderToggleAutoPilot = useCallback(() => {
+  // Single top header Auto-Pilot toggle logic. Turning it on writes the server
+  // flag; the browser never starts an execution loop again.
+  const handleHeaderToggleAutoPilot = useCallback(async () => {
     if (!effectiveIsPro && !isAdmin) {
       setProModalOpen(true);
       return;
     }
-    const currentCfg = autoTradeEngine.getConfig();
-    const nextState = !currentCfg.autoPilotEnabled;
+    const nextState = !serverAutoPilot;
+    const cfg = autoTradeEngine.getConfig();
+
+    const ok = await setServerAutoPilot(nextState, {
+      marketType: cfg.marketType,
+      leverage: cfg.leverage,
+      riskPercent: cfg.riskPercent,
+      maxOpenTrades: cfg.maxOpenTrades,
+      tradeDirectionMode: cfg.tradeDirectionMode,
+      symbols: AUTO_PILOT_SCAN_UNIVERSE.map((coin) => coin.binanceSymbol),
+      paperTrading: cfg.paperTradingEnabled,
+    });
+
+    if (!ok) {
+      setAutoPilotStatusText("Status: Could not update server Auto-Pilot — retrying on next refresh");
+      void refreshSubscription();
+      return;
+    }
+
+    // Mirror the flag locally for display only; the execution loops stay disabled
+    // because they check `serverAutoPilot` first.
+    const updated = autoTradeEngine.saveConfig({ autoPilotEnabled: nextState });
     if (nextState) {
       autoPilotArmedTimestamp.current = Date.now();
       if (candles.length > 0) {
         lastProcessedCandleTimestamp.current = candles[candles.length - 1].time;
       }
     }
-    if (nextState) {
-      // Clear any previous AI/risk pause so a re-arm genuinely starts fresh.
-      autoTradeEngine.setAutoPilotState("ARMED");
-      setAutoPilotPauseReason(null);
-    }
-    const updated = autoTradeEngine.saveConfig({ autoPilotEnabled: nextState });
     setAutoPilotActive(updated.autoPilotEnabled);
     setAutoPilotPauseReason(updated.autoPilotEnabled ? null : autoTradeEngine.getAutoPilotPauseReason());
     setAutoPilotStatusText(
       updated.autoPilotEnabled
-        ? "Status: Armed — waiting for a fresh candle close"
+        ? "Status: Server Auto-Pilot armed — running 24/7 in the cloud"
         : "Status: Auto-Pilot Idle"
     );
-  }, [effectiveIsPro, isAdmin, candles]);
+  }, [effectiveIsPro, isAdmin, candles, serverAutoPilot, setServerAutoPilot, refreshSubscription]);
+
+  // Reflect the authoritative server flag in the header, even after a reload.
+  useEffect(() => {
+    if (autoTradeEngine.getConfig().autoPilotEnabled !== serverAutoPilot) {
+      autoTradeEngine.saveConfig({ autoPilotEnabled: serverAutoPilot });
+    }
+    setAutoPilotActive(serverAutoPilot);
+    if (!serverAutoPilot) setAutoPilotPauseReason(autoTradeEngine.getAutoPilotPauseReason());
+    setAutoPilotStatusText(
+      serverAutoPilot
+        ? "Status: Server Auto-Pilot armed — running 24/7 in the cloud"
+        : "Status: Auto-Pilot Idle"
+    );
+  }, [serverAutoPilot]);
 
   const inWatch = watchSymbols.has(selectedCoin.binanceSymbol);
 

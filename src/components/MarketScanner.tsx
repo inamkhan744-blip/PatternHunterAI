@@ -24,7 +24,13 @@ interface Props {
   isPro?: boolean;
 }
 
-export default function MarketScanner({ timeframe, onSelectCoin, watchlistSymbols, onToggleWatch }: Props) {
+export default function MarketScanner({
+  timeframe,
+  onSelectCoin,
+  watchlistSymbols,
+  onToggleWatch,
+  isPro = false,
+}: Props) {
   const [rows, setRows] = useState<MarketRow[]>([]);
   const [scanning, setScanning] = useState(true);
   const [sortKey, setSortKey] = useState<SortKey>("change");
@@ -39,7 +45,13 @@ export default function MarketScanner({ timeframe, onSelectCoin, watchlistSymbol
     ];
   }, []);
 
-  const coinsToScan = showAll ? allCoins : allCoins.slice(0, 10);
+  // Free accounts scan the free universe only; Pro coins are not silently included.
+  const accessibleCoins = useMemo(
+    () => (isPro ? allCoins : allCoins.filter((c) => !c.isPro)),
+    [allCoins, isPro]
+  );
+
+  const coinsToScan = showAll && isPro ? accessibleCoins : accessibleCoins.slice(0, 10);
 
   const scan = useCallback(async () => {
     setScanning(true);
@@ -106,22 +118,19 @@ export default function MarketScanner({ timeframe, onSelectCoin, watchlistSymbol
         <div>
           <h2 className="text-lg font-bold text-white">Market Scanner</h2>
           <p className="text-xs text-slate-500 mt-0.5">
-            {showAll ? "All 58 coins" : "Top 10 coins"} — live pattern detection
-            {!showAll && (
+            {showAll ? `All ${accessibleCoins.length} coins` : `Top ${coinsToScan.length} coins`} — live pattern
+            detection
+            {isPro ? (
               <button
-                onClick={() => setShowAll(true)}
+                onClick={() => setShowAll((v) => !v)}
                 className="text-cyan-400 hover:text-cyan-300 ml-1 font-medium"
               >
-                Show all →
+                {showAll ? "Show top 10 →" : "Show all →"}
               </button>
-            )}
-            {showAll && (
-              <button
-                onClick={() => setShowAll(false)}
-                className="text-cyan-400 hover:text-cyan-300 ml-1 font-medium"
-              >
-                Show top 10 →
-              </button>
+            ) : (
+              <span className="ml-1 text-slate-600">
+                · Pro coins are excluded on the free plan
+              </span>
             )}
           </p>
         </div>

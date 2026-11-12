@@ -320,7 +320,9 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
       if (!/^[A-Za-z0-9+/=\r\n]+$/.test(imageBase64)) {
         return json({ error: "imageBase64 is not valid base64 data" }, 400);
       }
-      if (!/^image\/(png|jpeg|webp)$/.test(mimeType)) {
+      // `image/jpg` is not a registered MIME type but browsers do report it.
+      const normalizedMime = mimeType === "image/jpg" ? "image/jpeg" : mimeType;
+      if (!/^image\/(png|jpeg|webp)$/.test(normalizedMime)) {
         return json({ error: "Unsupported image type" }, 415);
       }
 
@@ -349,13 +351,30 @@ Respond STRICTLY in valid JSON matching this schema:
             {
               parts: [
                 { text: prompt },
-                { inline_data: { mime_type: mimeType, data: imageBase64 } },
+                { inline_data: { mime_type: normalizedMime, data: imageBase64 } },
               ],
             },
           ],
           { temperature: 0.2, maxOutputTokens: 800, responseMimeType: "application/json" }
         );
-        return json({ success: true, data: parseJsonResponse(text), modelUsed: model });
+        // Server-side schema check: a malformed vision payload is discarded here
+        // rather than handed to the client as if it were a real analysis.
+        let parsed: Record<string, unknown> | null = null;
+        try {
+          parsed = parseJsonResponse(text) as Record<string, unknown>;
+        } catch {
+          parsed = null;
+        }
+        const trend = typeof parsed?.trend === "string" ? parsed.trend : "";
+        const validTrend = ["Bullish", "Bearish", "Sideways/Consolidation"].includes(trend);
+        const validPatterns = Array.isArray(parsed?.patterns);
+        if (!parsed || !validTrend || !validPatterns) {
+          return json(
+            { unavailable: true, error: "AI returned an invalid chart analysis; result discarded." },
+            502
+          );
+        }
+        return json({ success: true, data: parsed, modelUsed: model });
       } catch {
         return json({ unavailable: true, error: "Vision analysis is temporarily unavailable." }, 502);
       }

@@ -24,6 +24,7 @@ export default function TradingJournal() {
   const [_loading, setLoading] = useState(true);
   void _loading;
   const [showAddModal, setShowAddModal] = useState(false);
+  const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
   const [coinSymbol, setCoinSymbol] = useState("BTC");
   const [direction, setDirection] = useState<"long" | "short">("long");
@@ -72,15 +73,19 @@ export default function TradingJournal() {
     const isWin = direction === "long" ? exitNum >= entryNum : exitNum <= entryNum;
     const outcome = isWin ? "win" : "loss";
 
-    let aiAnalysis = `Trade executed on ${coinSymbol} with ${direction.toUpperCase()} bias using ${strategy}. `;
+    // Deterministic review of the recorded discipline data — not an AI call, and it is
+    // labelled as such in the UI.
+    let review = `Reviewed ${coinSymbol.toUpperCase()} ${direction.toUpperCase()} entry $${entryNum} → exit $${exitNum} (${outcome.toUpperCase()}) using ${strategy}. `;
     if (followedRules) {
-      aiAnalysis += `Risk discipline maintained. Adhered to execution checklist. Good trade hygiene.`;
+      review += `Rules followed. Risk discipline maintained and the recorded emotional state was '${emotion}'.`;
     } else {
-      aiAnalysis += `Rule deviation flagged! Emotional state recorded as '${emotion}'. Recommended corrective action: enforce hard stop-loss and limit entry to high confluence zones only.`;
+      review += `Rule deviation flagged with emotional state '${emotion}'. Corrective action: enforce the hard stop-loss and only enter high-confluence zones.`;
     }
 
+    setMessage(null);
+
     try {
-      await supabase.from("journal_entries").insert({
+      const { error: insertError } = await supabase.from("journal_entries").insert({
         coin_symbol: coinSymbol.toUpperCase(),
         binance_symbol: `${coinSymbol.toUpperCase()}USDT`,
         direction,
@@ -91,31 +96,55 @@ export default function TradingJournal() {
         outcome,
         followed_rules: followedRules,
         notes,
-        ai_analysis: aiAnalysis,
+        ai_analysis: review,
       });
+
+      if (insertError) throw new Error(insertError.message);
 
       const newStreak = followedRules ? stats.discipline_streak + 1 : 0;
       const newBest = Math.max(stats.best_streak, newStreak);
       const newFollowed = stats.rules_followed_count + (followedRules ? 1 : 0);
       const newBroken = stats.rules_broken_count + (followedRules ? 0 : 1);
 
-      await supabase.from("user_stats").upsert({
-        discipline_streak: newStreak,
-        best_streak: newBest,
-        total_journal_entries: entries.length + 1,
-        rules_followed_count: newFollowed,
-        rules_broken_count: newBroken,
-      });
+      const { error: statsError } = await supabase.from("user_stats").upsert(
+        {
+          discipline_streak: newStreak,
+          best_streak: newBest,
+          total_journal_entries: entries.length + 1,
+          rules_followed_count: newFollowed,
+          rules_broken_count: newBroken,
+        },
+        // user_stats is UNIQUE on user_id; without this the second entry inserts a new
+        // row and violates the constraint, silently freezing the streak counters.
+        { onConflict: "user_id" }
+      );
+
+      if (statsError) {
+        setMessage({
+          type: "error",
+          text: `Entry saved, but discipline stats could not be updated: ${statsError.message}`,
+        });
+      } else {
+        setMessage({ type: "success", text: "Journal entry saved." });
+      }
 
       setShowAddModal(false);
       fetchJournalData();
     } catch (err) {
+      const reason = err instanceof Error ? err.message : "Unknown error";
       console.error("Journal insert error:", err);
+      setMessage({ type: "error", text: `Could not save the journal entry: ${reason}` });
     }
   };
 
   const handleDelete = async (id: string) => {
-    await supabase.from("journal_entries").delete().eq("id", id);
+    if (!confirm("Delete this journal entry? This cannot be undone.")) return;
+    const { error } = await supabase.from("journal_entries").delete().eq("id", id);
+    if (error) {
+      setMessage({ type: "error", text: `Could not delete the entry: ${error.message}` });
+      return;
+    }
+    setMessage({ type: "success", text: "Journal entry deleted." });
     fetchJournalData();
   };
 
@@ -125,10 +154,10 @@ export default function TradingJournal() {
         <div>
           <h2 className="text-xl font-bold text-white flex items-center gap-2">
             <BookOpen className="w-5 h-5 text-cyan-400" />
-            Institutional Trading Journal & AI Review
+            Institutional Trading Journal & Review
           </h2>
           <p className="text-xs text-slate-400 font-sans mt-0.5">
-            Log trade entries, audit psychology, track rule discipline streaks, and receive automated AI performance reviews.
+            Log trade entries, audit psychology, track rule discipline streaks, and receive an automated review of each session.
           </p>
         </div>
         <button
@@ -140,6 +169,18 @@ export default function TradingJournal() {
         </button>
       </div>
 
+      {message && (
+        <div
+          className={`mt-4 rounded-lg border px-3 py-2 text-xs ${
+            message.type === "success"
+              ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+              : "border-red-500/40 bg-red-950/40 text-red-300"
+          }`}
+        >
+          {message.text}
+        </div>
+      )}
+
       <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 my-6">
         <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-between">
           <div>
@@ -148,7 +189,7 @@ export default function TradingJournal() {
             </span>
             <span className="text-2xl font-black text-amber-400 flex items-center gap-1">
               <Flame className="w-5 h-5 text-amber-400 fill-amber-400" />
-              {stats.discipline_streak} Trades
+              {stats.discipline_streak} Sessions
             </span>
           </div>
           <span className="text-xs text-slate-500 font-sans">Best: {stats.best_streak}</span>
@@ -257,7 +298,7 @@ export default function TradingJournal() {
                   <Sparkles className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5" />
                   <div>
                     <span className="font-bold text-cyan-200 uppercase tracking-wider block font-mono text-[10px]">
-                      AI Trade Review:
+                      Automated Review (rules & risk):
                     </span>
                     <p className="mt-0.5 text-slate-300 leading-relaxed">{item.ai_analysis}</p>
                   </div>

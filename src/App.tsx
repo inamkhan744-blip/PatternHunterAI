@@ -783,6 +783,21 @@ export default function App() {
   }, [user, lastPrice, selectedCoin.binanceSymbol, currentAtr, effectiveIsPro, isAdmin]);
 
   /**
+   * Counts distinct symbols with an open position in the active execution mode.
+   * Engine positions and mirrored/paper positions are both included, so
+   * `maxOpenTrades` is enforced across the whole book rather than per ledger.
+   */
+  const autoPilotOpenSymbolCount = useCallback((mode: "REAL" | "PAPER") => {
+    const symbols = new Set<string>();
+    autoTradeEngine.getOpenTrades().forEach((t) => symbols.add(t.symbol));
+    tradeManager
+      .getActiveTrades()
+      .filter((t) => t.mode === mode)
+      .forEach((t) => symbols.add(t.symbol));
+    return symbols.size;
+  }, []);
+
+  /**
    * Single Auto-Pilot entry point shared by the live tick (displayed symbol) and the
    * multi-symbol scanner. Every gate lives here so both paths behave identically:
    * ARMED state, 30s cooldown, per-symbol duplicate block, max-open capacity,
@@ -819,11 +834,17 @@ export default function App() {
         return;
       }
 
-      if (candidate.score <= 85) {
+      // Required confluence scales with volatility: high-ATR setups need a higher score.
+      const requiredScore = autoTradeEngine.getRequiredConfluenceScore(
+        candidate.price,
+        candidate.atr
+      ).requiredScore;
+
+      if (candidate.score <= requiredScore) {
         liveWorkerLogStore.addLog(
-          `Signal Found (Score ${candidate.score}/85) - Skipping`,
+          `Signal Found (Score ${candidate.score}/${requiredScore}) - Skipping`,
           "info",
-          { symbol: candidate.symbol, score: candidate.score }
+          { symbol: candidate.symbol, score: candidate.score, requiredScore }
         );
         return;
       }
@@ -838,7 +859,7 @@ export default function App() {
         return;
       }
 
-      const openCount = autoTradeEngine.getOpenTrades().length;
+      const openCount = autoPilotOpenSymbolCount(executionMode);
       if (openCount >= cfg.maxOpenTrades) {
         liveWorkerLogStore.addLog(
           `Trade Blocked: Max open trades reached (${openCount}/${cfg.maxOpenTrades})`,
@@ -873,7 +894,7 @@ export default function App() {
           fearGreed: candidate.fearGreed,
           atrValue: candidate.atr,
           dataTimestamp: candidate.dataTimestamp,
-          minScore: 85,
+          minScore: requiredScore,
         });
 
         if (!signal.proceed) return;
@@ -1026,7 +1047,7 @@ export default function App() {
         }, 15000);
       }
     },
-    []
+    [autoPilotOpenSymbolCount]
   );
 
   // Multi-symbol scanner: Auto-Pilot is not limited to the chart currently on screen.
@@ -1040,12 +1061,13 @@ export default function App() {
       if (!cfg.autoPilotEnabled) return;
       const state = autoTradeEngine.getAutoPilotState();
       if (state !== "ARMED" && state !== "WATCHING") return;
-      if (autoTradeEngine.getOpenTrades().length >= cfg.maxOpenTrades) return;
+      const scanMode: "REAL" | "PAPER" = isLiveTradingConfigured() ? "REAL" : "PAPER";
+      if (autoPilotOpenSymbolCount(scanMode) >= cfg.maxOpenTrades) return;
       if (autoTradeEngine.getAutoPilotCooldown().isActive) return;
       if (autoTradeEngine.getPostLossCooldown().isActive) return;
 
       for (const coin of AUTO_PILOT_SCAN_UNIVERSE) {
-        if (autoTradeEngine.getOpenTrades().length >= cfg.maxOpenTrades) break;
+        if (autoPilotOpenSymbolCount(scanMode) >= cfg.maxOpenTrades) break;
         if (tradeManager.hasActivePosition(coin.binanceSymbol)) continue;
 
         try {
@@ -1054,11 +1076,18 @@ export default function App() {
 
           const smcData = scanSMC(data);
           const conf = evaluateConfluence(data, smcData, htfTrendState);
-          if (!conf || conf.score <= 85) continue;
+          if (!conf) continue;
 
           const atrSeries = atr(data, 14);
           const atrVal = atrSeries[atrSeries.length - 1];
           if (!atrVal || atrVal <= 0) continue;
+
+          const lastClosePrice = data[data.length - 1].close;
+          const requiredScore = autoTradeEngine.getRequiredConfluenceScore(
+            lastClosePrice,
+            atrVal
+          ).requiredScore;
+          if (conf.score <= requiredScore) continue;
 
           const closes = data.map((c) => c.close);
           const rsiSeries = rsi(closes, 14);
@@ -1105,7 +1134,86 @@ export default function App() {
       void scanOnce();
     }, 60_000);
     return () => clearInterval(timer);
-  }, [user, timeframe, htfTrendState, attemptAutoPilotEntry]);
+  }, [user, timeframe, htfTrendState, attemptAutoPilotEntry, autoPilotOpenSymbolCount]);
+
+  // Position supervision loop: every open position on every symbol is marked to
+  // market (SL/TP, trailing stops, P/L) — not just the chart currently on screen —
+  // and the two position ledgers are reconciled so they cannot silently diverge.
+  useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+
+    const reconcileLedgers = () => {
+      // Engine closed a position but the mirrored record is still open.
+      for (const trade of tradeManager.getActiveTrades()) {
+        const engineTrade = autoTradeEngine.getTradeById(trade.id);
+        if (engineTrade && engineTrade.status === "CLOSED") {
+          tradeManager.closeTrade(
+            trade.id,
+            engineTrade.closePrice ?? trade.currentPrice,
+            engineTrade.exitReason ?? "MANUAL"
+          );
+        }
+      }
+
+      // Paper engine hit SL/TP on its own: close the mirrored record so the two stay
+      // in step.
+      for (const trade of tradeManager.getActiveTrades()) {
+        if (trade.mode !== "PAPER") continue;
+        const paperTrade = paperTradingEngine.getTradeById(trade.id);
+        if (paperTrade && paperTrade.status === "CLOSED") {
+          tradeManager.closeTrade(
+            trade.id,
+            paperTrade.closePrice ?? trade.currentPrice,
+            paperTrade.exitReason ?? "MANUAL"
+          );
+        }
+      }
+
+      // Mirror closed (exchange bracket or manual close) but the engine still thinks
+      // the position is open: settle the engine record without re-closing on exchange.
+      const historyById = new Map(tradeManager.getTradeHistory().map((h) => [h.id, h]));
+      for (const trade of autoTradeEngine.getOpenTrades()) {
+        const closed = historyById.get(trade.id);
+        if (!closed) continue;
+        autoTradeEngine.settleClosedTrade(
+          trade.id,
+          closed.exitPrice,
+          closed.exitReason === "TP" || closed.exitReason === "SL" ? closed.exitReason : "MANUAL"
+        );
+      }
+    };
+
+    const supervise = async () => {
+      const symbols = new Set<string>();
+      tradeManager.getActiveTrades().forEach((t) => symbols.add(t.symbol));
+      autoTradeEngine.getOpenTrades().forEach((t) => symbols.add(t.symbol));
+      paperTradingEngine.getOpenTrades().forEach((t) => symbols.add(t.symbol));
+
+      for (const symbol of symbols) {
+        if (cancelled) return;
+        const marketType =
+          tradeManager.getActiveTrades().find((t) => t.symbol === symbol)?.marketType ??
+          autoTradeEngine.getConfig().marketType;
+        const price = await autoTradeEngine.fetchLivePrice(symbol, marketType);
+        if (price === null) continue;
+        tradeManager.updateLivePrice(symbol, price);
+        paperTradingEngine.evaluatePrice(price, symbol);
+        autoTradeEngine.evaluateOpenTrades(price, symbol);
+        gridTradingBot.onPriceTick(price, symbol);
+        dcaBotEngine.onPriceTick(price, symbol);
+      }
+
+      reconcileLedgers();
+    };
+
+    void supervise();
+    const timer = setInterval(() => void supervise(), 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [user]);
 
   // Real-time WebSocket Price Subscription & Auto-Pilot Execution Loop
   useEffect(() => {
@@ -1685,7 +1793,7 @@ export default function App() {
       <div className="flex-1 flex flex-col min-w-0">
         {/* Mobile header */}
         <header className="lg:hidden border-b border-slate-800 bg-slate-950/80 backdrop-blur-xl sticky top-0 z-40 max-w-full overflow-hidden">
-          <div className="px-3 sm:px-4 py-2.5 flex items-center justify-between gap-2 max-w-full overflow-x-auto scrollbar-hide">
+          <div className="px-3 sm:px-4 py-2.5 flex flex-wrap items-center justify-between gap-x-2 gap-y-1.5 max-w-full">
             <div className="flex items-center gap-2 shrink-0">
               <button
                 onClick={() => setIsDrawerOpen(true)}
@@ -1702,7 +1810,7 @@ export default function App() {
                 PatternHunter <span className="text-cyan-400">AI</span>
               </h1>
             </div>
-            <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-hide py-0.5 shrink-0">
+            <div className="flex items-center gap-1.5 flex-wrap justify-end py-0.5">
               {/* Single Auto-Pilot Toggle on Mobile Header */}
               <button
                 onClick={handleHeaderToggleAutoPilot}
@@ -1759,7 +1867,7 @@ export default function App() {
         {activeTab === "chart" && (
           <div className="border-b border-slate-800 bg-slate-900/50">
             <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between gap-4 flex-wrap">
-              <div className="flex items-center gap-2 sm:gap-3 flex-wrap max-w-full overflow-x-auto scrollbar-hide py-1">
+              <div className="flex items-center gap-2 sm:gap-3 flex-wrap max-w-full py-1">
                 <button
                   onClick={() => setIsDrawerOpen(true)}
                   className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 transition-colors shrink-0"
@@ -2106,13 +2214,18 @@ export default function App() {
                       "EMERGENCY KILL SWITCH ACTIVATED!\n\nThis will instantly halt Auto-Pilot, cancel all open orders, and close live/paper positions. Proceed?"
                     );
                     if (confirmed) {
-                      await autoTradeEngine.emergencyStop();
+                      const stopResult = await autoTradeEngine.emergencyStop();
                       // Settle paper positions too so the UI reflects a flat book.
                       tradeManager.closeAllTrades("KILL_SWITCH");
                       autoTradeEngine.setAutoPilotState(autoTradeEngine.getAutoPilotPauseReason() ? "PAUSED" : "IDLE");
                       setAutoPilotActive(false);
                       setAutoPilotPauseReason(autoTradeEngine.getAutoPilotPauseReason());
-                      alert("Emergency stop triggered. Orders cancelled, positions closed, Auto-Pilot paused.");
+                      alert(
+                        `Emergency stop triggered. ${stopResult.cancelledOrdersCount} order group(s) cancelled, ${stopResult.closedPositionsCount} position(s) closed. Auto-Pilot paused.` +
+                          (stopResult.failures.length > 0
+                            ? `\n\nATTENTION — these positions could not be closed automatically:\n${stopResult.failures.join("\n")}`
+                            : "")
+                      );
                     }
                   }}
                   className="px-2 sm:px-2.5 py-1.5 rounded-lg bg-red-600/20 hover:bg-red-600/40 border border-red-500/60 text-[#ff3344] font-black text-[11px] sm:text-xs uppercase tracking-wider flex items-center gap-1 sm:gap-1.5 transition font-mono shadow-sm shadow-red-950/40 shrink-0"

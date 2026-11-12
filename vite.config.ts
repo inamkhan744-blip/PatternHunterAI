@@ -9,7 +9,7 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: 'autoUpdate',
-      includeAssets: ['favicon.ico', 'apple-touch-icon.png', 'masked-icon.svg'],
+      includeAssets: ['favicon.svg', 'apple-touch-icon.png', 'masked-icon.png', 'pwa-192x192.png', 'pwa-512x512.png', 'push-sw.js'],
       manifest: {
         name: 'PatternHunter AI',
         short_name: 'PatternHunter',
@@ -22,25 +22,29 @@ export default defineConfig({
         start_url: '/',
         icons: [
           {
-            src: 'https://images.unsplash.com/photo-1622979135225-d2ba269bc1df?w=192&auto=format&fit=crop&q=80',
+            src: '/pwa-192x192.png',
             sizes: '192x192',
             type: 'image/png',
+            purpose: 'any',
           },
           {
-            src: 'https://images.unsplash.com/photo-1622979135225-d2ba269bc1df?w=512&auto=format&fit=crop&q=80',
+            src: '/pwa-512x512.png',
             sizes: '512x512',
             type: 'image/png',
+            purpose: 'any',
           },
           {
-            src: 'https://images.unsplash.com/photo-1622979135225-d2ba269bc1df?w=512&auto=format&fit=crop&q=80',
+            src: '/masked-icon.png',
             sizes: '512x512',
             type: 'image/png',
-            purpose: 'any maskable',
+            purpose: 'maskable',
           },
         ],
       },
       workbox: {
         globPatterns: ['**/*.{js,css,html,ico,png,svg}'],
+        // Adds Web Push + notificationclick handlers to the generated service worker.
+        importScripts: ['push-sw.js'],
       },
     }),
   ],

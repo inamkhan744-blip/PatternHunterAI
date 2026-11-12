@@ -14,6 +14,7 @@ const ALL_COINS = [...COINS, ...PRO_COINS];
 
 interface HoldingWithPrice extends PortfolioHolding {
   currentPrice: number;
+  priceUnavailable?: boolean;
   value: number;
   cost: number;
   pnl: number;
@@ -28,20 +29,28 @@ export default function Portfolio() {
   const [quantity, setQuantity] = useState("");
   const [buyPrice, setBuyPrice] = useState("");
   const [refreshing, setRefreshing] = useState(false);
+  const [portfolioError, setPortfolioError] = useState<string | null>(null);
 
   const loadHoldings = useCallback(async () => {
     if (!user) {
       setLoading(false);
       return;
     }
-    const { data } = await supabase
-      .from("portfolio_holdings")
-      .select("*")
-      .order("created_at", { ascending: false });
-    if (data) {
-      setHoldings(data as PortfolioHolding[]);
+    try {
+      const { data, error } = await supabase
+        .from("portfolio_holdings")
+        .select("*")
+        .order("created_at", { ascending: false });
+      if (error) throw new Error(error.message);
+      if (data) setHoldings(data as PortfolioHolding[]);
+      setPortfolioError(null);
+    } catch (err) {
+      setPortfolioError(
+        `Portfolio sync failed: ${err instanceof Error ? err.message : "network error"}. Showing the last loaded holdings.`
+      );
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   }, [user]);
 
   useEffect(() => {
@@ -89,17 +98,23 @@ export default function Portfolio() {
 
   const computedHoldings = useMemo<HoldingWithPrice[]>(() => {
     return holdings.map((h) => {
-      const currentPrice = priceMap[h.binance_symbol] ?? h.buy_price;
-      const value = h.quantity * currentPrice;
+      const live = priceMap[h.binance_symbol];
+      const hasPrice = typeof live === "number" && Number.isFinite(live) && live > 0;
+      const currentPrice = hasPrice ? live : 0;
+      const value = hasPrice ? h.quantity * currentPrice : 0;
       const cost = h.quantity * h.buy_price;
-      const pnl = value - cost;
-      const pnlPercent = cost > 0 ? (pnl / cost) * 100 : 0;
-      return { ...h, currentPrice, value, cost, pnl, pnlPercent };
+      const pnl = hasPrice ? value - cost : 0;
+      const pnlPercent = hasPrice && cost > 0 ? (pnl / cost) * 100 : 0;
+      return { ...h, currentPrice, value, cost, pnl, pnlPercent, priceUnavailable: !hasPrice };
     });
   }, [holdings, priceMap]);
 
-  const totalValue = computedHoldings.reduce((sum, h) => sum + h.value, 0);
-  const totalCost = computedHoldings.reduce((sum, h) => sum + h.cost, 0);
+  // Totals only include holdings with a real live price; unpriced rows are flagged
+  // in the UI instead of being valued at cost (which would fake a flat P/L).
+  const pricedHoldings = computedHoldings.filter((h) => !h.priceUnavailable);
+  const unpricedCount = computedHoldings.length - pricedHoldings.length;
+  const totalValue = pricedHoldings.reduce((sum, h) => sum + h.value, 0);
+  const totalCost = pricedHoldings.reduce((sum, h) => sum + h.cost, 0);
   const totalPnl = totalValue - totalCost;
   const totalPnlPercent = totalCost > 0 ? (totalPnl / totalCost) * 100 : 0;
 
@@ -201,28 +216,44 @@ export default function Portfolio() {
     const bp = parseFloat(buyPrice);
     if (isNaN(qty) || qty <= 0 || isNaN(bp) || bp <= 0) return;
 
-    const { data } = await supabase
-      .from("portfolio_holdings")
-      .insert({
-        coin_symbol: coin.symbol,
-        binance_symbol: coin.binanceSymbol,
-        coin_label: coin.label,
-        quantity: qty,
-        buy_price: bp,
-      })
-      .select()
-      .single();
+    try {
+      const { data, error } = await supabase
+        .from("portfolio_holdings")
+        .insert({
+          coin_symbol: coin.symbol,
+          binance_symbol: coin.binanceSymbol,
+          coin_label: coin.label,
+          quantity: qty,
+          buy_price: bp,
+        })
+        .select()
+        .single();
 
-    if (data) {
-      setHoldings((prev) => [data as PortfolioHolding, ...prev]);
+      if (error) throw new Error(error.message);
+      if (data) {
+        setHoldings((prev) => [data as PortfolioHolding, ...prev]);
+      }
+      setPortfolioError(null);
+      setQuantity("");
+      setBuyPrice("");
+    } catch (err) {
+      setPortfolioError(
+        `Holding not saved: ${err instanceof Error ? err.message : "database write failed"}.`
+      );
     }
-    setQuantity("");
-    setBuyPrice("");
   }, [user, coin, quantity, buyPrice]);
 
   const removeHolding = useCallback(async (id: string) => {
-    await supabase.from("portfolio_holdings").delete().eq("id", id);
-    setHoldings((prev) => prev.filter((h) => h.id !== id));
+    try {
+      const { error } = await supabase.from("portfolio_holdings").delete().eq("id", id);
+      if (error) throw new Error(error.message);
+      setHoldings((prev) => prev.filter((h) => h.id !== id));
+      setPortfolioError(null);
+    } catch (err) {
+      setPortfolioError(
+        `Holding not removed: ${err instanceof Error ? err.message : "database write failed"}.`
+      );
+    }
   }, []);
 
   if (!user) {
@@ -463,6 +494,19 @@ export default function Portfolio() {
         </div>
       </div>
 
+      {portfolioError && (
+        <div className="mb-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+          {portfolioError}
+        </div>
+      )}
+
+      {unpricedCount > 0 && (
+        <div className="mb-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+          Live prices unavailable for {unpricedCount} holding{unpricedCount !== 1 ? "s" : ""} — those rows
+          are excluded from totals rather than valued at cost.
+        </div>
+      )}
+
       {/* Holdings list */}
       {holdings.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-16 text-center">
@@ -496,18 +540,24 @@ export default function Portfolio() {
                 </div>
                 <div className="text-right shrink-0 hidden sm:block">
                   <p className="text-xs text-slate-500">Current</p>
-                  <p className="text-sm font-medium text-slate-200">{formatPrice(h.currentPrice)}</p>
-                </div>
-                <div className="text-right shrink-0">
-                  <p className="text-sm font-medium text-slate-200">{formatPrice(h.value)}</p>
-                  <p className={`text-xs font-medium flex items-center justify-end gap-0.5 ${isProfit ? "text-green-400" : "text-red-400"}`}>
-                    {isProfit ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
-                    {isProfit ? "+" : ""}{h.pnlPercent.toFixed(2)}%
+                  <p className="text-sm font-medium text-slate-200">
+                    {h.priceUnavailable ? <span className="text-amber-400">Unavailable</span> : formatPrice(h.currentPrice)}
                   </p>
                 </div>
+                <div className="text-right shrink-0">
+                  <p className="text-sm font-medium text-slate-200">
+                    {h.priceUnavailable ? "—" : formatPrice(h.value)}
+                  </p>
+                  {!h.priceUnavailable && (
+                    <p className={`text-xs font-medium flex items-center justify-end gap-0.5 ${isProfit ? "text-green-400" : "text-red-400"}`}>
+                      {isProfit ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
+                      {isProfit ? "+" : ""}{h.pnlPercent.toFixed(2)}%
+                    </p>
+                  )}
+                </div>
                 <div className={`text-right shrink-0 w-20 hidden md:block`}>
-                  <p className={`text-sm font-bold ${isProfit ? "text-green-400" : "text-red-400"}`}>
-                    {isProfit ? "+" : ""}{formatPrice(Math.abs(h.pnl))}
+                  <p className={`text-sm font-bold ${h.priceUnavailable ? "text-slate-500" : isProfit ? "text-green-400" : "text-red-400"}`}>
+                    {h.priceUnavailable ? "—" : `${isProfit ? "+" : ""}${formatPrice(Math.abs(h.pnl))}`}
                   </p>
                 </div>
                 <button

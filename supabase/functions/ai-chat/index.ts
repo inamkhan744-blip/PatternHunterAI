@@ -28,6 +28,56 @@ const MAX_MESSAGE_CHARS = 2000;
 const MAX_HISTORY_ITEMS = 10;
 const MAX_IMAGE_BASE64_CHARS = 4_000_000; // ~3 MB binary
 const ALLOWED_ACTIONS = new Set(["swarm", "explain", "vision", "chat"]);
+const MAX_MARKET_DATA_AGE_MS = 15 * 60 * 1000;
+
+/**
+ * Rejects stale market context. An LLM asked to analyse minutes-old (or missing)
+ * data will confidently describe it as current, which is exactly the hallucination
+ * this guard prevents.
+ */
+function marketDataAgeError(raw: unknown): string | null {
+  const ts = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(ts) || ts <= 0) {
+    return "Market data timestamp is required (dataTimestamp) before AI analysis.";
+  }
+  const ageMs = Date.now() - ts;
+  if (ageMs < -60_000) return "Market data timestamp is in the future; refusing to analyse.";
+  if (ageMs > MAX_MARKET_DATA_AGE_MS) {
+    return `Market data is ${Math.round(ageMs / 60000)} minutes old (max 15). Refresh the chart and retry.`;
+  }
+  return null;
+}
+
+function validSwarmPayload(raw: unknown): Record<string, unknown> | null {
+  if (!raw || typeof raw !== "object") return null;
+  const o = raw as Record<string, unknown>;
+  const bull = typeof o.bullThesis === "string" ? o.bullThesis.trim().slice(0, 700) : "";
+  const bear = typeof o.bearThesis === "string" ? o.bearThesis.trim().slice(0, 700) : "";
+  const risk = typeof o.riskThesis === "string" ? o.riskThesis.trim().slice(0, 700) : "";
+  const verdict = o.riskVerdict === "GO" || o.riskVerdict === "NO-GO" ? o.riskVerdict : null;
+  const direction = ["LONG", "SHORT", "HOLD"].includes(String(o.recommendedDirection))
+    ? String(o.recommendedDirection)
+    : null;
+
+  if (!bull || !bear || !verdict || !direction) return null;
+
+  const clampNum = (v: unknown, min: number, max: number, fallback: number) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback;
+  };
+
+  return {
+    bullThesis: bull,
+    bullConfidence: clampNum(o.bullConfidence, 0, 100, 50),
+    bearThesis: bear,
+    bearConfidence: clampNum(o.bearConfidence, 0, 100, 50),
+    riskVerdict: verdict,
+    riskThesis: risk || "Risk thesis omitted by model.",
+    recommendedDirection: direction,
+    recommendedLeverage: clampNum(o.recommendedLeverage, 1, 10, 1),
+    recommendedPositionPct: clampNum(o.recommendedPositionPct, 0, 10, 0),
+  };
+}
 
 function stripMarkdownJson(raw: string): string {
   return raw
@@ -126,8 +176,16 @@ Deno.serve(async (req: Request) => {
 
     // --- 4. Dispatch -------------------------------------------------------
     if (action === "swarm") {
+      const staleError = marketDataAgeError(payload.dataTimestamp);
+      if (staleError) {
+        return json({ unavailable: true, error: staleError }, 422);
+      }
+
       const symbol = normalizeSymbol(payload.symbol) ?? "BTCUSDT";
       const price = finiteNumber(payload.price, 0, 1e12) ?? 0;
+      if (price <= 0) {
+        return json({ unavailable: true, error: "A valid live price is required for a swarm debate." }, 422);
+      }
       const rsi = finiteNumber(payload.rsi, 0, 100) ?? 50;
       const fearGreed = finiteNumber(payload.fearGreed, 0, 100) ?? 50;
       const confluenceScore = finiteNumber(payload.confluenceScore, 0, 100) ?? 50;
@@ -167,7 +225,22 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
           maxOutputTokens: 600,
           responseMimeType: "application/json",
         });
-        return json({ success: true, data: parseJsonResponse(text), modelUsed: model });
+
+        // Server-side schema validation: a malformed verdict is never forwarded as
+        // if it were a usable trading recommendation.
+        let validated: Record<string, unknown> | null = null;
+        try {
+          validated = validSwarmPayload(parseJsonResponse(text));
+        } catch {
+          validated = null;
+        }
+        if (!validated) {
+          return json(
+            { unavailable: true, error: "AI returned an invalid debate payload; verdict discarded." },
+            502
+          );
+        }
+        return json({ success: true, data: validated, modelUsed: model });
       } catch {
         return json({ unavailable: true, error: "Swarm debate is temporarily unavailable." }, 502);
       }
@@ -215,7 +288,19 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
           maxOutputTokens: 600,
           responseMimeType: "application/json",
         });
-        return json({ success: true, data: parseJsonResponse(text), modelUsed: model });
+
+        const parsed = parseJsonResponse(text) as Record<string, unknown> | null;
+        const levels = [parsed?.entry, parsed?.sl, parsed?.tp].map((v) => Number(v));
+        const levelsValid =
+          levels.every((v) => Number.isFinite(v) && v > 0) &&
+          levels.every((v) => Math.abs(v - price) / price <= 0.5);
+        if (!parsed || typeof parsed.explanation !== "string" || !levelsValid) {
+          return json(
+            { unavailable: true, error: "AI returned invalid price levels; analysis discarded." },
+            502
+          );
+        }
+        return json({ success: true, data: parsed, modelUsed: model });
       } catch {
         return json({ unavailable: true, error: "Pattern explanation is temporarily unavailable." }, 502);
       }
@@ -280,6 +365,15 @@ Respond STRICTLY in valid JSON matching this schema:
     const message = clampString(payload.message, MAX_MESSAGE_CHARS);
     if (!message) {
       return json({ error: "Missing required field: message" }, 400);
+    }
+
+    // Chat is allowed to run without a symbol context, but if a context timestamp is
+    // supplied it must be fresh; stale snapshots are never described as live.
+    if (payload.dataTimestamp !== undefined && payload.dataTimestamp !== null) {
+      const staleError = marketDataAgeError(payload.dataTimestamp);
+      if (staleError) {
+        return json({ unavailable: true, error: staleError }, 422);
+      }
     }
 
     const context = payload.marketContext;

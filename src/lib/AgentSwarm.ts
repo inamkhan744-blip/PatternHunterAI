@@ -46,6 +46,44 @@ export interface SwarmDebateParams {
   atrValue?: number | null;
   confluenceScore?: number | null;
   allowAiFallback?: boolean;
+  /** Epoch ms of the newest candle this context was built from. */
+  dataTimestamp?: number | null;
+}
+
+/** Market context older than this is rejected instead of being analysed. */
+export const MAX_MARKET_DATA_AGE_MS = 15 * 60 * 1000;
+
+export function isFreshMarketData(
+  dataTimestamp: number | null | undefined,
+  maxAgeMs: number = MAX_MARKET_DATA_AGE_MS
+): { fresh: boolean; ageMinutes: number | null } {
+  if (typeof dataTimestamp !== "number" || !Number.isFinite(dataTimestamp) || dataTimestamp <= 0) {
+    return { fresh: false, ageMinutes: null };
+  }
+  const ageMs = Date.now() - dataTimestamp;
+  // A timestamp in the future (clock skew) is treated as stale rather than trusted.
+  if (ageMs < -60_000) return { fresh: false, ageMinutes: Math.round(Math.abs(ageMs) / 60000) };
+  return { fresh: ageMs <= maxAgeMs, ageMinutes: Math.max(0, Math.round(ageMs / 60000)) };
+}
+
+/** Strips control characters and caps AI-authored text before it is rendered. */
+function sanitizeAiText(value: unknown, maxChars: number): string | null {
+  if (typeof value !== "string") return null;
+  const cleaned = Array.from(value)
+    .filter((ch) => {
+      const code = ch.charCodeAt(0);
+      return code === 9 || code === 10 || code === 13 || (code >= 32 && code !== 127);
+    })
+    .join("")
+    .trim();
+  if (!cleaned) return null;
+  return cleaned.slice(0, maxChars);
+}
+
+function clampConfidence(value: unknown): number | null {
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n)) return null;
+  return Math.min(100, Math.max(0, Math.round(n)));
 }
 
 /**
@@ -220,6 +258,36 @@ export async function runRealSwarmDebate(params: SwarmDebateParams): Promise<Swa
     return d.toISOString().substring(11, 19);
   };
 
+  // --- Pre-flight validation: never ask an LLM to reason about bad/stale data ---
+  if (!Number.isFinite(params.price) || params.price <= 0) {
+    return {
+      ...simulateSwarmDebate(params),
+      verdict: "NO-GO",
+      verdictReason: "NO-GO: live market price is unavailable. Debate aborted rather than analysed on missing data.",
+      recommendedDirection: "HOLD",
+      recommendedPositionPct: 0,
+      isRealAI: false,
+      isFallback: true,
+    };
+  }
+
+  const freshness = isFreshMarketData(params.dataTimestamp);
+  if (!freshness.fresh) {
+    const ageText = freshness.ageMinutes === null ? "unknown age" : `${freshness.ageMinutes} min old`;
+    liveWorkerLogStore.addLog(`Swarm debate blocked: stale market data (${ageText})`, "warn", {
+      symbol: params.symbol,
+    });
+    return {
+      ...simulateSwarmDebate(params),
+      verdict: "NO-GO",
+      verdictReason: `NO-GO: market data is stale (${ageText}, limit 15 min). Refresh the chart before requesting an AI verdict.`,
+      recommendedDirection: "HOLD",
+      recommendedPositionPct: 0,
+      isRealAI: false,
+      isFallback: true,
+    };
+  }
+
   const executeEdgeFunction = async () => {
     return await Promise.race([
       supabase.functions.invoke("ai-chat", {
@@ -235,6 +303,7 @@ export async function runRealSwarmDebate(params: SwarmDebateParams): Promise<Swa
           atrValue: params.atrValue,
           spreadPct: params.spreadPct,
           confluenceScore: params.confluenceScore ?? 75,
+          dataTimestamp: params.dataTimestamp,
         },
       }),
       new Promise<{ data: null; error: Error }>((_, reject) =>
@@ -262,32 +331,75 @@ export async function runRealSwarmDebate(params: SwarmDebateParams): Promise<Swa
 
     const baseSim = simulateSwarmDebate(params);
 
+    // --- Validate every AI-authored field before it can influence a decision ---
+    const bullThesis = sanitizeAiText(parsed.bullThesis, 700);
+    const bearThesis = sanitizeAiText(parsed.bearThesis, 700);
+    const riskThesis = sanitizeAiText(parsed.riskThesis, 700);
+    const aiVerdict = parsed.riskVerdict === "GO" || parsed.riskVerdict === "NO-GO" ? parsed.riskVerdict : null;
+    const aiDirection =
+      parsed.recommendedDirection === "LONG" ||
+      parsed.recommendedDirection === "SHORT" ||
+      parsed.recommendedDirection === "HOLD"
+        ? parsed.recommendedDirection
+        : null;
+
+    if (!aiVerdict || !bullThesis || !bearThesis) {
+      liveWorkerLogStore.addLog(
+        "Gemini response failed schema validation - using deterministic engine instead",
+        "warn",
+        { symbol: params.symbol }
+      );
+      return evaluateLocalHeuristicEngine(params);
+    }
+
+    // The LLM may never *create* a GO that the deterministic gates reject. It can
+    // only confirm or downgrade the quantitative verdict.
+    const deterministicGo = baseSim.verdict === "GO";
+    const isGo = aiVerdict === "GO" && deterministicGo;
+    const downgradedByAi = aiVerdict === "NO-GO" && deterministicGo;
+    const overriddenByRiskEngine = aiVerdict === "GO" && !deterministicGo;
+
+    const verdictMessage = isGo
+      ? riskThesis || baseSim.verdictReason
+      : overriddenByRiskEngine
+        ? `NO-GO: AI suggested execution, but the deterministic risk engine rejected the setup (${baseSim.verdictReason}). AI output is never treated as a confirmed signal.`
+        : downgradedByAi
+          ? `NO-GO: the AI risk manager downgraded a setup that passed the quantitative gates. ${riskThesis || baseSim.verdictReason}`
+          : riskThesis || baseSim.verdictReason;
+
+    if (overriddenByRiskEngine) {
+      liveWorkerLogStore.addLog(
+        "AI GO rejected: deterministic risk gates did not pass",
+        "warn",
+        { symbol: params.symbol }
+      );
+    }
+
     const bullMessage: SwarmAgentMessage = {
       agent: "Bull Agent",
       role: "BULL",
       sentiment: "BULLISH",
-      confidence: Math.min(100, Math.max(10, parsed.bullConfidence || baseSim.messages[0].confidence)),
+      confidence: clampConfidence(parsed.bullConfidence) ?? baseSim.messages[0].confidence,
       timestamp: timeStr(0),
-      message: parsed.bullThesis || baseSim.messages[0].message,
+      message: bullThesis,
     };
 
     const bearMessage: SwarmAgentMessage = {
       agent: "Bear Agent",
       role: "BEAR",
       sentiment: "BEARISH",
-      confidence: Math.min(100, Math.max(10, parsed.bearConfidence || baseSim.messages[1].confidence)),
+      confidence: clampConfidence(parsed.bearConfidence) ?? baseSim.messages[1].confidence,
       timestamp: timeStr(1),
-      message: parsed.bearThesis || baseSim.messages[1].message,
+      message: bearThesis,
     };
 
-    const isGo = parsed.riskVerdict === "GO";
     const riskMessage: SwarmAgentMessage = {
       agent: "Risk Manager",
       role: "RISK",
       sentiment: isGo ? "GO" : "NO-GO",
       confidence: Math.round(baseSim.confluenceScore),
       timestamp: timeStr(2),
-      message: parsed.riskThesis || baseSim.messages[2].message,
+      message: verdictMessage,
     };
 
     return {
@@ -295,10 +407,14 @@ export async function runRealSwarmDebate(params: SwarmDebateParams): Promise<Swa
       price: params.price,
       confluenceScore: baseSim.confluenceScore,
       verdict: isGo ? "GO" : "NO-GO",
-      verdictReason: riskMessage.message,
-      recommendedDirection: parsed.recommendedDirection || baseSim.recommendedDirection,
-      recommendedLeverage: Math.min(10, Math.max(1, parsed.recommendedLeverage || baseSim.recommendedLeverage)),
-      recommendedPositionPct: Math.min(10, Math.max(0.5, parsed.recommendedPositionPct || baseSim.recommendedPositionPct)),
+      verdictReason: verdictMessage,
+      // Direction must be a validated enum, and a non-executable verdict can never
+      // recommend a position.
+      recommendedDirection: isGo ? aiDirection ?? baseSim.recommendedDirection : "HOLD",
+      recommendedLeverage: Math.min(10, Math.max(1, Number(parsed.recommendedLeverage) || baseSim.recommendedLeverage)),
+      recommendedPositionPct: isGo
+        ? Math.min(10, Math.max(0.5, Number(parsed.recommendedPositionPct) || baseSim.recommendedPositionPct))
+        : 0,
       messages: [bullMessage, bearMessage, riskMessage],
       apiKeyUsed: true,
       isRealAI: true,

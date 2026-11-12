@@ -15,17 +15,26 @@ export default function SignalHistory({ refreshKey, onOutcomeChange }: Props) {
   const [signals, setSignals] = useState<SignalHistory[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<OutcomeFilter>("all");
+  const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
-    const { data, error } = await supabase
-      .from("signal_history")
-      .select("*")
-      .order("created_at", { ascending: false });
-    if (!error && data) {
-      setSignals(data as SignalHistory[]);
+    try {
+      const { data, error: queryError } = await supabase
+        .from("signal_history")
+        .select("*")
+        .order("created_at", { ascending: false });
+      if (queryError) throw new Error(queryError.message);
+      if (data) setSignals(data as SignalHistory[]);
+      setError(null);
+    } catch (err) {
+      // Never present a failed load as "no signals recorded".
+      setError(
+        `Signal history unavailable: ${err instanceof Error ? err.message : "network error"}. Retry when back online.`
+      );
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   }, []);
 
   useEffect(() => {
@@ -34,22 +43,30 @@ export default function SignalHistory({ refreshKey, onOutcomeChange }: Props) {
 
   const updateOutcome = useCallback(
     async (id: string, outcome: "pending" | "hit_tp" | "hit_sl") => {
-      const { error } = await supabase
-        .from("signal_history")
-        .update({ outcome })
-        .eq("id", id);
-      if (!error) {
+      try {
+        const { error: updateError } = await supabase
+          .from("signal_history")
+          .update({ outcome })
+          .eq("id", id);
+        if (updateError) throw new Error(updateError.message);
         setSignals((prev) => prev.map((s) => (s.id === id ? { ...s, outcome } : s)));
+        setError(null);
         onOutcomeChange();
+      } catch (err) {
+        setError(`Could not update outcome: ${err instanceof Error ? err.message : "network error"}.`);
       }
     },
     [onOutcomeChange]
   );
 
   const deleteSignal = useCallback(async (id: string) => {
-    const { error } = await supabase.from("signal_history").delete().eq("id", id);
-    if (!error) {
+    try {
+      const { error: deleteError } = await supabase.from("signal_history").delete().eq("id", id);
+      if (deleteError) throw new Error(deleteError.message);
       setSignals((prev) => prev.filter((s) => s.id !== id));
+      setError(null);
+    } catch (err) {
+      setError(`Could not delete signal: ${err instanceof Error ? err.message : "network error"}.`);
     }
   }, []);
 
@@ -128,6 +145,12 @@ export default function SignalHistory({ refreshKey, onOutcomeChange }: Props) {
           </button>
         )}
       </div>
+
+      {error && (
+        <div className="mb-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+          {error}
+        </div>
+      )}
 
       {/* Win rate stats */}
       {signals.length > 0 && (

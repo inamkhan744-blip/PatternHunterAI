@@ -68,6 +68,14 @@ export interface ManagedTrade {
   tpOrderId?: string;
   orderType: "LIMIT" | "MARKET";
   isStuck?: boolean;
+  /**
+   * Whether this position was actually opened on Binance (REAL) or only simulated
+   * locally (PAPER). Every exchange-side action must be gated on this flag so a
+   * paper position can never trigger a live order.
+   */
+  executionMode?: "REAL" | "PAPER";
+  slOrderError?: string;
+  tpOrderError?: string;
 }
 
 export interface CircuitBreakerState {
@@ -169,7 +177,8 @@ export function calculatePositionSize(
   riskPercent: number,
   accountBalance: number,
   leverage: number = 1,
-  entryPrice: number = 1
+  entryPrice: number = 1,
+  stopLossPrice?: number
 ): { quantity: number; positionValue: number; marginRequired: number } {
   if (accountBalance <= 0 || riskPercent <= 0 || entryPrice <= 0) {
     return { quantity: 0, positionValue: 0, marginRequired: 0 };
@@ -178,8 +187,26 @@ export function calculatePositionSize(
   const effectiveLeverage = Math.max(1, Math.min(10, leverage));
   const clampedRisk = Math.max(0.1, Math.min(100, riskPercent));
 
-  const marginRequired = accountBalance * (clampedRisk / 100);
-  const positionValue = marginRequired * effectiveLeverage;
+  // Risk-based sizing: `riskPercent` is the maximum equity loss if the stop is hit,
+  // so notional = riskAmount / stopDistance * entry. When no stop is supplied we
+  // fall back to allocating `riskPercent` of equity as margin (legacy behaviour).
+  const stopDistance = stopLossPrice && stopLossPrice > 0 ? Math.abs(entryPrice - stopLossPrice) : 0;
+
+  let marginRequired: number;
+  let positionValue: number;
+
+  if (stopDistance > 0 && stopDistance < entryPrice) {
+    const riskAmount = accountBalance * (clampedRisk / 100);
+    const riskBasedNotional = (riskAmount / stopDistance) * entryPrice;
+    // Never exceed the maximum notional the account can collateralise.
+    const maxNotional = accountBalance * effectiveLeverage;
+    positionValue = Math.min(riskBasedNotional, maxNotional);
+    marginRequired = positionValue / effectiveLeverage;
+  } else {
+    marginRequired = accountBalance * (clampedRisk / 100);
+    positionValue = marginRequired * effectiveLeverage;
+  }
+
   const quantity = positionValue / entryPrice;
 
   return {
@@ -202,14 +229,20 @@ export function calculateLiquidationPrice(
     return { liquidationPrice: 0, distancePercent: 0, isWarning: false };
   }
 
-  const lev = Math.max(1, Math.min(10, leverage));
+  const lev = Math.max(1, Math.min(125, leverage));
+  const safeMmr = Math.max(0, Math.min(0.2, mmr));
   let liqPrice = 0;
 
+  // Binance USDT-M isolated approximation: the maintenance-margin rate applies to
+  // the notional, i.e. it is divided by leverage in entry-price terms:
+  //   LONG : liq = entry * (1 - 1/L + mmr/L)
+  //   SHORT: liq = entry * (1 + 1/L - mmr/L)
+  // (The previous formula added the full mmr to the price, understating the distance.)
   if (direction === "LONG") {
-    liqPrice = entryPrice * (1 - (1 / lev) + mmr);
+    liqPrice = entryPrice * (1 - (1 / lev) + (safeMmr / lev));
     liqPrice = Math.max(0, liqPrice);
   } else {
-    liqPrice = entryPrice * (1 + (1 / lev) - mmr);
+    liqPrice = entryPrice * (1 + (1 / lev) - (safeMmr / lev));
   }
 
   const distancePercent = Math.abs((liqPrice - entryPrice) / entryPrice) * 100;
@@ -245,7 +278,7 @@ export function checkLiquidationProximity(
         distanceToLiqPct: 0,
       };
     }
-    distanceToLiqPct = ((stopLossPrice - liquidationPrice) / stopLossPrice) * 100;
+    distanceToLiqPct = ((stopLossPrice - liquidationPrice) / liquidationPrice) * 100;
   } else {
     if (stopLossPrice >= liquidationPrice) {
       return {
@@ -254,7 +287,7 @@ export function checkLiquidationProximity(
         distanceToLiqPct: 0,
       };
     }
-    distanceToLiqPct = ((liquidationPrice - stopLossPrice) / stopLossPrice) * 100;
+    distanceToLiqPct = ((liquidationPrice - stopLossPrice) / liquidationPrice) * 100;
   }
 
   if (distanceToLiqPct < 2.0) {
@@ -503,7 +536,16 @@ export class BinanceAutoTradeEngine {
   private loadTrades(): ManagedTrade[] {
     try {
       const stored = localStorage.getItem(STORAGE_KEY_TRADES);
-      if (stored) return JSON.parse(stored);
+      if (stored) {
+        const parsed = JSON.parse(stored) as ManagedTrade[];
+        // Legacy records predate executionMode. Anything with a SIM- order id (or
+        // no order id at all) was simulated, so it must never trigger a live close.
+        return parsed.map((t) => ({
+          ...t,
+          executionMode:
+            t.executionMode ?? (t.orderId && !String(t.orderId).startsWith("SIM-") ? "REAL" : "PAPER"),
+        }));
+      }
     } catch {
       // fallback
     }
@@ -790,10 +832,18 @@ export class BinanceAutoTradeEngine {
     return type === "Futures" ? FUTURES_API_BASE : SPOT_API_BASE;
   }
 
-  public async fetchAccountBalance(marketType?: MarketType): Promise<{ usdtBalance: number; freeBalance: number }> {
+  public async fetchAccountBalance(marketType?: MarketType): Promise<{
+    usdtBalance: number;
+    freeBalance: number;
+    /** False when the balance could not be read from Binance. */
+    ok: boolean;
+    /** True when the value is the local paper-trading stub, not a real balance. */
+    simulated: boolean;
+    error?: string;
+  }> {
     const type = marketType ?? this.config.marketType;
     if (!isLiveTradingConfigured()) {
-      return { usdtBalance: 10000, freeBalance: 10000 };
+      return { usdtBalance: 10000, freeBalance: 10000, ok: false, simulated: true };
     }
 
     const path = type === "Futures" ? "/fapi/v2/balance" : "/api/v3/account";
@@ -814,16 +864,29 @@ export class BinanceAutoTradeEngine {
         const usdtAsset = data.find((a: { asset: string }) => a.asset === "USDT");
         const usdtBalance = usdtAsset ? parseFloat(usdtAsset.balance) : 0;
         const freeBalance = usdtAsset ? parseFloat(usdtAsset.withdrawAvailable) : 0;
-        return { usdtBalance, freeBalance };
+        if (!Number.isFinite(usdtBalance) || !Number.isFinite(freeBalance)) {
+          return { usdtBalance: 0, freeBalance: 0, ok: false, simulated: false, error: "Malformed balance payload" };
+        }
+        return { usdtBalance, freeBalance, ok: true, simulated: false };
       } else {
         const balances = data.balances || [];
         const usdtAsset = balances.find((b: { asset: string }) => b.asset === "USDT");
         const freeBalance = usdtAsset ? parseFloat(usdtAsset.free) : 0;
         const lockedBalance = usdtAsset ? parseFloat(usdtAsset.locked) : 0;
-        return { usdtBalance: freeBalance + lockedBalance, freeBalance };
+        if (!Number.isFinite(freeBalance) || !Number.isFinite(lockedBalance)) {
+          return { usdtBalance: 0, freeBalance: 0, ok: false, simulated: false, error: "Malformed balance payload" };
+        }
+        return { usdtBalance: freeBalance + lockedBalance, freeBalance, ok: true, simulated: false };
       }
-    } catch {
-      return { usdtBalance: 10000, freeBalance: 10000 };
+    } catch (e) {
+      // Never invent a $10,000 balance: a failed balance read must block sizing.
+      return {
+        usdtBalance: 0,
+        freeBalance: 0,
+        ok: false,
+        simulated: false,
+        error: e instanceof Error ? e.message : "Unable to read account balance",
+      };
     }
   }
 
@@ -855,9 +918,33 @@ export class BinanceAutoTradeEngine {
     direction?: TradeDirection;
     marketType?: MarketType;
     accountBalance?: number;
+    /** "PAPER" forces a pure local simulation. Defaults to REAL only when the
+     *  server-side vault confirms live credentials are configured. */
+    mode?: "REAL" | "PAPER";
   }): Promise<{ success: boolean; trade?: ManagedTrade; error?: string }> {
     const marketType = params.marketType ?? this.config.marketType;
     const direction = params.direction ?? (marketType === "Spot" ? "LONG" : this.config.direction);
+
+    // --- 0. Hard input validation -----------------------------------------
+    if (!Number.isFinite(params.entryPrice) || params.entryPrice <= 0) {
+      return { success: false, error: "Invalid entry price: a positive market price is required before execution." };
+    }
+    if (!Number.isFinite(params.atrValue) || params.atrValue <= 0) {
+      return { success: false, error: "Invalid ATR: refusing to size a trade without volatility data." };
+    }
+    if (!/^[A-Z0-9]{5,20}$/.test(params.symbol)) {
+      return { success: false, error: `Invalid symbol: ${params.symbol}` };
+    }
+    if (marketType === "Spot" && direction === "SHORT") {
+      return {
+        success: false,
+        error: "SHORT positions are only available on Futures. Binance Spot cannot short without margin.",
+      };
+    }
+
+    const liveConfigured = isLiveTradingConfigured();
+    const executionMode: "REAL" | "PAPER" = params.mode === "PAPER" || !liveConfigured ? "PAPER" : "REAL";
+    const useExchange = executionMode === "REAL";
 
     // 1. Post-Loss Cooldown Check (30 Minutes)
     const cooldown = this.getPostLossCooldown();
@@ -1016,25 +1103,46 @@ export class BinanceAutoTradeEngine {
       };
     }
 
-    // Balance & Sizing
-    const balance = params.accountBalance ?? (await this.fetchAccountBalance(marketType)).freeBalance;
-    const leverage = marketType === "Futures" ? this.config.leverage : 1;
-    const sizing = calculatePositionSize(this.config.riskPercent, balance, leverage, params.entryPrice);
-
-    if (sizing.quantity <= 0) {
-      return {
-        success: false,
-        error: "Calculated position size is 0. Check account balance and risk percentage.",
-      };
-    }
-
-    // ATR Stop Loss
+    // ATR Stop Loss / Take Profit (computed before sizing so risk can be sized off the stop)
     const { stopLossPrice, takeProfitPrice } = calculateAtrStopLoss(
       params.entryPrice,
       params.atrValue,
       direction,
       this.config.atrMultiplier
     );
+
+    // Balance & Sizing
+    let balance: number;
+    if (params.accountBalance !== undefined) {
+      balance = params.accountBalance;
+    } else if (useExchange) {
+      const balanceResult = await this.fetchAccountBalance(marketType);
+      if (!balanceResult.ok) {
+        return {
+          success: false,
+          error: `Unable to read your Binance ${marketType} balance${balanceResult.error ? ` (${balanceResult.error})` : ""}. Trade not sent.`,
+        };
+      }
+      balance = balanceResult.freeBalance;
+    } else {
+      balance = 10000; // virtual paper balance only
+    }
+
+    const leverage = marketType === "Futures" ? this.config.leverage : 1;
+    const sizing = calculatePositionSize(
+      this.config.riskPercent,
+      balance,
+      leverage,
+      params.entryPrice,
+      stopLossPrice
+    );
+
+    if (!Number.isFinite(sizing.quantity) || sizing.quantity <= 0) {
+      return {
+        success: false,
+        error: "Calculated position size is 0. Check account balance, risk percentage and stop distance.",
+      };
+    }
 
     // Futures Liquidation Price & Proximity Warning
     let liquidationPrice: number | undefined;
@@ -1051,22 +1159,29 @@ export class BinanceAutoTradeEngine {
       }
     }
 
-    // Execute real order on Binance API if live credentials exist
+    // Execute on Binance only for REAL executions. PAPER trades never leave the browser.
     let orderId = "";
     let slOrderId: string | undefined;
     let tpOrderId: string | undefined;
-    const hasLiveCreds = isLiveTradingConfigured();
+    let slOrderError: string | undefined;
+    let tpOrderError: string | undefined;
 
-    if (hasLiveCreds) {
+    if (useExchange) {
       if (marketType === "Futures") {
-        await this.setFuturesLeverage(params.symbol, leverage);
+        const leverageSet = await this.setFuturesLeverage(params.symbol, leverage);
+        if (!leverageSet) {
+          return { success: false, error: "Binance rejected the leverage update. Trade not sent." };
+        }
       }
+
+      const clientOrderId = `ph${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
       const apiResult = await this.placeBinanceLimitOrder({
         symbol: params.symbol,
         side: direction === "LONG" ? "BUY" : "SELL",
         quantity: sizing.quantity,
         price: params.entryPrice,
         marketType,
+        clientOrderId,
       });
 
       if (!apiResult.orderId) {
@@ -1075,6 +1190,18 @@ export class BinanceAutoTradeEngine {
           error: apiResult.error || "Binance order rejected by exchange.",
         };
       }
+
+      // Verify the exchange response before treating the position as open.
+      if (apiResult.status !== "FILLED" || !(Number(apiResult.executedQty) > 0)) {
+        // The limit order is resting unfilled. Cancel it and fail closed instead of
+        // recording a phantom position (SL/TP would be rejected with no position).
+        await this.cancelExchangeOrder(params.symbol, String(apiResult.orderId), marketType).catch(() => {});
+        return {
+          success: false,
+          error: `Order was accepted (status: ${apiResult.status || "UNKNOWN"}) but not filled at ${params.entryPrice}. It was cancelled — retry at the current market price.`,
+        };
+      }
+
       orderId = String(apiResult.orderId);
 
       // Place exchange-native Stop Loss order
@@ -1086,6 +1213,7 @@ export class BinanceAutoTradeEngine {
           quantity: sizing.quantity,
         }).catch(() => null);
         if (slRes && slRes.orderId) slOrderId = String(slRes.orderId);
+        else slOrderError = slRes?.error || "Stop Loss order was not accepted by Binance";
 
         const tpRes = await this.placeFuturesTakeProfitOrder({
           symbol: params.symbol,
@@ -1094,9 +1222,10 @@ export class BinanceAutoTradeEngine {
           quantity: sizing.quantity,
         }).catch(() => null);
         if (tpRes && tpRes.orderId) tpOrderId = String(tpRes.orderId);
+        else tpOrderError = tpRes?.error || "Take Profit order was not accepted by Binance";
       }
     } else {
-      // Paper or sandbox simulation
+      // Paper / sandbox simulation — no network call to any exchange endpoint.
       orderId = `SIM-${Date.now()}`;
     }
 
@@ -1123,7 +1252,10 @@ export class BinanceAutoTradeEngine {
       orderId,
       slOrderId,
       tpOrderId,
+      slOrderError,
+      tpOrderError,
       orderType: "LIMIT",
+      executionMode,
     };
 
     this.trades.unshift(trade);
@@ -1146,7 +1278,7 @@ export class BinanceAutoTradeEngine {
       direction: trade.direction,
       entryPrice: trade.entryPrice,
       source: "Auto-Trade Engine",
-      mode: hasLiveCreds ? "REAL" : "PAPER",
+      mode: executionMode,
     }).catch(() => {});
 
     return {
@@ -1161,17 +1293,39 @@ export class BinanceAutoTradeEngine {
     quantity: number;
     price: number;
     marketType: MarketType;
-  }): Promise<{ orderId?: string | number; error?: string }> {
+    clientOrderId?: string;
+  }): Promise<{
+    orderId?: string | number;
+    status?: string;
+    executedQty?: number;
+    error?: string;
+  }> {
     const path = params.marketType === "Futures" ? "/fapi/v1/order" : "/api/v3/order";
 
-    const body = [
+    if (!Number.isFinite(params.quantity) || params.quantity <= 0) {
+      return { error: "Invalid order quantity" };
+    }
+    if (!Number.isFinite(params.price) || params.price <= 0) {
+      return { error: "Invalid order price" };
+    }
+
+    const bodyParts = [
       `symbol=${params.symbol}`,
       `side=${params.side}`,
       `type=LIMIT`,
       `timeInForce=GTC`,
       `quantity=${params.quantity}`,
       `price=${params.price}`,
-    ].join("&");
+      // ACK|RESULT: return the fill state so we can verify execution instead of
+      // assuming a resting order was filled.
+      `newOrderRespType=RESULT`,
+    ];
+    if (params.clientOrderId) {
+      // Idempotency key: Binance rejects a duplicate clientOrderId for ~24h, which
+      // prevents double submission of the same logical order.
+      bodyParts.push(`newClientOrderId=${params.clientOrderId}`);
+    }
+    const body = bodyParts.join("&");
 
     try {
       const res = await proxyBinanceFetch({
@@ -1180,11 +1334,18 @@ export class BinanceAutoTradeEngine {
         method: "POST",
         body,
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        return { error: data.msg || "Order placement failed" };
+        return { error: data?.msg || `Order placement failed (HTTP ${res.status})` };
       }
-      return { orderId: data.orderId };
+      if (!data?.orderId) {
+        return { error: "Binance response contained no orderId" };
+      }
+      return {
+        orderId: data.orderId,
+        status: typeof data.status === "string" ? data.status : undefined,
+        executedQty: Number(data.executedQty ?? 0),
+      };
     } catch (e) {
       return { error: e instanceof Error ? e.message : "Network error" };
     }
@@ -1273,42 +1434,75 @@ export class BinanceAutoTradeEngine {
     }
   }
 
+  /**
+   * Replaces the resting exchange Stop Loss with a new stop price (trailing SL).
+   * Only ever called for REAL futures positions.
+   */
+  public async replaceExchangeStopLoss(trade: ManagedTrade, newStopPrice: number): Promise<boolean> {
+    if (trade.executionMode !== "REAL" || !isLiveTradingConfigured() || trade.marketType !== "Futures") {
+      return true;
+    }
+
+    if (trade.slOrderId) {
+      const cancelled = await this.cancelExchangeOrder(trade.symbol, trade.slOrderId, "Futures").catch(() => false);
+      if (!cancelled) {
+        console.warn(`[Trailing SL] Could not cancel previous SL order ${trade.slOrderId} for ${trade.symbol}; keeping local stop only.`);
+        return false;
+      }
+    }
+
+    const res = await this.placeFuturesStopLossOrder({
+      symbol: trade.symbol,
+      side: trade.direction === "LONG" ? "SELL" : "BUY",
+      stopPrice: newStopPrice,
+      quantity: trade.quantity,
+    }).catch(() => null);
+
+    if (res && res.orderId) {
+      trade.slOrderId = String(res.orderId);
+      return true;
+    }
+
+    trade.slOrderError = res?.error || "Failed to move exchange Stop Loss";
+    console.warn(`[Trailing SL] ${trade.slOrderError} (${trade.symbol})`);
+    return false;
+  }
+
   public async closeExchangePosition(trade: ManagedTrade): Promise<boolean> {
-    if (!isLiveTradingConfigured()) return true;
+    if (trade.executionMode !== "REAL" || !isLiveTradingConfigured()) return true;
 
     try {
-      if (trade.marketType === "Futures") {
-        const side = trade.direction === "LONG" ? "SELL" : "BUY";
-        const body = [
-          `symbol=${trade.symbol}`,
-          `side=${side}`,
-          `type=MARKET`,
-          `quantity=${trade.quantity}`,
-          `reduceOnly=true`,
-        ].join("&");
-        await proxyBinanceFetch({
-          target: "futures",
-          path: "/fapi/v1/order",
-          method: "POST",
-          body,
-        });
-      } else {
-        const side = "SELL";
-        const body = [
-          `symbol=${trade.symbol}`,
-          `side=${side}`,
-          `type=MARKET`,
-          `quantity=${trade.quantity}`,
-        ].join("&");
-        await proxyBinanceFetch({
-          target: "spot",
-          path: "/api/v3/order",
-          method: "POST",
-          body,
-        });
+      const body =
+        trade.marketType === "Futures"
+          ? [
+              `symbol=${trade.symbol}`,
+              `side=${trade.direction === "LONG" ? "SELL" : "BUY"}`,
+              `type=MARKET`,
+              `quantity=${trade.quantity}`,
+              `reduceOnly=true`,
+            ].join("&")
+          : [
+              `symbol=${trade.symbol}`,
+              `side=SELL`,
+              `type=MARKET`,
+              `quantity=${trade.quantity}`,
+            ].join("&");
+
+      const res = await proxyBinanceFetch({
+        target: trade.marketType === "Futures" ? "futures" : "spot",
+        path: trade.marketType === "Futures" ? "/fapi/v1/order" : "/api/v3/order",
+        method: "POST",
+        body,
+      });
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        console.warn(`[Close Position] Binance rejected ${trade.symbol}: ${data?.msg || res.statusText}`);
+        return false;
       }
       return true;
-    } catch {
+    } catch (e) {
+      console.warn(`[Close Position] ${e instanceof Error ? e.message : "network error"}`);
       return false;
     }
   }
@@ -1334,6 +1528,13 @@ export class BinanceAutoTradeEngine {
           if (trailingEval.newTrailingStage) trade.trailingStage = trailingEval.newTrailingStage;
           if (trailingEval.newPeak) trade.peakPrice = trailingEval.newPeak;
           if (trailingEval.newTrough) trade.troughPrice = trailingEval.newTrough;
+
+          // Keep the exchange-side stop in sync, otherwise a live position would
+          // still be protected only by the original (wider) stop.
+          if (trade.executionMode === "REAL" && trade.marketType === "Futures") {
+            this.replaceExchangeStopLoss(trade, trailingEval.newStopLoss).catch(() => {});
+          }
+
           updatedTrades.push({ ...trade });
 
           pushNotificationService.notifyTrailingStopMoved({
@@ -1389,8 +1590,9 @@ export class BinanceAutoTradeEngine {
       ? exitPrice - trade.entryPrice
       : trade.entryPrice - exitPrice;
 
-    const rawPnl = priceDiff * trade.quantity;
-    const realizedPnl = trade.marketType === "Futures" ? rawPnl * trade.leverage : rawPnl;
+    // NOTE: `quantity` is already the full levered position size (margin * leverage /
+    // entry), so multiplying by leverage again would overstate P/L by the leverage factor.
+    const realizedPnl = priceDiff * trade.quantity;
     trade.realizedPnl = Number(realizedPnl.toFixed(2));
 
     // OCO Logic: When TP is hit, automatically cancel associated SL order; if SL is hit, cancel TP order
@@ -1404,18 +1606,18 @@ export class BinanceAutoTradeEngine {
       }
     }
 
-    // Execute exchange-level close if live trade
-    if (isLiveTradingConfigured()) {
+    // Execute exchange-level close only for positions that were really opened.
+    if (trade.executionMode === "REAL") {
       this.closeExchangePosition(trade).catch(() => {});
     }
 
-    if (this.config.profitVaultEnabled && realizedPnl > 0) {
+    if (trade.executionMode === "REAL" && this.config.profitVaultEnabled && realizedPnl > 0) {
       const vaultCut = Number((realizedPnl * 0.5).toFixed(2));
       trade.profitVaultAmount = vaultCut;
       this.profitVaultTotal += vaultCut;
       localStorage.setItem(STORAGE_KEY_VAULT, String(this.profitVaultTotal.toFixed(2)));
 
-      if (trade.marketType === "Futures" && isLiveTradingConfigured()) {
+      if (trade.marketType === "Futures" && trade.executionMode === "REAL" && isLiveTradingConfigured()) {
         this.transferProfitToSpotWallet(vaultCut).catch(() => {});
       }
     }
@@ -1532,7 +1734,9 @@ export class BinanceAutoTradeEngine {
 
     if (isLiveTradingConfigured()) {
       try {
-        const openFuturesTrades = this.trades.filter((t) => t.status === "OPEN" && t.marketType === "Futures");
+        const openFuturesTrades = this.trades.filter(
+          (t) => t.status === "OPEN" && t.marketType === "Futures" && t.executionMode === "REAL"
+        );
         const symbols = Array.from(new Set(openFuturesTrades.map((t) => t.symbol)));
 
         for (const sym of symbols) {
@@ -1549,7 +1753,9 @@ export class BinanceAutoTradeEngine {
       }
 
       try {
-        const openSpotTrades = this.trades.filter((t) => t.status === "OPEN" && t.marketType === "Spot");
+        const openSpotTrades = this.trades.filter(
+          (t) => t.status === "OPEN" && t.marketType === "Spot" && t.executionMode === "REAL"
+        );
         const symbols = Array.from(new Set(openSpotTrades.map((t) => t.symbol)));
 
         for (const sym of symbols) {
@@ -1568,6 +1774,10 @@ export class BinanceAutoTradeEngine {
 
     for (const trade of this.trades) {
       if (trade.status === "OPEN") {
+        if (trade.executionMode === "REAL") {
+          // Close the real exchange position before marking the record closed.
+          await this.closeExchangePosition(trade).catch(() => false);
+        }
         trade.status = "CLOSED";
         trade.closePrice = trade.entryPrice;
         trade.realizedPnl = 0;

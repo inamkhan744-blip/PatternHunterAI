@@ -195,6 +195,9 @@ export async function fetchUserProfile(
   return profile;
 }
 
+/** Admins are never quota-limited; this is the number shown as "infinity" in the UI. */
+export const ADMIN_TRADE_ALLOWANCE_LIMIT = 1000000;
+
 export interface TradeAllowance {
   allowed: boolean;
   limit: number;
@@ -202,6 +205,10 @@ export interface TradeAllowance {
   isPro: boolean;
   isAdmin: boolean;
   reason?: string;
+  /** True when the server could not be reached and this is a cached/fallback decision. */
+  stale?: boolean;
+  /** Non-blocking notice for the UI (shown as a small warning, never a hard error). */
+  warning?: string;
 }
 
 function normalizeAllowance(raw: Record<string, unknown> | null): TradeAllowance {
@@ -210,7 +217,7 @@ function normalizeAllowance(raw: Record<string, unknown> | null): TradeAllowance
   const limit = Number(raw?.limit);
   const current = Number(raw?.current);
   return {
-    allowed: raw?.allowed === true,
+    allowed: raw?.allowed === true || isAdmin,
     limit: Number.isFinite(limit) ? limit : FREE_DAILY_MANUAL_TRADE_LIMIT,
     current: Number.isFinite(current) ? current : 0,
     isPro,
@@ -220,38 +227,95 @@ function normalizeAllowance(raw: Record<string, unknown> | null): TradeAllowance
 }
 
 /**
+ * Makes sure an access token is present before a quota RPC.
+ * An expired session is refreshed silently; a missing refresh token means the user
+ * really is signed out.
+ */
+async function ensureAuthSession(): Promise<boolean> {
+  try {
+    const { data, error } = await supabase.auth.getSession();
+    if (!error && data.session) return true;
+    const { data: refreshed, error: refreshError } = await supabase.auth.refreshSession();
+    if (refreshError) return false;
+    return Boolean(refreshed.session);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Server-side quota check. With `consume: true` the server atomically increments
  * today's usage counter and refuses once the tier limit is reached. The returned
  * decision is authoritative — never derive it from cached numbers.
+ *
+ * Admins short-circuit before any network call: their tooling must never depend on
+ * backend latency or availability. Read-only checks (`consume: false`) degrade to the
+ * last known allowance instead of blocking the UI when the backend is unreachable;
+ * consuming checks always fail closed so a quota cannot be bypassed by an outage.
  */
 export async function checkTradeExecutionAllowance(options: { consume?: boolean } = {}): Promise<TradeAllowance> {
-  const rpc = options.consume === false ? "get_trade_quota" : "consume_trade_quota";
+  const consume = options.consume !== false;
 
-  try {
-    const { data, error } = await supabase.rpc(rpc);
-    if (error || !data) {
-      return {
-        allowed: false,
-        limit: 0,
-        current: 0,
-        isPro: false,
-        isAdmin: false,
-        reason: "Unable to verify your trade allowance with the server. Please sign in and try again.",
-      };
-    }
-    const allowance = normalizeAllowance(data as Record<string, unknown>);
+  // Admin bypass — no session lookup, no RPC, no waiting.
+  if (isUserAdmin(activeProfile)) {
+    const allowance: TradeAllowance = {
+      allowed: true,
+      limit: ADMIN_TRADE_ALLOWANCE_LIMIT,
+      current: activeQuota?.current ?? 0,
+      isPro: true,
+      isAdmin: true,
+    };
     activeQuota = allowance;
     return allowance;
-  } catch {
+  }
+
+  const rpc = consume ? "consume_trade_quota" : "get_trade_quota";
+  const readQuota = async (): Promise<TradeAllowance | null> => {
+    const { data, error } = await supabase.rpc(rpc);
+    if (error || !data) return null;
+    return normalizeAllowance(data as Record<string, unknown>);
+  };
+
+  let failure: string | null = null;
+  try {
+    if (await ensureAuthSession()) {
+      let fresh = await readQuota();
+      if (!fresh) {
+        // One silent refresh + retry covers a token that expired mid-session.
+        const { error } = await supabase.auth.refreshSession();
+        if (!error) fresh = await readQuota();
+      }
+      // The server response also wins when it reports admin (stale client profile).
+      if (fresh) {
+        activeQuota = fresh;
+        return fresh;
+      }
+    }
+  } catch (error) {
+    failure = error instanceof Error ? error.message : String(error);
+  }
+
+  if (failure) console.warn("[SubscriptionManager] trade allowance check failed:", failure);
+
+  // Read-only UI counters: keep the last known quota instead of blocking the terminal.
+  if (!consume && activeQuota) {
     return {
-      allowed: false,
-      limit: 0,
-      current: 0,
-      isPro: false,
-      isAdmin: false,
-      reason: "Unable to verify your trade allowance with the server. Please sign in and try again.",
+      ...activeQuota,
+      stale: true,
+      warning: "Trade allowance could not be refreshed. Showing your last known quota.",
     };
   }
+
+  return {
+    allowed: false,
+    limit: activeQuota?.limit ?? FREE_DAILY_MANUAL_TRADE_LIMIT,
+    current: activeQuota?.current ?? 0,
+    isPro: isUserPro(activeProfile),
+    isAdmin: false,
+    stale: true,
+    reason: "Trade allowance could not be verified with the server.",
+    warning: "Allowance check unavailable. Sign in again, then retry.",
+  };
 }
 
 /** Read-only quota snapshot used for UI counters. */

@@ -86,9 +86,10 @@ import StrategyBuilder from "./components/StrategyBuilder";
 import { gridTradingBot } from "./lib/GridBot";
 import { dcaBotEngine } from "./lib/DCABot";
 import { webhookService, type TradingViewSignal } from "./lib/WebhookService";
-import { isUserAdmin, isUserPro, ADMIN_BYPASS_EMAIL, resetDailyTradeCountIfNewDay } from "./lib/SubscriptionManager";
+import { useSubscription } from "./lib/useSubscription";
+import { isLiveTradingConfigured, refreshCredentialStatus } from "./lib/CredentialVault";
 import { autoTradeEngine } from "./lib/BinanceAutoTrade";
-import { liveWorkerLogStore, type WorkerLog } from "./lib/LiveWorkerLogStore";
+import { liveWorkerLogStore } from "./lib/LiveWorkerLogStore";
 import { getActiveExchange, setActiveExchange, SUPPORTED_EXCHANGES, type ExchangeId } from "./lib/MultiExchange";
 import { paperTradingEngine } from "./lib/PaperTrading";
 import { tradeManager } from "./lib/TradeManager";
@@ -193,7 +194,6 @@ export default function App() {
   const [scanning, setScanning] = useState(false);
   const [scanResults, setScanResults] = useState<ScanResult[]>([]);
   const [scanError, setScanError] = useState<string | null>(null);
-  const [isPro, setIsPro] = useState(false);
   const [remainingScans, setRemainingScans] = useState(FREE_LIMIT);
 
   const [watchlist, setWatchlist] = useState<WatchlistItem[]>([]);
@@ -210,17 +210,9 @@ export default function App() {
   const [leaderboardModalOpen, setLeaderboardModalOpen] = useState(false);
   const [mobileToolsOpen, setMobileToolsOpen] = useState(false);
 
-  // Admin and Pro derivation from server-side role & metadata
-  const isAdmin = useMemo(() => {
-    if (user?.email && user.email.trim().toLowerCase() === ADMIN_BYPASS_EMAIL.toLowerCase()) return true;
-    return isUserAdmin(user?.email, user?.user_metadata);
-  }, [user?.email, user?.user_metadata]);
-
-  const effectiveIsPro = useMemo(() => {
-    if (isAdmin) return true;
-    if (user?.email && user.email.trim().toLowerCase() === ADMIN_BYPASS_EMAIL.toLowerCase()) return true;
-    return isUserPro(user?.email, isPro, user?.user_metadata);
-  }, [isAdmin, user?.email, isPro, user?.user_metadata]);
+  // Role & subscription come exclusively from the RLS-protected `user_profiles` row.
+  // No email allow-list, no user_metadata, no URL parameter can elevate privileges.
+  const { isAdmin, isPro: effectiveIsPro, refresh: refreshSubscription } = useSubscription(user);
 
   // Multi-Exchange State
   const [currentExchange, setCurrentExchange] = useState<ExchangeId>(() => getActiveExchange());
@@ -253,10 +245,7 @@ export default function App() {
   }, []);
 
   // System Status State: Live vs Paper mode, WebSocket ping latency
-  const [isPaperMode, setIsPaperMode] = useState<boolean>(() => {
-    const cfg = autoTradeEngine.getConfig();
-    return !cfg.apiKey || !cfg.apiSecret || !cfg.apiKey.trim() || !cfg.apiSecret.trim();
-  });
+  const [isPaperMode, setIsPaperMode] = useState<boolean>(() => !isLiveTradingConfigured());
   const [wsLatency, setWsLatency] = useState<number>(28);
 
   // Collapsible panels state for Chart UI optimization
@@ -282,10 +271,8 @@ export default function App() {
   const [priceChange1h, setPriceChange1h] = useState(0);
 
   useEffect(() => {
-    if (isAdmin) {
-      setIsPro(true);
-      setProModalOpen(false);
-    }
+    if (isAdmin) setProModalOpen(false);
+    void refreshCredentialStatus().then(() => setIsPaperMode(!isLiveTradingConfigured()));
   }, [isAdmin]);
 
   const filteredCoins = useMemo(() => {
@@ -297,12 +284,9 @@ export default function App() {
   }, [coinSearch]);
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    if (params.get("pro") === "true") setIsPro(true);
-    if (isAdmin) {
-      setIsPro(true);
-      setProModalOpen(false);
-    }
+    // NOTE: no `?pro=true` shortcut exists. Pro entitlement is read from the server
+    // record only, and trade/scan quotas are enforced server-side.
+    void refreshSubscription();
     setRemainingScans(getRemainingScans());
 
     // Restore existing FOMO lock from localStorage if active
@@ -503,9 +487,6 @@ export default function App() {
     if (!user) return;
     const interval = setInterval(async () => {
       try {
-        // Enforce daily reset check periodically
-        resetDailyTradeCountIfNewDay();
-
         const data = await fetchCandles(selectedCoin.binanceSymbol, 5, timeframe);
         if (data.length > 0) {
           const latest = data[data.length - 1];
@@ -644,8 +625,6 @@ export default function App() {
             atrValue: atrVal,
             direction,
             marketType: config.marketType,
-            userEmail: user?.email,
-            isPro: effectiveIsPro || isAdmin,
           });
 
           if (res.success && res.trade) {
@@ -811,8 +790,6 @@ export default function App() {
             atrValue: atrVal,
             direction: dynamicDirection,
             marketType: config.marketType,
-            userEmail: user?.email,
-            isPro: effectiveIsPro || isAdmin,
           }).then((res) => {
             if (res.success && res.trade) {
               tradeManager.addTrade({

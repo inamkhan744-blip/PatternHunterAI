@@ -1,14 +1,13 @@
 import {
+  FREE_PROFILE,
+  FREE_DAILY_MANUAL_TRADE_LIMIT,
   isUserAdmin,
   isUserPro,
-  checkTradeExecutionAllowance,
-  setProDailyTradeLimit,
+  isSubscriptionActive,
   getProDailyTradeLimit,
-  ProDailyTradeLimit,
-  ADMIN_BYPASS_EMAIL,
-  getDailyTradeCount,
-  incrementDailyTradeCount,
-  resetDailyTradeCountIfNewDay,
+  setActiveSubscriptionProfile,
+  clearSubscriptionCache,
+  type UserSubscriptionProfile,
 } from "./SubscriptionManager";
 
 function assert(condition: boolean, msg: string) {
@@ -19,57 +18,62 @@ function assert(condition: boolean, msg: string) {
   console.log(`✓ PASS: ${msg}`);
 }
 
-const mockStorage = new Map<string, string>();
-(globalThis as unknown as { localStorage: unknown }).localStorage = {
-  getItem: (k: string) => mockStorage.get(k) || null,
-  setItem: (k: string, v: string) => mockStorage.set(k, v),
-  removeItem: (k: string) => mockStorage.delete(k),
-  clear: () => mockStorage.clear(),
-};
+function profile(overrides: Partial<UserSubscriptionProfile> = {}): UserSubscriptionProfile {
+  return { ...FREE_PROFILE, ...overrides };
+}
 
 async function runTests() {
-  console.log("Running SubscriptionManager Test Suite...");
+  console.log("Running SubscriptionManager (server-trusted) Test Suite...");
 
-  assert(isUserAdmin("user@example.com", { role: "admin" }) === true, "Admin role in metadata grants admin");
-  assert(isUserAdmin("user@example.com", { role: "user" }) === false, "Standard user in metadata is not admin");
-  assert(isUserAdmin(ADMIN_BYPASS_EMAIL) === true, "Admin bypass email is recognized as admin");
-  assert(isUserAdmin("inamkhan744@gmail.com", {}) === true, "Admin email strictly sets isAdmin = true even with empty metadata");
-  assert(isUserPro("inamkhan744@gmail.com", false, {}) === true, "Admin email strictly sets isPro = true even with empty metadata");
+  // --- Admin is decided by the profile row only -------------------------
+  assert(isUserAdmin(profile({ role: "admin" })) === true, "role=admin in user_profiles grants admin");
+  assert(isUserAdmin(profile({ role: "user" })) === false, "role=user is not admin");
+  assert(isUserAdmin(null) === false, "Missing profile is not admin");
 
-  assert(isUserPro("user@example.com", false, { role: "admin" }) === true, "Admin role in metadata automatically unlocks Pro");
-  assert(isUserPro("user@example.com", false, { subscription_tier: "pro" }) === true, "Pro tier in metadata unlocks Pro");
-  assert(isUserPro("user@example.com", false, { subscription_tier: "premium" }) === true, "Premium tier in metadata unlocks Pro");
-  assert(isUserPro("user@example.com", false, { subscription_tier: "free" }) === false, "Free tier in metadata is not Pro");
+  // There is no email allow-list or metadata path any more.
+  const manager = await import("./SubscriptionManager");
+  assert(
+    !("ADMIN_BYPASS_EMAIL" in manager),
+    "Email-based admin bypass constant has been removed"
+  );
+  assert(
+    (manager.isUserAdmin as unknown as { length: number }).length <= 1,
+    "isUserAdmin accepts a profile only (no email/metadata arguments)"
+  );
 
-  setProDailyTradeLimit(10 as ProDailyTradeLimit);
-  assert(getProDailyTradeLimit() === 10, "Configurable Pro trade limit can be set and retrieved");
+  // --- Subscription entitlement -----------------------------------------
+  const activePro = profile({ tier: "pro", status: "active" });
+  assert(isSubscriptionActive(activePro) === true, "Active Pro subscription is entitled");
+  assert(isUserPro(activePro) === true, "Active Pro subscription unlocks Pro");
 
-  const freeAllowance = checkTradeExecutionAllowance("freeuser@test.com", false);
-  assert(freeAllowance.allowed === true, "Free user starts with allowed trade execution");
-  assert(freeAllowance.limit === 3, "Free user limit is 3 trades per day");
+  assert(
+    isSubscriptionActive(profile({ tier: "pro", status: "canceled" })) === false,
+    "Canceled subscription is not entitled"
+  );
+  assert(
+    isSubscriptionActive(profile({ tier: "premium", status: "past_due" })) === false,
+    "Past-due subscription is not entitled"
+  );
+  assert(
+    isSubscriptionActive(profile({ tier: "pro", status: "active", expiresAt: "2020-01-01T00:00:00Z" })) === false,
+    "Expired subscription is not entitled"
+  );
+  assert(isUserPro(profile({ tier: "free" })) === false, "Free tier is not Pro");
+  assert(isUserPro(profile({ role: "admin", tier: "free" })) === true, "Admins get Pro tooling");
 
-  const adminAllowance = checkTradeExecutionAllowance("admin@test.com", false, { role: "admin" });
-  assert(adminAllowance.isAdmin === true, "Admin user identified from metadata");
-  assert(adminAllowance.limit > 900000, "Admin user has uncapped execution allowance");
+  // --- Limits come from the server profile ------------------------------
+  assert(FREE_DAILY_MANUAL_TRADE_LIMIT === 3, "Free tier daily limit is 3");
+  clearSubscriptionCache();
+  assert(getProDailyTradeLimit() === 100, "Default Pro limit is 100 when no profile is loaded");
 
-  const adminEmailAllowance = checkTradeExecutionAllowance("inamkhan744@gmail.com", false);
-  assert(adminEmailAllowance.isAdmin === true, "Admin bypass email identified as admin in allowance check");
-  assert(adminEmailAllowance.isPro === true, "Admin bypass email identified as pro in allowance check");
-  assert(adminEmailAllowance.allowed === true, "Admin bypass email allowed execution");
-  assert(adminEmailAllowance.limit > 900000, "Admin bypass email has uncapped execution allowance");
+  setActiveSubscriptionProfile(profile({ tier: "pro", status: "active", dailyTradeLimit: 10 }));
+  assert(getProDailyTradeLimit() === 10, "Pro limit follows the server profile value");
 
-  // Daily reset logic test
-  localStorage.setItem("fortress_daily_trade_tracker", JSON.stringify({
-    date: "2024-01-01",
-    lastTradeDate: "2024-01-01",
-    count: 3,
-  }));
-  const resetCount = resetDailyTradeCountIfNewDay();
-  assert(resetCount === 0, "Trade counter resets to 0 when last trade was yesterday / past date");
-  assert(getDailyTradeCount() === 0, "getDailyTradeCount() returns 0 after reset");
+  setActiveSubscriptionProfile(profile({ tier: "pro", status: "active", dailyTradeLimit: 7 }));
+  assert(getProDailyTradeLimit() === 100, "Unsupported limit values fall back to the default");
 
-  incrementDailyTradeCount();
-  assert(getDailyTradeCount() === 1, "getDailyTradeCount() increments to 1 for today");
+  clearSubscriptionCache();
+  assert(getProDailyTradeLimit() === 100, "Clearing the cache removes the cached profile");
 
   console.log("All SubscriptionManager tests passed successfully!");
 }

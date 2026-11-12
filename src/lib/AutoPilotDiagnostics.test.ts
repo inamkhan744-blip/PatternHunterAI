@@ -16,7 +16,7 @@ const memoryStorage: Record<string, string> = {};
 };
 
 import { liveWorkerLogStore, WorkerLog } from "./LiveWorkerLogStore";
-import { evaluateLocalHeuristicEngine, simulateSwarmDebate } from "./AgentSwarm";
+import { evaluateLocalHeuristicEngine } from "./AgentSwarm";
 import { autoTradeEngine } from "./BinanceAutoTrade";
 
 function assert(condition: boolean, msg: string) {

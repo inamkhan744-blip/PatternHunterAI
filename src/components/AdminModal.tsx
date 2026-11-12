@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Shield, Crown, AlertTriangle, Activity, Users, Radio, CheckCircle, Power, RefreshCw, X } from "lucide-react";
+import { Shield, Crown, Activity, Users, Radio, CheckCircle, Power, X } from "lucide-react";
 import { autoTradeEngine } from "../lib/BinanceAutoTrade";
 import { paperTradingEngine } from "../lib/PaperTrading";
 import { getProDailyTradeLimit, setProDailyTradeLimit, ProDailyTradeLimit } from "../lib/SubscriptionManager";
@@ -27,8 +27,15 @@ export default function AdminModal({ open, onClose, userEmail }: AdminModalProps
 
   if (!open) return null;
 
-  const handleUpdateLimit = (val: ProDailyTradeLimit) => {
-    setProDailyTradeLimit(val);
+  const handleUpdateLimit = async (val: ProDailyTradeLimit) => {
+    // Server-authoritative: `admin_set_pro_daily_limit` re-checks is_admin() for the
+    // caller's JWT, so a tampered client cannot change tier policy.
+    const ok = await setProDailyTradeLimit(val);
+    if (!ok) {
+      setStatusMessage("Rejected by server: administrator role required.");
+      setTimeout(() => setStatusMessage(null), 4000);
+      return;
+    }
     setDailyLimit(val);
     setStatusMessage(`Pro Daily Trade Limit updated to ${val} trades/day.`);
     setTimeout(() => setStatusMessage(null), 4000);

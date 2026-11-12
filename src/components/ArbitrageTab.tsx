@@ -9,7 +9,7 @@ import {
   CheckCircle,
 } from "lucide-react";
 import { FUTURES_API_BASE } from "../lib/BinanceAutoTrade";
-import { getDecryptedApiKeys } from "../lib/CryptoSecurity";
+import { isLiveTradingConfigured } from "../lib/CredentialVault";
 import { formatPrice } from "../lib/patterns";
 
 export interface FundingRateItem {
@@ -99,8 +99,7 @@ export default function ArbitrageTab() {
     setExecutingSymbol(item.symbol);
     setStatusMessage(null);
 
-    const keys = getDecryptedApiKeys();
-    const hasKeys = !!keys.apiKey && !!keys.apiSecret;
+    const hasKeys = isLiveTradingConfigured();
 
     // Simulate or execute Spot Buy + Futures 1x Short Hedge
     setTimeout(() => {

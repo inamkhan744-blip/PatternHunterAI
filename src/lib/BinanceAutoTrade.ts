@@ -6,10 +6,10 @@
  * Enterprise Security: AES-256 encrypted keys and Telegram Bot alerts.
  */
 
-import { getDecryptedApiKeys, storeEncryptedApiKeys } from "./CryptoSecurity";
+import { isLiveTradingConfigured } from "./CredentialVault";
 import { notifyTradeOpened, notifyTradeClosed, sendTelegramAlert } from "./TelegramService";
 import { pushNotificationService } from "./PushNotification";
-import { checkTradeExecutionAllowance, incrementDailyTradeCount } from "./SubscriptionManager";
+import { checkTradeExecutionAllowance } from "./SubscriptionManager";
 import { simulateSwarmDebate } from "./AgentSwarm";
 import { fetchCandles } from "./binance";
 import { rsi } from "./indicators";
@@ -115,8 +115,12 @@ export const SPOT_API_BASE = "https://api.binance.com";
 export const FUTURES_API_BASE = "https://fapi.binance.com";
 
 /**
- * Proxy fetch helper to route Binance REST API requests through Supabase Edge Function 'binance-proxy'
- * when running in browser environments to completely circumvent CORS restrictions.
+ * Proxy fetch helper for Binance REST API requests.
+ *
+ * SECURITY: the browser never holds Binance API keys and never signs requests.
+ * Every call is forwarded to the `binance-proxy` edge function, which verifies the
+ * user JWT, decrypts that user's credentials server-side, adds the timestamp and
+ * HMAC signature, and enforces the per-user rate limit + endpoint allow-list.
  */
 export async function proxyBinanceFetch(options: {
   target: "spot" | "futures";
@@ -124,46 +128,31 @@ export async function proxyBinanceFetch(options: {
   method?: "GET" | "POST" | "DELETE" | "PUT";
   query?: string;
   body?: string;
-  apiKey?: string;
 }): Promise<Response> {
-  const { target, path, method = "GET", query = "", body, apiKey } = options;
+  const { target, path, method = "GET", query = "", body } = options;
   const isBrowser = typeof window !== "undefined" && typeof window.document !== "undefined";
   const supabaseUrl = typeof import.meta !== "undefined" && import.meta.env ? import.meta.env.VITE_SUPABASE_URL : "";
-  const supabaseAnonKey = typeof import.meta !== "undefined" && import.meta.env ? import.meta.env.VITE_SUPABASE_ANON_KEY : "";
 
-  // If Supabase proxy endpoint is reachable in browser, use edge proxy
-  if (isBrowser && supabaseUrl && supabaseAnonKey && !supabaseUrl.includes("placeholder")) {
-    try {
-      const { data: sessionData } = await supabase.auth.getSession();
-      const authToken = sessionData?.session?.access_token || supabaseAnonKey;
-      const proxyEndpoint = `${supabaseUrl}/functions/v1/binance-proxy`;
-      const res = await fetch(proxyEndpoint, {
+  if (isBrowser && supabaseUrl && !supabaseUrl.includes("placeholder")) {
+    const { data: sessionData } = await supabase.auth.getSession();
+    const authToken = sessionData?.session?.access_token;
+    if (authToken) {
+      return fetch(`${supabaseUrl}/functions/v1/binance-proxy`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${authToken}`,
-          ...(apiKey ? { "X-MBX-APIKEY": apiKey } : {}),
         },
-        body: JSON.stringify({
-          target,
-          path,
-          method,
-          query,
-          body,
-          headers: apiKey ? { "X-MBX-APIKEY": apiKey } : {},
-        }),
+        body: JSON.stringify({ target, path, method, query, body }),
       });
-      return res;
-    } catch {
-      // fallback to direct fetch below
     }
   }
 
-  // Fallback: direct fetch (e.g. In Node tests or server environment)
+  // Unsigned public-endpoint fallback (no credentials involved). Private endpoints
+  // return 401 from Binance, which is the correct fail-closed behaviour.
   const baseUrl = target === "futures" ? FUTURES_API_BASE : SPOT_API_BASE;
   const fullUrl = query ? `${baseUrl}${path}?${query}` : `${baseUrl}${path}`;
   const headers: Record<string, string> = {};
-  if (apiKey) headers["X-MBX-APIKEY"] = apiKey;
   if (body) headers["Content-Type"] = "application/x-www-form-urlencoded";
 
   return fetch(fullUrl, {
@@ -472,10 +461,10 @@ export class BinanceAutoTradeEngine {
       }
     }
 
-    // Load encrypted API keys from localStorage if available
-    const decryptedKeys = getDecryptedApiKeys();
-    if (decryptedKeys.apiKey) baseConfig.apiKey = decryptedKeys.apiKey;
-    if (decryptedKeys.apiSecret) baseConfig.apiSecret = decryptedKeys.apiSecret;
+    // Credentials are never hydrated into the browser. They live only in the
+    // server-side vault and are consumed by the `binance-proxy` edge function.
+    baseConfig.apiKey = "";
+    baseConfig.apiSecret = "";
 
     return baseConfig;
   }
@@ -492,18 +481,9 @@ export class BinanceAutoTradeEngine {
       this.autoPilotState = "IDLE";
     }
 
-    // If API keys were supplied in update, encrypt them via AES-256
-    const hasKeyUpdate = configUpdates.apiKey !== undefined || configUpdates.apiSecret !== undefined;
-    const currentApiKey = configUpdates.apiKey !== undefined ? configUpdates.apiKey : (this.config.apiKey || getDecryptedApiKeys().apiKey);
-    const currentApiSecret = configUpdates.apiSecret !== undefined ? configUpdates.apiSecret : (this.config.apiSecret || getDecryptedApiKeys().apiSecret);
-
-    if (hasKeyUpdate) {
-      storeEncryptedApiKeys(currentApiKey, currentApiSecret);
-    }
-
-    this.config = { ...this.config, ...configUpdates };
-    this.config.apiKey = currentApiKey;
-    this.config.apiSecret = currentApiSecret;
+    // Any apiKey/apiSecret in the patch is discarded: secrets are written only by
+    // the CredentialVault to the server-side vault, never to engine state/localStorage.
+    this.config = { ...this.config, ...configUpdates, apiKey: "", apiSecret: "" };
     this.config.leverage = Math.max(1, Math.min(10, this.config.leverage));
     this.config.maxOpenTrades = Math.max(1, Math.min(3, this.config.maxOpenTrades));
 
@@ -812,13 +792,10 @@ export class BinanceAutoTradeEngine {
 
   public async fetchAccountBalance(marketType?: MarketType): Promise<{ usdtBalance: number; freeBalance: number }> {
     const type = marketType ?? this.config.marketType;
-    if (!this.config.apiKey || !this.config.apiSecret) {
+    if (!isLiveTradingConfigured()) {
       return { usdtBalance: 10000, freeBalance: 10000 };
     }
 
-    const timestamp = Date.now();
-    const query = `timestamp=${timestamp}`;
-    const signature = await signQuery(query, this.config.apiSecret);
     const path = type === "Futures" ? "/fapi/v2/balance" : "/api/v3/account";
 
     try {
@@ -826,8 +803,7 @@ export class BinanceAutoTradeEngine {
         target: type === "Futures" ? "futures" : "spot",
         path,
         method: "GET",
-        query: `${query}&signature=${signature}`,
-        apiKey: this.config.apiKey,
+        query: "",
       });
       if (!res.ok) {
         throw new Error(`Binance API error: ${res.statusText}`);
@@ -852,21 +828,17 @@ export class BinanceAutoTradeEngine {
   }
 
   public async setFuturesLeverage(symbol: string, leverage: number): Promise<boolean> {
-    if (this.config.marketType !== "Futures" || !this.config.apiKey || !this.config.apiSecret) {
+    if (this.config.marketType !== "Futures" || !isLiveTradingConfigured()) {
       return true;
     }
     const safeLev = Math.max(1, Math.min(10, leverage));
-    const timestamp = Date.now();
-    const query = `symbol=${symbol}&leverage=${safeLev}&timestamp=${timestamp}`;
-    const signature = await signQuery(query, this.config.apiSecret);
 
     try {
       const res = await proxyBinanceFetch({
         target: "futures",
         path: "/fapi/v1/leverage",
         method: "POST",
-        body: `${query}&signature=${signature}`,
-        apiKey: this.config.apiKey,
+        body: `symbol=${symbol}&leverage=${safeLev}`,
       });
       return res.ok;
     } catch {
@@ -883,8 +855,6 @@ export class BinanceAutoTradeEngine {
     direction?: TradeDirection;
     marketType?: MarketType;
     accountBalance?: number;
-    userEmail?: string | null;
-    isPro?: boolean;
   }): Promise<{ success: boolean; trade?: ManagedTrade; error?: string }> {
     const marketType = params.marketType ?? this.config.marketType;
     const direction = params.direction ?? (marketType === "Spot" ? "LONG" : this.config.direction);
@@ -970,8 +940,8 @@ export class BinanceAutoTradeEngine {
       };
     }
 
-    // Subscription & Daily Limits Check
-    const allowance = checkTradeExecutionAllowance(params.userEmail, params.isPro);
+    // Subscription & Daily Limits Check (server-authoritative; consumes one unit)
+    const allowance = await checkTradeExecutionAllowance({ consume: true });
     if (!allowance.allowed) {
       const rejectMsg = `Trade rejected: Daily trade allowance limit reached (${allowance.current}/${allowance.limit})`;
       liveWorkerLogStore.addLog(rejectMsg, "warn", { symbol: params.symbol, allowance });
@@ -1085,7 +1055,7 @@ export class BinanceAutoTradeEngine {
     let orderId = "";
     let slOrderId: string | undefined;
     let tpOrderId: string | undefined;
-    const hasLiveCreds = Boolean(this.config.apiKey?.trim() && this.config.apiSecret?.trim());
+    const hasLiveCreds = isLiveTradingConfigured();
 
     if (hasLiveCreds) {
       if (marketType === "Futures") {
@@ -1159,9 +1129,6 @@ export class BinanceAutoTradeEngine {
     this.trades.unshift(trade);
     this.saveTrades();
 
-    // Increment daily usage
-    incrementDailyTradeCount();
-
     // Telegram Bot Alert & Native Push Notification
     notifyTradeOpened({
       symbol: trade.symbol,
@@ -1195,28 +1162,23 @@ export class BinanceAutoTradeEngine {
     price: number;
     marketType: MarketType;
   }): Promise<{ orderId?: string | number; error?: string }> {
-    const timestamp = Date.now();
     const path = params.marketType === "Futures" ? "/fapi/v1/order" : "/api/v3/order";
 
-    const query = [
+    const body = [
       `symbol=${params.symbol}`,
       `side=${params.side}`,
       `type=LIMIT`,
       `timeInForce=GTC`,
       `quantity=${params.quantity}`,
       `price=${params.price}`,
-      `timestamp=${timestamp}`,
     ].join("&");
-
-    const signature = await signQuery(query, this.config.apiSecret);
 
     try {
       const res = await proxyBinanceFetch({
         target: params.marketType === "Futures" ? "futures" : "spot",
         path,
         method: "POST",
-        body: `${query}&signature=${signature}`,
-        apiKey: this.config.apiKey,
+        body,
       });
       const data = await res.json();
       if (!res.ok) {
@@ -1234,25 +1196,20 @@ export class BinanceAutoTradeEngine {
     stopPrice: number;
     quantity: number;
   }): Promise<{ orderId?: string | number; error?: string }> {
-    const timestamp = Date.now();
-    const query = [
+    const body = [
       `symbol=${params.symbol}`,
       `side=${params.side}`,
       `type=STOP_MARKET`,
       `stopPrice=${params.stopPrice}`,
       `closePosition=true`,
-      `timestamp=${timestamp}`,
     ].join("&");
-
-    const signature = await signQuery(query, this.config.apiSecret);
 
     try {
       const res = await proxyBinanceFetch({
         target: "futures",
         path: "/fapi/v1/order",
         method: "POST",
-        body: `${query}&signature=${signature}`,
-        apiKey: this.config.apiKey,
+        body,
       });
       const data = await res.json();
       if (!res.ok) {
@@ -1270,25 +1227,20 @@ export class BinanceAutoTradeEngine {
     stopPrice: number;
     quantity: number;
   }): Promise<{ orderId?: string | number; error?: string }> {
-    const timestamp = Date.now();
-    const query = [
+    const body = [
       `symbol=${params.symbol}`,
       `side=${params.side}`,
       `type=TAKE_PROFIT_MARKET`,
       `stopPrice=${params.stopPrice}`,
       `closePosition=true`,
-      `timestamp=${timestamp}`,
     ].join("&");
-
-    const signature = await signQuery(query, this.config.apiSecret);
 
     try {
       const res = await proxyBinanceFetch({
         target: "futures",
         path: "/fapi/v1/order",
         method: "POST",
-        body: `${query}&signature=${signature}`,
-        apiKey: this.config.apiKey,
+        body,
       });
       const data = await res.json();
       if (!res.ok) {
@@ -1304,19 +1256,16 @@ export class BinanceAutoTradeEngine {
    * OCO Cancel Helper: Cancels a specific order on Binance Futures or Spot
    */
   public async cancelExchangeOrder(symbol: string, orderId: string, marketType: MarketType = "Futures"): Promise<boolean> {
-    if (!this.config.apiKey || !this.config.apiSecret || !orderId) return true;
+    if (!isLiveTradingConfigured() || !orderId) return true;
     try {
-      const timestamp = Date.now();
       const path = marketType === "Futures" ? "/fapi/v1/order" : "/api/v3/order";
-      const query = `symbol=${symbol}&orderId=${orderId}&timestamp=${timestamp}`;
-      const signature = await signQuery(query, this.config.apiSecret);
+      const query = `symbol=${symbol}&orderId=${orderId}`;
 
       const res = await proxyBinanceFetch({
         target: marketType === "Futures" ? "futures" : "spot",
         path,
         method: "DELETE",
-        query: `${query}&signature=${signature}`,
-        apiKey: this.config.apiKey,
+        query,
       });
       return res.ok;
     } catch {
@@ -1325,44 +1274,37 @@ export class BinanceAutoTradeEngine {
   }
 
   public async closeExchangePosition(trade: ManagedTrade): Promise<boolean> {
-    if (!this.config.apiKey || !this.config.apiSecret) return true;
+    if (!isLiveTradingConfigured()) return true;
 
     try {
-      const timestamp = Date.now();
       if (trade.marketType === "Futures") {
         const side = trade.direction === "LONG" ? "SELL" : "BUY";
-        const query = [
+        const body = [
           `symbol=${trade.symbol}`,
           `side=${side}`,
           `type=MARKET`,
           `quantity=${trade.quantity}`,
           `reduceOnly=true`,
-          `timestamp=${timestamp}`,
         ].join("&");
-        const signature = await signQuery(query, this.config.apiSecret);
         await proxyBinanceFetch({
           target: "futures",
           path: "/fapi/v1/order",
           method: "POST",
-          body: `${query}&signature=${signature}`,
-          apiKey: this.config.apiKey,
+          body,
         });
       } else {
         const side = "SELL";
-        const query = [
+        const body = [
           `symbol=${trade.symbol}`,
           `side=${side}`,
           `type=MARKET`,
           `quantity=${trade.quantity}`,
-          `timestamp=${timestamp}`,
         ].join("&");
-        const signature = await signQuery(query, this.config.apiSecret);
         await proxyBinanceFetch({
           target: "spot",
           path: "/api/v3/order",
           method: "POST",
-          body: `${query}&signature=${signature}`,
-          apiKey: this.config.apiKey,
+          body,
         });
       }
       return true;
@@ -1463,7 +1405,7 @@ export class BinanceAutoTradeEngine {
     }
 
     // Execute exchange-level close if live trade
-    if (this.config.apiKey && this.config.apiSecret) {
+    if (isLiveTradingConfigured()) {
       this.closeExchangePosition(trade).catch(() => {});
     }
 
@@ -1473,7 +1415,7 @@ export class BinanceAutoTradeEngine {
       this.profitVaultTotal += vaultCut;
       localStorage.setItem(STORAGE_KEY_VAULT, String(this.profitVaultTotal.toFixed(2)));
 
-      if (trade.marketType === "Futures" && this.config.apiKey && this.config.apiSecret) {
+      if (trade.marketType === "Futures" && isLiveTradingConfigured()) {
         this.transferProfitToSpotWallet(vaultCut).catch(() => {});
       }
     }
@@ -1559,18 +1501,14 @@ export class BinanceAutoTradeEngine {
   }
 
   public async transferProfitToSpotWallet(amount: number): Promise<boolean> {
-    if (!this.config.apiKey || !this.config.apiSecret || amount <= 0) return false;
-    const timestamp = Date.now();
-    const query = `asset=USDT&amount=${amount}&type=2&timestamp=${timestamp}`;
-    const signature = await signQuery(query, this.config.apiSecret);
+    if (!isLiveTradingConfigured() || amount <= 0) return false;
 
     try {
       const res = await proxyBinanceFetch({
         target: "spot",
         path: "/sapi/v1/futures/transfer",
         method: "POST",
-        body: `${query}&signature=${signature}`,
-        apiKey: this.config.apiKey,
+        body: `asset=USDT&amount=${amount}&type=2`,
       });
       return res.ok;
     } catch {
@@ -1592,21 +1530,17 @@ export class BinanceAutoTradeEngine {
     this.config.autoPilotEnabled = false;
     this.saveConfig({ autoPilotEnabled: false });
 
-    if (this.config.apiKey && this.config.apiSecret) {
+    if (isLiveTradingConfigured()) {
       try {
-        const timestamp = Date.now();
         const openFuturesTrades = this.trades.filter((t) => t.status === "OPEN" && t.marketType === "Futures");
         const symbols = Array.from(new Set(openFuturesTrades.map((t) => t.symbol)));
 
         for (const sym of symbols) {
-          const q = `symbol=${sym}&timestamp=${timestamp}`;
-          const sig = await signQuery(q, this.config.apiSecret);
           await proxyBinanceFetch({
             target: "futures",
             path: "/fapi/v1/allOpenOrders",
             method: "DELETE",
-            query: `${q}&signature=${sig}`,
-            apiKey: this.config.apiKey,
+            query: `symbol=${sym}`,
           });
           cancelledOrdersCount++;
         }
@@ -1615,19 +1549,15 @@ export class BinanceAutoTradeEngine {
       }
 
       try {
-        const timestamp = Date.now();
         const openSpotTrades = this.trades.filter((t) => t.status === "OPEN" && t.marketType === "Spot");
         const symbols = Array.from(new Set(openSpotTrades.map((t) => t.symbol)));
 
         for (const sym of symbols) {
-          const q = `symbol=${sym}&timestamp=${timestamp}`;
-          const sig = await signQuery(q, this.config.apiSecret);
           await proxyBinanceFetch({
             target: "spot",
             path: "/api/v3/openOrders",
             method: "DELETE",
-            query: `${q}&signature=${sig}`,
-            apiKey: this.config.apiKey,
+            query: `symbol=${sym}`,
           });
           cancelledOrdersCount++;
         }

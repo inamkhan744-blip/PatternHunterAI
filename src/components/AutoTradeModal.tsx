@@ -38,15 +38,15 @@ import { formatPrice } from "../lib/patterns";
 import RiskDisclaimerModal from "./RiskDisclaimerModal";
 import { useAuth } from "../lib/auth";
 import {
-  isUserAdmin,
-  isUserPro,
   getProDailyTradeLimit,
   setProDailyTradeLimit,
   getDailyTradeCount,
   checkTradeExecutionAllowance,
+  refreshTradeQuota,
   ProDailyTradeLimit,
   FREE_DAILY_MANUAL_TRADE_LIMIT,
 } from "../lib/SubscriptionManager";
+import { useSubscription } from "../lib/useSubscription";
 import {
   loadTelegramConfig,
   saveTelegramConfig,
@@ -71,8 +71,8 @@ export default function AutoTradeModal({
   currentAtr,
 }: Props) {
   const { user } = useAuth();
-  const isAdmin = useMemo(() => isUserAdmin(user?.email, user?.user_metadata), [user?.email, user?.user_metadata]);
-  const isPro = useMemo(() => isUserPro(user?.email, false, user?.user_metadata), [user?.email, user?.user_metadata]);
+  // Server-verified role/tier (never inferred from email or user_metadata).
+  const { isAdmin, isPro } = useSubscription(user);
 
   const [config, setConfig] = useState<AutoTradeConfig>(autoTradeEngine.getConfig());
   const [circuitBreaker, setCircuitBreaker] = useState<CircuitBreakerState>(autoTradeEngine.getCircuitBreaker());
@@ -115,6 +115,7 @@ export default function AutoTradeModal({
       setTgConfig(loadTelegramConfig());
       setLimitState(getProDailyTradeLimit());
       setDailyTradeCount(getDailyTradeCount());
+      void refreshTradeQuota().then(() => setDailyTradeCount(getDailyTradeCount()));
       const cd = autoTradeEngine.getPostLossCooldown();
       setCooldownRemaining(cd.remainingSeconds);
       loadBalance(cfg.marketType);
@@ -131,7 +132,6 @@ export default function AutoTradeModal({
         setOpenTrades(autoTradeEngine.getOpenTrades());
         setPaperTrades(paperTradingEngine.getOpenTrades());
         setCircuitBreaker(autoTradeEngine.getCircuitBreaker());
-        setDailyTradeCount(getDailyTradeCount());
       }
       const cd = autoTradeEngine.getPostLossCooldown();
       setCooldownRemaining(cd.remainingSeconds);
@@ -194,8 +194,12 @@ export default function AutoTradeModal({
     }
   };
 
-  const handleDailyLimitChange = (val: ProDailyTradeLimit) => {
-    setProDailyTradeLimit(val);
+  const handleDailyLimitChange = async (val: ProDailyTradeLimit) => {
+    const ok = await setProDailyTradeLimit(val);
+    if (!ok) {
+      setStatusMessage({ type: "error", text: "Only administrators can change tier quotas (server rejected the request)." });
+      return;
+    }
     setLimitState(val);
     setStatusMessage({ type: "info", text: `Pro daily trade limit set to ${val} trades/day.` });
   };
@@ -207,7 +211,7 @@ export default function AutoTradeModal({
       return;
     }
 
-    const check = checkTradeExecutionAllowance(user?.email, isPro);
+    const check = await checkTradeExecutionAllowance({ consume: false });
     if (!check.allowed) {
       setStatusMessage({ type: "error", text: check.reason || "Daily trade limit reached." });
       return;
@@ -269,8 +273,6 @@ export default function AutoTradeModal({
           direction: config.marketType === "Futures" ? config.direction : "LONG",
           marketType: config.marketType,
           accountBalance,
-          userEmail: user?.email,
-          isPro,
         });
 
         if (result.success && result.trade) {
@@ -294,7 +296,7 @@ export default function AutoTradeModal({
             text: `LIMIT Order placed: ${result.trade.marketType} ${result.trade.direction} ${result.trade.quantity} ${result.trade.symbol} @ ${formatPrice(result.trade.entryPrice)}`,
           });
           setOpenTrades(autoTradeEngine.getOpenTrades());
-          setDailyTradeCount(getDailyTradeCount());
+          void refreshTradeQuota().then(() => setDailyTradeCount(getDailyTradeCount()));
         } else {
           setStatusMessage({
             type: "error",

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Trophy, Medal, Share2, TrendingUp, CheckCircle2, Shield, Copy, Twitter, X, Flame } from "lucide-react";
+import { Trophy, Share2, CheckCircle2, Copy, Twitter, X, Flame } from "lucide-react";
 
 interface RankedTrader {
   rank: number;

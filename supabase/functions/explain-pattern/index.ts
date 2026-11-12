@@ -1,8 +1,19 @@
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
-};
+/**
+ * explain-pattern — focused pattern narrative generator.
+ *
+ * Security controls: JWT required, per-user rate limiting (10/min, 120/hour),
+ * strict numeric/string validation, no upstream error leakage.
+ */
+
+import {
+  clampString,
+  enforceRateLimit,
+  finiteNumber,
+  json,
+  normalizeSymbol,
+  preflight,
+  requireUser,
+} from "../_shared/security.ts";
 
 const GEMINI_TIMEOUT_MS = 20000;
 const GEMINI_MODELS = ["gemini-1.5-flash", "gemini-2.0-flash"];
@@ -16,31 +27,55 @@ function stripMarkdown(raw: string): string {
 }
 
 Deno.serve(async (req: Request) => {
-  if (req.method === "OPTIONS") {
-    return new Response(null, { status: 200, headers: corsHeaders });
+  const pre = preflight(req);
+  if (pre) return pre;
+
+  if (req.method !== "POST") {
+    return json({ error: "Method not allowed" }, 405);
   }
 
   try {
-    const { patternName, direction, description, coin, price, recentCandles } = await req.json();
+    const auth = await requireUser(req);
+    if (!auth.user) return auth.response!;
 
-    if (!patternName || !coin || price === undefined) {
-      return new Response(
-        JSON.stringify({ error: "Missing required fields: patternName, coin, price" }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+    const perMinute = await enforceRateLimit(auth.user.id, "explain-pattern:min", 10, 60);
+    if (!perMinute) {
+      return json({ error: "Rate limit exceeded (10 requests/minute)." }, 429);
+    }
+    const perHour = await enforceRateLimit(auth.user.id, "explain-pattern:hour", 120, 3600);
+    if (!perHour) {
+      return json({ error: "Hourly limit reached (120/hour)." }, 429);
+    }
+
+    let payload: Record<string, unknown>;
+    try {
+      payload = (await req.json()) as Record<string, unknown>;
+    } catch {
+      return json({ error: "Invalid JSON body" }, 400);
+    }
+
+    const patternName = clampString(payload.patternName, 80);
+    const coin = normalizeSymbol(payload.coin);
+    const direction = clampString(payload.direction, 16) || "bullish";
+    const description = clampString(payload.description, 600);
+    const price = finiteNumber(payload.price, 0, 1e12);
+
+    if (!patternName || !coin || price === null) {
+      return json({ error: "Missing or invalid required fields: patternName, coin, price" }, 400);
     }
 
     const geminiKey = Deno.env.get("GEMINI_API_KEY");
     if (!geminiKey) {
-      return new Response(
-        JSON.stringify({ unavailable: true, error: "Backend GEMINI_API_KEY is not configured in Supabase secrets." }),
-        { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+      return json({ unavailable: true, error: "Backend GEMINI_API_KEY is not configured." }, 503);
     }
 
-    const candleSummary = Array.isArray(recentCandles)
-      ? recentCandles.slice(-15).map((c: { close: number }) => c.close.toFixed(2)).join(", ")
-      : "N/A";
+    const candles = Array.isArray(payload.recentCandles) ? payload.recentCandles.slice(-15) : [];
+    const candleSummary =
+      candles
+        .map((c) => (c && typeof c === "object" ? finiteNumber((c as { close?: unknown }).close, 0, 1e12) : null))
+        .filter((v): v is number => v !== null)
+        .map((v) => v.toFixed(2))
+        .join(", ") || "N/A";
 
     const prompt = `You are an expert crypto trader and technical analyst. A pattern has been detected on the ${coin}/USDT chart.
 
@@ -88,37 +123,31 @@ Calculate Entry, SL, and TP based on the current price of $${price} and the ${di
 
         const geminiData = await geminiRes.json();
         const text = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (text && text.trim().length > 0) {
+        if (typeof text === "string" && text.trim().length > 0) {
           geminiText = text.trim();
           break;
         }
         lastError = `Empty response from model ${model}`;
       } catch (fetchErr) {
         clearTimeout(timeoutId);
-        if (fetchErr instanceof DOMException && fetchErr.name === "AbortError") {
-          lastError = `Request to model ${model} timed out after ${GEMINI_TIMEOUT_MS / 1000}s`;
-        } else {
-          lastError = fetchErr instanceof Error ? fetchErr.message : "Unknown fetch error";
-        }
+        lastError =
+          fetchErr instanceof DOMException && fetchErr.name === "AbortError"
+            ? `Request to ${model} timed out`
+            : fetchErr instanceof Error
+              ? fetchErr.message
+              : "Unknown fetch error";
+        console.warn(`[explain-pattern] ${lastError}`);
         continue;
       }
     }
 
     if (geminiText) {
-      return new Response(
-        JSON.stringify({ explanation: stripMarkdown(geminiText) }),
-        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+      return json({ explanation: stripMarkdown(geminiText) });
     }
 
-    return new Response(
-      JSON.stringify({ unavailable: true, error: lastError || "AI analysis unavailable" }),
-      { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
+    return json({ unavailable: true, error: "AI analysis unavailable" }, 503);
   } catch (err) {
-    return new Response(
-      JSON.stringify({ unavailable: true, error: err instanceof Error ? err.message : "Unknown error" }),
-      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
+    console.error("[explain-pattern] unexpected error:", err instanceof Error ? err.message : err);
+    return json({ unavailable: true, error: "AI service internal error" }, 500);
   }
 });

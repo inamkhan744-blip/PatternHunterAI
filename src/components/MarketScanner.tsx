@@ -24,7 +24,7 @@ interface Props {
   isPro?: boolean;
 }
 
-export default function MarketScanner({ timeframe, onSelectCoin, watchlistSymbols, onToggleWatch, isPro }: Props) {
+export default function MarketScanner({ timeframe, onSelectCoin, watchlistSymbols, onToggleWatch }: Props) {
   const [rows, setRows] = useState<MarketRow[]>([]);
   const [scanning, setScanning] = useState(true);
   const [sortKey, setSortKey] = useState<SortKey>("change");

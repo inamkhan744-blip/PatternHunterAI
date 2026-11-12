@@ -1,28 +1,40 @@
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.48.0";
+/**
+ * binance-proxy — authenticated, rate-limited, allow-listed Binance gateway.
+ *
+ * SECURITY MODEL
+ * --------------
+ *  - The browser never holds Binance API keys. Credentials are stored encrypted by
+ *    `binance-credentials` and decrypted here, server-side, only to sign a request.
+ *  - The caller must present a valid Supabase JWT; every request is scoped to that
+ *    user's own credentials (no cross-tenant access is possible).
+ *  - Arbitrary headers/URLs are impossible: method, target and path are validated
+ *    against an explicit allow-list, which also blocks SSRF.
+ *  - Durable per-user rate limits (120/min, 1000/hour) are enforced in Postgres.
+ *  - Nothing sensitive is logged: no keys, signatures are never echoed.
+ */
 
-const ALLOWED_ORIGIN = Deno.env.get("FRONTEND_ORIGIN") || "*";
+import {
+  adminClient,
+  clampString,
+  decryptSecret,
+  enforceRateLimit,
+  hmacSha256Hex,
+  json,
+  preflight,
+  requireUser,
+} from "../_shared/security.ts";
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
-  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey, X-MBX-APIKEY, x-mbx-apikey",
-};
+type Target = "spot" | "futures";
+type Method = "GET" | "POST" | "DELETE" | "PUT";
 
-interface ProxyPayload {
-  target: "spot" | "futures";
-  path: string;
-  method?: "GET" | "POST" | "DELETE" | "PUT";
-  query?: string;
-  body?: string;
-  headers?: Record<string, string>;
-  signWithServerSecret?: boolean;
-}
+const ALLOWED_METHODS: Method[] = ["GET", "POST", "DELETE", "PUT"];
 
-const ALLOWED_ENDPOINTS: Record<"spot" | "futures", string[]> = {
+const ALLOWED_ENDPOINTS: Record<Target, string[]> = {
   spot: [
     "/api/v3/ping",
     "/api/v3/time",
     "/api/v3/ticker/price",
+    "/api/v3/ticker/bookTicker",
     "/api/v3/ticker/24hr",
     "/api/v3/klines",
     "/api/v3/depth",
@@ -32,11 +44,13 @@ const ALLOWED_ENDPOINTS: Record<"spot" | "futures", string[]> = {
     "/api/v3/openOrders",
     "/api/v3/allOrders",
     "/api/v3/myTrades",
+    "/sapi/v1/futures/transfer",
   ],
   futures: [
     "/fapi/v1/ping",
     "/fapi/v1/time",
     "/fapi/v1/ticker/price",
+    "/fapi/v1/ticker/bookTicker",
     "/fapi/v1/ticker/24hr",
     "/fapi/v1/klines",
     "/fapi/v1/depth",
@@ -46,6 +60,7 @@ const ALLOWED_ENDPOINTS: Record<"spot" | "futures", string[]> = {
     "/fapi/v1/positionRisk",
     "/fapi/v1/order",
     "/fapi/v1/openOrders",
+    "/fapi/v1/allOpenOrders",
     "/fapi/v1/allOrders",
     "/fapi/v1/userTrades",
     "/fapi/v1/leverage",
@@ -53,172 +68,195 @@ const ALLOWED_ENDPOINTS: Record<"spot" | "futures", string[]> = {
   ],
 };
 
-const RATE_LIMIT_WINDOW_MS = 60 * 1000;
-const MAX_REQUESTS_PER_WINDOW = 120;
-const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
+/** Endpoints that never require a signature (public market data). */
+const PUBLIC_PREFIXES = [
+  "/api/v3/ping",
+  "/api/v3/time",
+  "/api/v3/ticker/",
+  "/api/v3/klines",
+  "/api/v3/depth",
+  "/api/v3/trades",
+  "/fapi/v1/ping",
+  "/fapi/v1/time",
+  "/fapi/v1/ticker/",
+  "/fapi/v1/klines",
+  "/fapi/v1/depth",
+  "/fapi/v1/trades",
+];
 
-function checkRateLimit(key: string): boolean {
-  const now = Date.now();
-  const record = rateLimitMap.get(key);
+const MAX_QUERY_LENGTH = 2000;
+const MAX_BODY_LENGTH = 4000;
 
-  if (!record || now > record.resetTime) {
-    rateLimitMap.set(key, { count: 1, resetTime: now + RATE_LIMIT_WINDOW_MS });
-    return true;
-  }
-
-  if (record.count >= MAX_REQUESTS_PER_WINDOW) {
-    return false;
-  }
-
-  record.count += 1;
-  return true;
+function isPathAllowed(target: Target, path: string): boolean {
+  if (!/^\/[A-Za-z0-9/_\-.]{1,80}$/.test(path)) return false;
+  if (path.includes("..")) return false;
+  return ALLOWED_ENDPOINTS[target].some((allowed) => path === allowed || path.startsWith(`${allowed}/`));
 }
 
-async function hmacSha256(secret: string, message: string): Promise<string> {
-  const enc = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    "raw",
-    enc.encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
-  const signature = await crypto.subtle.sign("HMAC", key, enc.encode(message));
-  return Array.from(new Uint8Array(signature))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+function isPublicPath(path: string): boolean {
+  return PUBLIC_PREFIXES.some((prefix) => path === prefix || path.startsWith(prefix));
+}
+
+function looksLikeParams(value: string): boolean {
+  if (!value) return true;
+  if (value.length > MAX_BODY_LENGTH) return false;
+  // Only urlencoded key=value pairs; blocks header/JSON smuggling.
+  return /^[A-Za-z0-9%._~\-=&]*$/.test(value);
 }
 
 Deno.serve(async (req: Request) => {
-  if (req.method === "OPTIONS") {
-    return new Response(null, { status: 200, headers: corsHeaders });
+  const pre = preflight(req);
+  if (pre) return pre;
+
+  if (req.method !== "POST") {
+    return json({ error: "Method not allowed" }, 405);
   }
 
   try {
-    const authHeader = req.headers.get("Authorization");
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
-      return new Response(
-        JSON.stringify({ error: "Unauthorized: Missing valid session Bearer token" }),
-        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+    const auth = await requireUser(req);
+    if (!auth.user) return auth.response!;
+    const userId = auth.user.id;
+
+    const perMinute = await enforceRateLimit(userId, "binance-proxy:min", 120, 60);
+    if (!perMinute) {
+      return json({ error: "Rate limit exceeded (120 requests/minute)." }, 429);
+    }
+    const perHour = await enforceRateLimit(userId, "binance-proxy:hour", 1000, 3600);
+    if (!perHour) {
+      return json({ error: "Hourly limit reached (1000 requests/hour)." }, 429);
     }
 
-    const token = authHeader.replace("Bearer ", "").trim();
-    const supabaseUrl = Deno.env.get("SUPABASE_URL");
-    const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY");
-
-    let userId = "anonymous";
-    if (supabaseUrl && supabaseAnonKey) {
-      const supabase = createClient(supabaseUrl, supabaseAnonKey, {
-        auth: { persistSession: false },
-      });
-      const { data: { user }, error: authError } = await supabase.auth.getUser(token);
-      if (authError || !user) {
-        return new Response(
-          JSON.stringify({ error: "Unauthorized: Invalid or expired session token" }),
-          { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
-      }
-      userId = user.id;
+    let payload: Record<string, unknown>;
+    try {
+      payload = (await req.json()) as Record<string, unknown>;
+    } catch {
+      return json({ error: "Invalid JSON body" }, 400);
     }
 
-    const clientIp = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown-ip";
-    const rateLimitKey = `${userId}:${clientIp}`;
-    if (!checkRateLimit(rateLimitKey)) {
-      return new Response(
-        JSON.stringify({ error: "Rate limit exceeded (120 req/min). Please try again shortly." }),
-        { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+    // Reject any attempt to supply client-side keying/headers.
+    if (payload.headers !== undefined || payload.apiKey !== undefined || payload.signWithServerSecret !== undefined) {
+      return json({ error: "Unsupported request fields" }, 400);
     }
 
-    const payload: ProxyPayload = await req.json();
-    const { target, path, method = "GET", query = "", body, headers = {}, signWithServerSecret = false } = payload;
-
-    if (!target || !path) {
-      return new Response(
-        JSON.stringify({ error: "Missing required fields: target ('spot' | 'futures') or path" }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
+    const target = clampString(payload.target, 16) as Target;
     if (target !== "spot" && target !== "futures") {
-      return new Response(
-        JSON.stringify({ error: "Invalid target: must be 'spot' or 'futures'" }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+      return json({ error: "Invalid target: must be 'spot' or 'futures'" }, 400);
     }
 
-    const allowedList = ALLOWED_ENDPOINTS[target] || [];
-    const isWhitelisted = allowedList.some((allowed) => path === allowed || path.startsWith(`${allowed}/`));
-    if (!isWhitelisted) {
-      console.warn(`[Proxy Blocked] User ${userId} requested unwhitelisted endpoint: [${target}] ${path}`);
-      return new Response(
-        JSON.stringify({ error: `Forbidden: Endpoint '${path}' is not in the allowed proxy whitelist.` }),
-        { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+    const path = clampString(payload.path, 90);
+    if (!path || !isPathAllowed(target, path)) {
+      console.warn(`[binance-proxy] blocked path for user ${userId}: ${path.slice(0, 90)}`);
+      return json({ error: "Forbidden: endpoint is not in the proxy allow-list" }, 403);
+    }
+
+    const method = (clampString(payload.method ?? "GET", 8).toUpperCase() || "GET") as Method;
+    if (!ALLOWED_METHODS.includes(method)) {
+      return json({ error: "Invalid method" }, 400);
+    }
+
+    const rawQuery = typeof payload.query === "string" ? payload.query : "";
+    const rawBody = typeof payload.body === "string" ? payload.body : "";
+
+    if (rawQuery.length > MAX_QUERY_LENGTH || !looksLikeParams(rawQuery)) {
+      return json({ error: "Invalid query string" }, 400);
+    }
+    if (rawBody.length > MAX_BODY_LENGTH || !looksLikeParams(rawBody)) {
+      return json({ error: "Invalid request body" }, 400);
+    }
+    if (method !== "GET" && method !== "DELETE" && rawBody && rawQuery) {
+      return json({ error: "Send parameters in either query or body, not both" }, 400);
     }
 
     const baseUrl = target === "futures" ? "https://fapi.binance.com" : "https://api.binance.com";
-    let finalQuery = query;
+    const needsSignature = !isPublicPath(path);
 
-    const outgoingHeaders: Record<string, string> = { ...headers };
-    const authKey = req.headers.get("x-mbx-apikey") || req.headers.get("X-MBX-APIKEY") || outgoingHeaders["X-MBX-APIKEY"];
-    if (authKey) {
-      outgoingHeaders["X-MBX-APIKEY"] = authKey;
+    let url = `${baseUrl}${path}`;
+    let outboundBody: string | undefined;
+    const headers: Record<string, string> = { Accept: "application/json" };
+
+    if (needsSignature) {
+      // Load and decrypt this user's credentials. Never shared across tenants.
+      const { data, error } = await adminClient()
+        .from("user_exchange_credentials")
+        .select("key_ciphertext, secret_ciphertext")
+        .eq("user_id", userId)
+        .eq("exchange", "binance")
+        .maybeSingle();
+
+      if (error) {
+        console.error("[binance-proxy] credential lookup failed");
+        return json({ error: "Credential lookup failed" }, 500);
+      }
+      if (!data) {
+        return json({ error: "No Binance credentials stored. Add them in Settings first." }, 409);
+      }
+
+      let apiKey: string;
+      let apiSecret: string;
+      try {
+        apiKey = await decryptSecret(String(data.key_ciphertext));
+        apiSecret = await decryptSecret(String(data.secret_ciphertext));
+      } catch {
+        console.error("[binance-proxy] credential decryption failed");
+        return json({ error: "Stored credentials could not be decrypted. Please re-save them." }, 500);
+      }
+
+      const params = new URLSearchParams(rawQuery);
+      if (rawBody) {
+        new URLSearchParams(rawBody).forEach((value, key) => params.set(key, value));
+      }
+      // The client is never trusted to set these.
+      params.delete("signature");
+      params.set("timestamp", String(Date.now()));
+      params.set("recvWindow", "5000");
+
+      const payloadString = params.toString();
+      const signature = await hmacSha256Hex(apiSecret, payloadString);
+      const signed = `${payloadString}&signature=${signature}`;
+
+      headers["X-MBX-APIKEY"] = apiKey;
+
+      if (method === "GET" || method === "DELETE") {
+        url = `${url}?${signed}`;
+      } else {
+        headers["Content-Type"] = "application/x-www-form-urlencoded";
+        outboundBody = signed;
+      }
+    } else if (rawQuery) {
+      url = `${url}?${rawQuery}`;
     }
 
-    const serverApiKey = Deno.env.get("BINANCE_SERVER_API_KEY");
-    const serverApiSecret = Deno.env.get("BINANCE_SERVER_API_SECRET");
-    if (signWithServerSecret) {
-      // Disallow unauthenticated or anonymous execution with server credentials
-      if (userId === "anonymous") {
-        return new Response(
-          JSON.stringify({ error: "Unauthorized: Shared server credentials require authenticated user session." }),
-          { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
-      }
-      if (serverApiKey && serverApiSecret) {
-        outgoingHeaders["X-MBX-APIKEY"] = serverApiKey;
-        const timestamp = Date.now();
-        const queryParams = new URLSearchParams(query);
-        if (!queryParams.has("timestamp")) {
-          queryParams.set("timestamp", String(timestamp));
-        }
-        const rawQuery = queryParams.toString();
-        const signature = await hmacSha256(serverApiSecret, rawQuery);
-        queryParams.set("signature", signature);
-        finalQuery = queryParams.toString();
-      }
-    }
+    console.info(`[binance-proxy] user=${userId} ${method} ${target.toUpperCase()} ${path}`);
 
-    const fullUrl = finalQuery ? `${baseUrl}${path}?${finalQuery}` : `${baseUrl}${path}`;
-
-    const fetchOptions: RequestInit = {
+    const upstream = await fetch(url, {
       method,
-      headers: outgoingHeaders,
-    };
+      headers,
+      ...(outboundBody ? { body: outboundBody } : {}),
+    });
 
-    if (body && (method === "POST" || method === "PUT" || method === "DELETE")) {
-      fetchOptions.body = body;
-    }
+    const text = await upstream.text();
+    const contentType = upstream.headers.get("content-type") || "application/json";
 
-    console.info(`[BinanceProxy] User: ${userId} | ${method} ${target.toUpperCase()} ${path}`);
-
-    const binanceRes = await fetch(fullUrl, fetchOptions);
-    const resText = await binanceRes.text();
-
-    return new Response(resText, {
-      status: binanceRes.status,
+    return new Response(text, {
+      status: upstream.status,
       headers: {
-        ...corsHeaders,
-        "Content-Type": binanceRes.headers.get("content-type") || "application/json",
+        ...corsHeadersForResponse(),
+        "Content-Type": contentType,
+        "Cache-Control": "no-store",
       },
     });
   } catch (err) {
-    console.error("[BinanceProxy Error]", err instanceof Error ? err.message : err);
-    return new Response(
-      JSON.stringify({ error: "Binance Proxy internal processing error" }),
-      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
+    console.error("[binance-proxy] internal error:", err instanceof Error ? err.message : err);
+    return json({ error: "Binance proxy internal processing error" }, 500);
   }
 });
+
+function corsHeadersForResponse(): Record<string, string> {
+  // Reuse the shared CORS policy while keeping the response builder local.
+  return {
+    "Access-Control-Allow-Origin": Deno.env.get("FRONTEND_ORIGIN") || "*",
+    "Vary": "Origin",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  };
+}

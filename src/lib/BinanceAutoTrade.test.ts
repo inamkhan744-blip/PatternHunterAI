@@ -258,7 +258,7 @@ async function runTests() {
 
   // 12. Auto-Pilot State, Trade Direction Mode, and Execution Lock
   engine.saveConfig({ autoPilotEnabled: true });
-  assert(engine.getAutoPilotState() === "WATCHING", "Auto-Pilot state transitions to WATCHING when enabled");
+  assert(engine.getAutoPilotState() === "ARMED", "Auto-Pilot state transitions to ARMED when enabled");
 
   engine.saveConfig({ tradeDirectionMode: "LONG_ONLY" });
   assert(engine.getConfig().tradeDirectionMode === "LONG_ONLY", "Trade direction mode saved as LONG_ONLY");

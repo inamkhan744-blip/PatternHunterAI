@@ -86,6 +86,10 @@ export default function AutoTradeModal({
   const [statusMessage, setStatusMessage] = useState<{ type: "success" | "error" | "info"; text: string } | null>(null);
   const [emergencyLoading, setEmergencyLoading] = useState(false);
   const [cooldownRemaining, setCooldownRemaining] = useState<number>(0);
+  const [apCooldownRemaining, setApCooldownRemaining] = useState<number>(0);
+  const [autoPilotState, setAutoPilotState] = useState(autoTradeEngine.getAutoPilotState());
+  const [pauseReason, setPauseReason] = useState<string | null>(autoTradeEngine.getAutoPilotPauseReason());
+  const [tradesToday, setTradesToday] = useState<number>(autoTradeEngine.getDailyTradeCount());
 
   // Pro & Limit States
   const [proTradeLimit, setLimitState] = useState<ProDailyTradeLimit>(getProDailyTradeLimit());
@@ -119,6 +123,10 @@ export default function AutoTradeModal({
       void refreshTradeQuota().then(() => setDailyTradeCount(getDailyTradeCount()));
       const cd = autoTradeEngine.getPostLossCooldown();
       setCooldownRemaining(cd.remainingSeconds);
+      setApCooldownRemaining(autoTradeEngine.getAutoPilotCooldown().remainingSeconds);
+      setAutoPilotState(autoTradeEngine.getAutoPilotState());
+      setPauseReason(autoTradeEngine.getAutoPilotPauseReason());
+      setTradesToday(autoTradeEngine.getDailyTradeCount());
       loadBalance(cfg.marketType);
     }
   }, [open]);
@@ -136,6 +144,11 @@ export default function AutoTradeModal({
       }
       const cd = autoTradeEngine.getPostLossCooldown();
       setCooldownRemaining(cd.remainingSeconds);
+      setApCooldownRemaining(autoTradeEngine.getAutoPilotCooldown().remainingSeconds);
+      setAutoPilotState(autoTradeEngine.getAutoPilotState());
+      setPauseReason(autoTradeEngine.getAutoPilotPauseReason());
+      setTradesToday(autoTradeEngine.getDailyTradeCount());
+      setConfig(autoTradeEngine.getConfig());
     }, 1000);
     return () => clearInterval(interval);
   }, [open, currentPrice, currentSymbol]);
@@ -454,6 +467,48 @@ export default function AutoTradeModal({
             </div>
           )}
 
+          {/* Auto-Pilot paused for safety (AI offline / daily-loss halt) */}
+          {pauseReason && (
+            <div className="px-6 py-2.5 bg-red-950/90 border-b border-red-500 flex items-center justify-between">
+              <div className="flex items-center gap-2 text-red-300 text-xs font-bold">
+                <AlertTriangle className="w-4 h-4 animate-pulse text-red-400" />
+                <span>AUTO-PILOT PAUSED: {pauseReason}</span>
+              </div>
+              <button
+                onClick={() => {
+                  const updated = autoTradeEngine.resumeAutoPilot();
+                  setConfig({ ...updated });
+                  setPauseReason(null);
+                  setAutoPilotState(autoTradeEngine.getAutoPilotState());
+                }}
+                className="px-2.5 py-1 bg-red-600 hover:bg-red-500 text-white rounded text-[11px] font-bold transition"
+              >
+                Re-arm Auto-Pilot
+              </button>
+            </div>
+          )}
+
+          {/* 30s revenge-trading cooldown after any close */}
+          {apCooldownRemaining > 0 && (
+            <div className="px-6 py-2.5 bg-amber-950/80 border-b border-amber-500/60 flex items-center justify-between">
+              <div className="flex items-center gap-2 text-amber-300 text-xs font-bold">
+                <AlertTriangle className="w-4 h-4 animate-pulse text-amber-400" />
+                <span>
+                  COOLDOWN ACTIVE: Preventing revenge trading. {apCooldownRemaining}s remaining before any new entry.
+                </span>
+              </div>
+              <button
+                onClick={() => {
+                  autoTradeEngine.clearAutoPilotCooldown();
+                  setApCooldownRemaining(0);
+                }}
+                className="px-2.5 py-1 bg-amber-600/30 hover:bg-amber-600/50 border border-amber-500/50 text-amber-200 rounded text-[11px] font-bold transition"
+              >
+                Override Cooldown
+              </button>
+            </div>
+          )}
+
           {/* Post-Loss Cooldown Banner */}
           {cooldownRemaining > 0 && (
             <div className="px-6 py-2.5 bg-amber-950/80 border-b border-amber-500/60 flex items-center justify-between">
@@ -627,31 +682,25 @@ export default function AutoTradeModal({
                 </div>
               </div>
 
-              {/* Allow Trades if AI Fails (Fallback Mode) */}
-              <div className="p-4 rounded-xl bg-[#0d121f] border border-cyan-500/30 flex items-center justify-between">
+              {/* AI fallback policy: Auto-Pilot never trades without AI confirmation */}
+              <div className="p-4 rounded-xl bg-[#0d121f] border border-red-500/40 flex items-center justify-between gap-3">
                 <div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-bold text-cyan-400 uppercase tracking-wider">
-                      Allow Trades if AI Fails
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs font-bold text-red-300 uppercase tracking-wider">
+                      AI Failure Policy
                     </span>
-                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${config.allowAiFallback !== false ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40" : "bg-red-500/20 text-red-300 border border-red-500/40"}`}>
-                      {config.allowAiFallback !== false ? "FALLBACK MODE ON" : "STRICT AI ONLY"}
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-red-500/20 text-red-300 border border-red-500/40">
+                      STRICT AI ONLY
                     </span>
                   </div>
                   <p className="text-[11px] text-slate-400 font-sans mt-0.5">
-                    Falls back to Local Heuristic Engine (RSI, Confluence, Pattern) if Gemini API times out.
+                    If Gemini fails or times out, Auto-Pilot pauses itself and shows a red warning. It never falls back
+                    to the local heuristic engine for automatic execution.
                   </p>
                 </div>
-                <button
-                  onClick={() => handleConfigChange({ allowAiFallback: config.allowAiFallback === false ? true : false })}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition border ${
-                    config.allowAiFallback !== false
-                      ? "bg-cyan-500 text-slate-950 border-cyan-400 shadow-md shadow-cyan-950/50"
-                      : "bg-slate-900 text-slate-300 border-slate-700 hover:bg-slate-800"
-                  }`}
-                >
-                  {config.allowAiFallback !== false ? "Enabled" : "Disabled"}
-                </button>
+                <span className="text-[11px] font-bold text-slate-500 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 shrink-0">
+                  Enforced
+                </span>
               </div>
             </div>
 
@@ -769,19 +818,38 @@ export default function AutoTradeModal({
                     Auto-Pilot Status
                   </span>
                   <span
-                    className={`text-[10px] font-bold px-2 py-0.5 rounded ${
-                      config.autoPilotEnabled
-                        ? "bg-green-500/20 text-[#00ff66] border border-green-500/40"
-                        : "bg-slate-700 text-slate-400"
+                    className={`text-[10px] font-bold px-2 py-0.5 rounded border ${
+                      pauseReason
+                        ? "bg-red-500/20 text-red-300 border-red-500/40"
+                        : autoPilotState === "ARMED" || autoPilotState === "WATCHING"
+                          ? "bg-green-500/20 text-[#00ff66] border-green-500/40"
+                          : "bg-slate-700 text-slate-400 border-slate-600"
                     }`}
                   >
-                    {config.autoPilotEnabled ? "ON" : "OFF"}
+                    {pauseReason
+                      ? "PAUSED"
+                      : autoPilotState === "ARMED" || autoPilotState === "WATCHING"
+                        ? "ARMED"
+                        : "OFF"}
                   </span>
                 </div>
 
                 <p className="text-xs text-slate-400 leading-relaxed font-sans">
-                  Controlled directly via the primary <strong className="text-white">AUTO-PILOT</strong> toggle switch in the Top Header for seamless zero-latency access across all tabs.
+                  Controlled via the <strong className="text-white">AUTO-PILOT</strong> toggle in the top header. When armed it waits for a fresh candle close, requires a real AI verdict, and pauses for 30s after any close.
                 </p>
+
+                <div className="grid grid-cols-2 gap-2 text-[11px] font-mono">
+                  <div className="rounded-lg bg-slate-950/80 border border-slate-800 px-2.5 py-1.5">
+                    <span className="text-slate-500 block text-[10px] uppercase font-sans">Trades today</span>
+                    <span className="text-white font-bold">{tradesToday}</span>
+                  </div>
+                  <div className="rounded-lg bg-slate-950/80 border border-slate-800 px-2.5 py-1.5">
+                    <span className="text-slate-500 block text-[10px] uppercase font-sans">Cooldown</span>
+                    <span className={`font-bold ${apCooldownRemaining > 0 ? "text-amber-400" : "text-emerald-400"}`}>
+                      {apCooldownRemaining > 0 ? `${apCooldownRemaining}s` : "Clear"}
+                    </span>
+                  </div>
+                </div>
 
                 <div className="p-2.5 rounded-lg bg-slate-950/80 border border-slate-800 text-[11px] text-slate-400 font-sans flex items-center gap-2">
                   <Zap className="w-3.5 h-3.5 text-amber-400 shrink-0" />

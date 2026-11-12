@@ -10,7 +10,7 @@ import { isLiveTradingConfigured } from "./CredentialVault";
 import { notifyTradeOpened, notifyTradeClosed, sendTelegramAlert } from "./TelegramService";
 import { pushNotificationService } from "./PushNotification";
 import { checkTradeExecutionAllowance } from "./SubscriptionManager";
-import { simulateSwarmDebate } from "./AgentSwarm";
+import { runRealSwarmDebate, simulateSwarmDebate } from "./AgentSwarm";
 import { fetchCandles } from "./binance";
 import { rsi } from "./indicators";
 import { supabase } from "./supabase";
@@ -19,7 +19,13 @@ import { liveWorkerLogStore } from "./LiveWorkerLogStore";
 export type MarketType = "Spot" | "Futures";
 export type TradeDirection = "LONG" | "SHORT";
 export type TradeDirectionMode = "BOTH" | "LONG_ONLY" | "SHORT_ONLY";
-export type AutoPilotState = "IDLE" | "WATCHING";
+export type AutoPilotState = "IDLE" | "ARMED" | "WATCHING" | "PAUSED";
+
+/** Auto-Pilot refuses to trade if price moved more than this from the signal price. */
+export const MAX_SLIPPAGE_PCT = 0.2;
+
+/** Mandatory pause after any close, to prevent revenge trading. */
+export const AUTOPILOT_COOLDOWN_SECONDS = 30;
 
 export interface AutoTradeConfig {
   apiKey: string;
@@ -98,6 +104,8 @@ const STORAGE_KEY_CIRCUIT = "fortress_binance_circuit_breaker";
 const STORAGE_KEY_VAULT = "fortress_binance_profit_vault_total";
 const STORAGE_KEY_POST_LOSS_COOLDOWN = "fortress_binance_post_loss_cooldown";
 const STORAGE_KEY_DAILY_STATS = "fortress_binance_daily_stats";
+const STORAGE_KEY_AUTOPILOT_COOLDOWN = "fortress_autopilot_cooldown_until";
+const STORAGE_KEY_AUTOPILOT_PAUSE = "fortress_autopilot_pause_reason";
 
 export const DEFAULT_CONFIG: AutoTradeConfig = {
   apiKey: "",
@@ -442,6 +450,8 @@ export interface DailyTradeStats {
   date: string; // YYYY-MM-DD
   startingBalance: number;
   realizedPnlToday: number;
+  /** Executions opened today (persisted so a refresh cannot reset the count). */
+  tradesOpened: number;
 }
 
 export class BinanceAutoTradeEngine {
@@ -458,7 +468,10 @@ export class BinanceAutoTradeEngine {
     date: new Date().toISOString().slice(0, 10),
     startingBalance: 10000,
     realizedPnlToday: 0,
+    tradesOpened: 0,
   };
+  private autoPilotCooldownUntil: number = 0;
+  private autoPilotPauseReason: string | null = null;
 
   constructor() {
     this.config = this.loadConfig();
@@ -467,8 +480,18 @@ export class BinanceAutoTradeEngine {
     this.profitVaultTotal = this.loadProfitVault();
     this.postLossCooldownUntil = this.loadPostLossCooldown();
     this.dailyStats = this.loadDailyStats();
+    this.autoPilotCooldownUntil = this.loadAutoPilotCooldown();
+    this.autoPilotPauseReason = this.loadPauseReason();
+
+    if (this.autoPilotPauseReason && this.config.autoPilotEnabled) {
+      // A paused Auto-Pilot must stay paused across reloads until the user re-arms it.
+      this.config.autoPilotEnabled = false;
+      this.saveConfig({ autoPilotEnabled: false });
+    }
+
     if (this.config.autoPilotEnabled) {
-      this.autoPilotState = "WATCHING";
+      // Enabled but not executing: ARMED waits for the next candle close.
+      this.autoPilotState = "ARMED";
     }
   }
 
@@ -478,6 +501,10 @@ export class BinanceAutoTradeEngine {
 
   public setAutoPilotState(state: AutoPilotState): void {
     this.autoPilotState = state;
+  }
+
+  public getAutoPilotPauseReason(): string | null {
+    return this.autoPilotPauseReason;
   }
 
   // --- Persistence ---
@@ -508,10 +535,18 @@ export class BinanceAutoTradeEngine {
     const isEnablingAutoPilot = configUpdates.autoPilotEnabled === true && !wasAutoPilotEnabled;
 
     if (isEnablingAutoPilot) {
-      this.autoPilotState = "WATCHING";
-      console.log("Auto-Pilot Armed. Waiting for a fresh Confluence Signal...");
+      // ARMED never trades immediately: the App loop must wait for a candle that
+      // closes *after* arming, then pass the AI + confluence gates.
+      this.autoPilotState = "ARMED";
+      this.autoPilotPauseReason = null;
+      this.savePauseReason(null);
+      liveWorkerLogStore.addLog(
+        "Auto-Pilot Armed. Waiting for a fresh candle close before evaluating any signal.",
+        "info"
+      );
     } else if (configUpdates.autoPilotEnabled === false) {
       this.autoPilotState = "IDLE";
+      liveWorkerLogStore.addLog("Auto-Pilot Disarmed. Scanning halted.", "info");
     }
 
     // Any apiKey/apiSecret in the patch is discarded: secrets are written only by
@@ -652,6 +687,192 @@ export class BinanceAutoTradeEngine {
     this.savePostLossCooldown(0);
   }
 
+  // --- Auto-Pilot Revenge-Trading Cooldown (30 seconds after ANY close) ---
+  private loadAutoPilotCooldown(): number {
+    try {
+      const stored = localStorage.getItem(STORAGE_KEY_AUTOPILOT_COOLDOWN);
+      if (stored) return parseInt(stored, 10) || 0;
+    } catch {
+      // fallback
+    }
+    return 0;
+  }
+
+  private saveAutoPilotCooldown(untilTimestamp: number): void {
+    this.autoPilotCooldownUntil = untilTimestamp;
+    try {
+      localStorage.setItem(STORAGE_KEY_AUTOPILOT_COOLDOWN, String(untilTimestamp));
+    } catch {
+      // ignore quota / private mode
+    }
+  }
+
+  private loadPauseReason(): string | null {
+    try {
+      return localStorage.getItem(STORAGE_KEY_AUTOPILOT_PAUSE);
+    } catch {
+      return null;
+    }
+  }
+
+  private savePauseReason(reason: string | null): void {
+    this.autoPilotPauseReason = reason;
+    try {
+      if (reason) localStorage.setItem(STORAGE_KEY_AUTOPILOT_PAUSE, reason);
+      else localStorage.removeItem(STORAGE_KEY_AUTOPILOT_PAUSE);
+    } catch {
+      // ignore
+    }
+  }
+
+  public startAutoPilotCooldown(seconds: number = AUTOPILOT_COOLDOWN_SECONDS): void {
+    this.saveAutoPilotCooldown(Date.now() + Math.max(1, seconds) * 1000);
+    liveWorkerLogStore.addLog(
+      `Cooldown active: Preventing revenge trading. (${Math.round(seconds)}s) — no new Auto-Pilot entries.`,
+      "warn"
+    );
+  }
+
+  public getAutoPilotCooldown(): { isActive: boolean; remainingSeconds: number; untilTimestamp: number } {
+    const now = Date.now();
+    if (this.autoPilotCooldownUntil > now) {
+      return {
+        isActive: true,
+        remainingSeconds: Math.ceil((this.autoPilotCooldownUntil - now) / 1000),
+        untilTimestamp: this.autoPilotCooldownUntil,
+      };
+    }
+    return { isActive: false, remainingSeconds: 0, untilTimestamp: 0 };
+  }
+
+  public clearAutoPilotCooldown(): void {
+    this.saveAutoPilotCooldown(0);
+  }
+
+  /**
+   * Halts Auto-Pilot immediately. Used when the AI layer is unavailable: the engine
+   * must never fall back to heuristic execution without AI confirmation.
+   */
+  public pauseAutoPilot(reason: string): void {
+    if (this.config.autoPilotEnabled) {
+      this.config.autoPilotEnabled = false;
+      this.saveConfig({ autoPilotEnabled: false });
+    }
+    this.autoPilotState = "PAUSED";
+    this.savePauseReason(reason);
+    liveWorkerLogStore.addLog(`Auto-Pilot Paused: ${reason}`, "error");
+  }
+
+  public resumeAutoPilot(): AutoTradeConfig {
+    this.savePauseReason(null);
+    return this.saveConfig({ autoPilotEnabled: true });
+  }
+
+  public getAutoPilotSnapshot(): {
+    enabled: boolean;
+    state: AutoPilotState;
+    pauseReason: string | null;
+    cooldownSeconds: number;
+    tradesToday: number;
+  } {
+    return {
+      enabled: this.config.autoPilotEnabled,
+      state: this.autoPilotState,
+      pauseReason: this.autoPilotPauseReason,
+      cooldownSeconds: this.getAutoPilotCooldown().remainingSeconds,
+      tradesToday: this.getDailyTradeCount(),
+    };
+  }
+
+  /**
+   * The Auto-Pilot "brain". Requires a REAL AI verdict built from fresh market data.
+   * If Gemini is unavailable, times out, or returns a fallback/malformed result the
+   * Auto-Pilot pauses itself instead of trading on a local heuristic.
+   */
+  public async evaluateAutoPilotSignal(params: {
+    symbol: string;
+    price: number;
+    rsi?: number | null;
+    trend?: string | null;
+    patternName?: string | null;
+    patternDirection?: "bullish" | "bearish" | null;
+    fearGreed?: number | null;
+    atrValue?: number | null;
+    dataTimestamp: number;
+    minScore?: number;
+  }): Promise<{
+    proceed: boolean;
+    direction: TradeDirection;
+    score: number;
+    reason: string;
+  }> {
+    const minScore = params.minScore ?? 85;
+    const fallbackDirection: TradeDirection = params.patternDirection === "bearish" ? "SHORT" : "LONG";
+
+    if (!this.config.autoPilotEnabled || this.autoPilotState === "PAUSED") {
+      return { proceed: false, direction: fallbackDirection, score: 0, reason: "Auto-Pilot is not armed" };
+    }
+
+    const cooldown = this.getAutoPilotCooldown();
+    if (cooldown.isActive) {
+      liveWorkerLogStore.addLog(
+        `Cooldown active: Preventing revenge trading. (${cooldown.remainingSeconds}s remaining)`,
+        "warn",
+        { symbol: params.symbol }
+      );
+      return { proceed: false, direction: fallbackDirection, score: 0, reason: "Cooldown active" };
+    }
+
+    const verdict = await runRealSwarmDebate({
+      symbol: params.symbol,
+      price: params.price,
+      rsi: params.rsi ?? null,
+      trend: params.trend ?? null,
+      patternName: params.patternName ?? null,
+      patternDirection: params.patternDirection ?? null,
+      fearGreed: params.fearGreed ?? null,
+      atrValue: params.atrValue ?? null,
+      dataTimestamp: params.dataTimestamp,
+    });
+
+    if (verdict.isFallback || !verdict.isRealAI) {
+      this.pauseAutoPilot("AI Engine Offline");
+      return {
+        proceed: false,
+        direction: fallbackDirection,
+        score: verdict.confluenceScore,
+        reason: "AI Engine Offline",
+      };
+    }
+
+    if (verdict.verdict !== "GO" || verdict.confluenceScore < minScore) {
+      liveWorkerLogStore.addLog(
+        `Signal Found (Score ${verdict.confluenceScore}/${minScore}) - Skipping`,
+        "info",
+        { symbol: params.symbol, confluence: verdict.confluenceScore }
+      );
+      return {
+        proceed: false,
+        direction: fallbackDirection,
+        score: verdict.confluenceScore,
+        reason: verdict.verdictReason,
+      };
+    }
+
+    // Direction is AI-recommended when valid, otherwise the detected pattern decides.
+    const direction: TradeDirection =
+      verdict.recommendedDirection === "LONG" || verdict.recommendedDirection === "SHORT"
+        ? verdict.recommendedDirection
+        : fallbackDirection;
+
+    return {
+      proceed: true,
+      direction,
+      score: verdict.confluenceScore,
+      reason: verdict.verdictReason,
+    };
+  }
+
   // --- Daily Drawdown Tracking ---
   private loadDailyStats(): DailyTradeStats {
     const today = new Date().toISOString().slice(0, 10);
@@ -660,7 +881,7 @@ export class BinanceAutoTradeEngine {
       if (stored) {
         const parsed = JSON.parse(stored);
         if (parsed.date === today) {
-          return parsed;
+          return { ...parsed, tradesOpened: Number(parsed.tradesOpened) || 0 };
         }
       }
     } catch {
@@ -670,7 +891,17 @@ export class BinanceAutoTradeEngine {
       date: today,
       startingBalance: 10000,
       realizedPnlToday: 0,
+      tradesOpened: 0,
     };
+  }
+
+  public getDailyTradeCount(): number {
+    const today = new Date().toISOString().slice(0, 10);
+    if (this.dailyStats.date !== today) {
+      this.dailyStats = { date: today, startingBalance: 10000, realizedPnlToday: 0, tradesOpened: 0 };
+      this.saveDailyStats();
+    }
+    return this.dailyStats.tradesOpened;
   }
 
   private saveDailyStats(): void {
@@ -689,6 +920,7 @@ export class BinanceAutoTradeEngine {
         date: today,
         startingBalance: 10000,
         realizedPnlToday: 0,
+        tradesOpened: 0,
       };
       this.saveDailyStats();
     }
@@ -890,6 +1122,27 @@ export class BinanceAutoTradeEngine {
     }
   }
 
+  /**
+   * Public (unauthenticated) last-traded price. Used for the pre-execution slippage
+   * check so an Auto-Pilot entry is priced against the market, not the candle close.
+   */
+  public async fetchLivePrice(
+    symbol: string,
+    marketType: MarketType = this.config.marketType
+  ): Promise<number | null> {
+    const base = marketType === "Futures" ? FUTURES_API_BASE : SPOT_API_BASE;
+    const path = marketType === "Futures" ? "/fapi/v1/ticker/price" : "/api/v3/ticker/price";
+    try {
+      const res = await fetch(`${base}${path}?symbol=${encodeURIComponent(symbol)}`);
+      if (!res.ok) return null;
+      const data = await res.json();
+      const price = Number(data?.price);
+      return Number.isFinite(price) && price > 0 ? price : null;
+    } catch {
+      return null;
+    }
+  }
+
   public async setFuturesLeverage(symbol: string, leverage: number): Promise<boolean> {
     if (this.config.marketType !== "Futures" || !isLiveTradingConfigured()) {
       return true;
@@ -921,7 +1174,14 @@ export class BinanceAutoTradeEngine {
     /** "PAPER" forces a pure local simulation. Defaults to REAL only when the
      *  server-side vault confirms live credentials are configured. */
     mode?: "REAL" | "PAPER";
+    /** True when the Auto-Pilot loop is the caller (enables its cooldown gate). */
+    autoPilot?: boolean;
+    /** Price the signal was generated at, used for the slippage guard. */
+    signalPrice?: number;
+    /** Auto-Pilot uses MARKET for immediate fills; manual entries stay LIMIT. */
+    orderType?: "LIMIT" | "MARKET";
   }): Promise<{ success: boolean; trade?: ManagedTrade; error?: string }> {
+    const orderType: "LIMIT" | "MARKET" = params.orderType ?? "LIMIT";
     const marketType = params.marketType ?? this.config.marketType;
     const direction = params.direction ?? (marketType === "Spot" ? "LONG" : this.config.direction);
 
@@ -959,11 +1219,24 @@ export class BinanceAutoTradeEngine {
       };
     }
 
+    // 1b. Auto-Pilot revenge-trading cooldown: no new entries for 30s after any close.
+    if (params.autoPilot) {
+      const apCooldown = this.getAutoPilotCooldown();
+      if (apCooldown.isActive) {
+        const msg = `Cooldown active: Preventing revenge trading. (${apCooldown.remainingSeconds}s remaining)`;
+        liveWorkerLogStore.addLog(msg, "warn", { symbol: params.symbol });
+        return { success: false, error: msg };
+      }
+    }
+
     // 2. Daily Drawdown Circuit Breaker Check
     const drawdown = this.getDailyDrawdown();
     if (drawdown.drawdownPct >= drawdown.maxDailyLossPercent) {
-      this.config.autoPilotEnabled = false;
-      this.saveConfig({ autoPilotEnabled: false });
+      this.pauseAutoPilot(
+        `Daily max loss reached (${drawdown.drawdownPct}% >= ${drawdown.maxDailyLossPercent}%)`
+      );
+      // Requirement: a daily-loss breach cancels pending orders and flattens positions.
+      void this.emergencyStop().catch(() => {});
       const rejectMsg = `Trade rejected: Daily drawdown breach (${drawdown.drawdownPct}% >= ${drawdown.maxDailyLossPercent}%)`;
       liveWorkerLogStore.addLog(rejectMsg, "error", { symbol: params.symbol, drawdown });
       return {
@@ -1159,6 +1432,26 @@ export class BinanceAutoTradeEngine {
       }
     }
 
+    // --- Slippage guard: refuse to chase a price that moved after the signal ---
+    if (params.signalPrice !== undefined) {
+      if (!Number.isFinite(params.signalPrice) || params.signalPrice <= 0) {
+        const msg = "Trade cancelled due to invalid signal price.";
+        liveWorkerLogStore.addLog(msg, "error", { symbol: params.symbol });
+        return { success: false, error: msg };
+      }
+      const slippagePct = (Math.abs(params.entryPrice - params.signalPrice) / params.signalPrice) * 100;
+      if (slippagePct > MAX_SLIPPAGE_PCT) {
+        const msg = `Trade cancelled due to high slippage. Price moved ${slippagePct.toFixed(3)}% (limit ${MAX_SLIPPAGE_PCT}%).`;
+        liveWorkerLogStore.addLog(msg, "warn", {
+          symbol: params.symbol,
+          signalPrice: params.signalPrice,
+          currentPrice: params.entryPrice,
+          slippagePct: Number(slippagePct.toFixed(3)),
+        });
+        return { success: false, error: msg };
+      }
+    }
+
     // Execute on Binance only for REAL executions. PAPER trades never leave the browser.
     let orderId = "";
     let slOrderId: string | undefined;
@@ -1175,7 +1468,15 @@ export class BinanceAutoTradeEngine {
       }
 
       const clientOrderId = `ph${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
-      const apiResult = await this.placeBinanceLimitOrder({
+      const apiResult = orderType === "MARKET"
+        ? await this.placeBinanceMarketOrder({
+            symbol: params.symbol,
+            side: direction === "LONG" ? "BUY" : "SELL",
+            quantity: sizing.quantity,
+            marketType,
+            clientOrderId,
+          })
+        : await this.placeBinanceLimitOrder({
         symbol: params.symbol,
         side: direction === "LONG" ? "BUY" : "SELL",
         quantity: sizing.quantity,
@@ -1254,12 +1555,20 @@ export class BinanceAutoTradeEngine {
       tpOrderId,
       slOrderError,
       tpOrderError,
-      orderType: "LIMIT",
+      orderType,
       executionMode,
     };
 
     this.trades.unshift(trade);
     this.saveTrades();
+
+    // Persisted daily execution count (survives page refresh).
+    const today = new Date().toISOString().slice(0, 10);
+    if (this.dailyStats.date !== today) {
+      this.dailyStats = { date: today, startingBalance: 10000, realizedPnlToday: 0, tradesOpened: 0 };
+    }
+    this.dailyStats.tradesOpened += 1;
+    this.saveDailyStats();
 
     // Telegram Bot Alert & Native Push Notification
     notifyTradeOpened({
@@ -1341,6 +1650,57 @@ export class BinanceAutoTradeEngine {
       if (!data?.orderId) {
         return { error: "Binance response contained no orderId" };
       }
+      return {
+        orderId: data.orderId,
+        status: typeof data.status === "string" ? data.status : undefined,
+        executedQty: Number(data.executedQty ?? 0),
+      };
+    } catch (e) {
+      return { error: e instanceof Error ? e.message : "Network error" };
+    }
+  }
+
+  /**
+   * Market order used by Auto-Pilot: guarantees an immediate fill so the recorded
+   * entry price matches the exchange, then SL/TP can be attached to a real position.
+   */
+  private async placeBinanceMarketOrder(params: {
+    symbol: string;
+    side: "BUY" | "SELL";
+    quantity: number;
+    marketType: MarketType;
+    clientOrderId?: string;
+  }): Promise<{
+    orderId?: string | number;
+    status?: string;
+    executedQty?: number;
+    error?: string;
+  }> {
+    if (!Number.isFinite(params.quantity) || params.quantity <= 0) {
+      return { error: "Invalid order quantity" };
+    }
+
+    const bodyParts = [
+      `symbol=${params.symbol}`,
+      `side=${params.side}`,
+      "type=MARKET",
+      `quantity=${params.quantity}`,
+      "newOrderRespType=RESULT",
+    ];
+    if (params.clientOrderId) bodyParts.push(`newClientOrderId=${params.clientOrderId}`);
+
+    try {
+      const res = await proxyBinanceFetch({
+        target: params.marketType === "Futures" ? "futures" : "spot",
+        path: params.marketType === "Futures" ? "/fapi/v1/order" : "/api/v3/order",
+        method: "POST",
+        body: bodyParts.join("&"),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        return { error: data?.msg || `Market order failed (HTTP ${res.status})` };
+      }
+      if (!data?.orderId) return { error: "Binance response contained no orderId" };
       return {
         orderId: data.orderId,
         status: typeof data.status === "string" ? data.status : undefined,
@@ -1595,6 +1955,9 @@ export class BinanceAutoTradeEngine {
     const realizedPnl = priceDiff * trade.quantity;
     trade.realizedPnl = Number(realizedPnl.toFixed(2));
 
+    // A mandatory pause after ANY close (TP/SL/manual) blocks revenge re-entry.
+    this.startAutoPilotCooldown(AUTOPILOT_COOLDOWN_SECONDS);
+
     // OCO Logic: When TP is hit, automatically cancel associated SL order; if SL is hit, cancel TP order
     if (exitReason === "TP") {
       if (trade.slOrderId) {
@@ -1629,6 +1992,7 @@ export class BinanceAutoTradeEngine {
         date: today,
         startingBalance: 10000,
         realizedPnlToday: 0,
+        tradesOpened: 0,
       };
     }
     this.dailyStats.realizedPnlToday = Number((this.dailyStats.realizedPnlToday + realizedPnl).toFixed(2));
@@ -1637,8 +2001,9 @@ export class BinanceAutoTradeEngine {
     // Check Daily Drawdown Circuit Breaker
     const drawdown = this.getDailyDrawdown();
     if (drawdown.drawdownPct >= drawdown.maxDailyLossPercent) {
-      this.config.autoPilotEnabled = false;
-      this.saveConfig({ autoPilotEnabled: false });
+      this.pauseAutoPilot(
+        `Daily max loss reached (${drawdown.drawdownPct}% >= ${drawdown.maxDailyLossPercent}%)`
+      );
       this.circuitBreaker.isTripped = true;
       this.circuitBreaker.trippedAt = Date.now();
       this.circuitBreaker.reason = `Max Daily Loss % reached (${drawdown.drawdownPct}% >= ${drawdown.maxDailyLossPercent}%). Auto-Pilot disabled.`;
@@ -1731,8 +2096,27 @@ export class BinanceAutoTradeEngine {
 
     this.config.autoPilotEnabled = false;
     this.saveConfig({ autoPilotEnabled: false });
+    // Preserve a PAUSED state (e.g. daily-loss halt) so the UI keeps showing why.
+    this.autoPilotState = this.autoPilotPauseReason ? "PAUSED" : "IDLE";
+    liveWorkerLogStore.addLog(
+      "KILL SWITCH ENGAGED: Auto-Pilot halted, cancelling open orders and closing positions.",
+      "error"
+    );
 
     if (isLiveTradingConfigured()) {
+      // Spot: cancel every open order across all symbols in one call.
+      try {
+        const spotCancelAll = await proxyBinanceFetch({
+          target: "spot",
+          path: "/api/v3/openOrders",
+          method: "DELETE",
+          query: "",
+        });
+        if (spotCancelAll.ok) cancelledOrdersCount++;
+        else spotSuccess = false;
+      } catch {
+        spotSuccess = false;
+      }
       try {
         const openFuturesTrades = this.trades.filter(
           (t) => t.status === "OPEN" && t.marketType === "Futures" && t.executionMode === "REAL"
@@ -1753,19 +2137,20 @@ export class BinanceAutoTradeEngine {
       }
 
       try {
+        // Cancel any residual spot orders per tracked symbol as well (belt and braces).
         const openSpotTrades = this.trades.filter(
           (t) => t.status === "OPEN" && t.marketType === "Spot" && t.executionMode === "REAL"
         );
         const symbols = Array.from(new Set(openSpotTrades.map((t) => t.symbol)));
 
         for (const sym of symbols) {
-          await proxyBinanceFetch({
+          const res = await proxyBinanceFetch({
             target: "spot",
             path: "/api/v3/openOrders",
             method: "DELETE",
             query: `symbol=${sym}`,
           });
-          cancelledOrdersCount++;
+          if (res.ok) cancelledOrdersCount++;
         }
       } catch {
         spotSuccess = false;

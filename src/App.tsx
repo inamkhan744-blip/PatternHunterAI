@@ -829,7 +829,7 @@ export default function App() {
       const cooldown = autoTradeEngine.getAutoPilotCooldown();
       if (cooldown.isActive) {
         liveWorkerLogStore.addLog(
-          `Cooldown active: Preventing revenge trading. (${cooldown.remainingSeconds}s remaining)`,
+          `Skipping: Cooldown active — preventing revenge trading (${cooldown.remainingSeconds}s remaining)`,
           "warn",
           { symbol: candidate.symbol }
         );
@@ -839,7 +839,7 @@ export default function App() {
       const postLoss = autoTradeEngine.getPostLossCooldown();
       if (postLoss.isActive) {
         liveWorkerLogStore.addLog(
-          `Cooldown active: Preventing revenge trading. (${postLoss.remainingSeconds}s post-loss remaining)`,
+          `Skipping: Cooldown active — post-loss guard (${postLoss.remainingSeconds}s remaining)`,
           "warn",
           { symbol: candidate.symbol }
         );
@@ -852,9 +852,14 @@ export default function App() {
         candidate.atr
       ).requiredScore;
 
-      if (candidate.score <= requiredScore) {
+      // `>=` is intentional: a signal that scores exactly the required threshold
+      // is tradable. Using `<=` here silently discarded every 85/85 setup.
+      if (candidate.score < requiredScore) {
+        const thresholdNote =
+          requiredScore > 85 ? " (raised threshold: high-volatility ATR regime)" : "";
         liveWorkerLogStore.addLog(
-          `Signal Found (Score ${candidate.score}/${requiredScore}) - Skipping`,
+          `Skipping: Score ${candidate.score}/100 is below the required ${requiredScore}${thresholdNote}. ` +
+            `A score of exactly ${requiredScore} qualifies.`,
           "info",
           { symbol: candidate.symbol, score: candidate.score, requiredScore }
         );
@@ -909,7 +914,15 @@ export default function App() {
           minScore: requiredScore,
         });
 
-        if (!signal.proceed) return;
+        if (!signal.proceed) {
+          liveWorkerLogStore.addLog(
+            `Skipping: ${signal.reason || "AI verdict rejected the setup"} ` +
+              `(confluence ${signal.score}/100, required ${requiredScore})`,
+            "info",
+            { symbol: candidate.symbol, score: signal.score, requiredScore }
+          );
+          return;
+        }
 
         const direction = signal.direction;
         const directionMode = cfg.tradeDirectionMode || "BOTH";
@@ -1099,7 +1112,7 @@ export default function App() {
             lastClosePrice,
             atrVal
           ).requiredScore;
-          if (conf.score <= requiredScore) continue;
+          if (conf.score < requiredScore) continue;
 
           const closes = data.map((c) => c.close);
           const rsiSeries = rsi(closes, 14);

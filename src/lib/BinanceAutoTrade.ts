@@ -832,12 +832,12 @@ export class BinanceAutoTradeEngine {
 
     const cooldown = this.getAutoPilotCooldown();
     if (cooldown.isActive) {
-      liveWorkerLogStore.addLog(
-        `Cooldown active: Preventing revenge trading. (${cooldown.remainingSeconds}s remaining)`,
-        "warn",
-        { symbol: params.symbol }
-      );
-      return { proceed: false, direction: fallbackDirection, score: 0, reason: "Cooldown active" };
+      return {
+        proceed: false,
+        direction: fallbackDirection,
+        score: 0,
+        reason: `Cooldown active — ${cooldown.remainingSeconds}s remaining before the next entry`,
+      };
     }
 
     const verdict = await runRealSwarmDebate({
@@ -862,17 +862,19 @@ export class BinanceAutoTradeEngine {
       };
     }
 
+    // A score exactly equal to the threshold is tradable; only a strictly lower
+    // score fails. The caller logs the precise reason returned here.
     if (verdict.verdict !== "GO" || verdict.confluenceScore < minScore) {
-      liveWorkerLogStore.addLog(
-        `Signal Found (Score ${verdict.confluenceScore}/${minScore}) - Skipping`,
-        "info",
-        { symbol: params.symbol, confluence: verdict.confluenceScore }
-      );
+      const reason =
+        verdict.verdict !== "GO"
+          ? `Risk Manager Veto [NO-GO] — ${verdict.verdictReason?.trim() || "the swarm rejected this setup"}`
+          : `Score ${verdict.confluenceScore}/100 is below the required ${minScore}. ` +
+            `A score of exactly ${minScore} qualifies.`;
       return {
         proceed: false,
         direction: fallbackDirection,
         score: verdict.confluenceScore,
-        reason: verdict.verdictReason,
+        reason,
       };
     }
 

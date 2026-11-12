@@ -27,7 +27,11 @@ async function runTests() {
 
   // --- Admin is decided by the profile row only -------------------------
   assert(isUserAdmin(profile({ role: "admin" })) === true, "role=admin in user_profiles grants admin");
-  assert(isUserAdmin(profile({ role: "user" })) === false, "role=user is not admin");
+  assert(
+    isUserAdmin(profile({ role: "user", adminFlag: true })) === true,
+    "is_admin=true grants admin even when role was never updated"
+  );
+  assert(isUserAdmin(profile({ role: "user", adminFlag: false })) === false, "role=user is not admin");
   assert(isUserAdmin(null) === false, "Missing profile is not admin");
 
   // There is no email allow-list or metadata path any more.

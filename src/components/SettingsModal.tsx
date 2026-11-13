@@ -53,9 +53,12 @@ import {
   AI_PROVIDER_IDS,
   AI_PROVIDER_META,
   DEFAULT_GLOBAL_AI_CONFIG,
+  fetchAvailableModels,
   fetchGlobalAIConfig,
+  geminiModelSupportsVision,
   listConfiguredProviders,
   saveGlobalAIConfig,
+  type AIModelOption,
   type AIProvider,
   type GlobalAIConfig,
 } from "../lib/AIService";
@@ -127,6 +130,22 @@ export default function SettingsModal({
     gemini: false,
     deepseek: false,
     groq: false,
+  });
+  // Live provider model lists fetched on demand from each provider API.
+  const [modelOptions, setModelOptions] = useState<Record<AIProvider, AIModelOption[]>>({
+    gemini: [],
+    deepseek: [],
+    groq: [],
+  });
+  const [fetchingModels, setFetchingModels] = useState<Record<AIProvider, boolean>>({
+    gemini: false,
+    deepseek: false,
+    groq: false,
+  });
+  const [modelFetchErrors, setModelFetchErrors] = useState<Record<AIProvider, string | null>>({
+    gemini: null,
+    deepseek: null,
+    groq: null,
   });
 
   // TradingView Webhook State
@@ -205,11 +224,11 @@ export default function SettingsModal({
     setAiConfig((prev) => ({ ...prev, [target]: value }) as GlobalAIConfig);
   };
 
-  const handleSaveGlobalAIConfig = async () => {
+  const handleSaveGlobalAIConfig = async (override?: GlobalAIConfig) => {
     if (!isAdmin) return;
     setAiConfigSaving(true);
     try {
-      const saved = await saveGlobalAIConfig(aiConfig);
+      const saved = await saveGlobalAIConfig(override ?? aiConfig);
       setAiConfig(saved);
       setToast({
         type: "success",
@@ -219,6 +238,56 @@ export default function SettingsModal({
       setToast({
         type: "error",
         message: err instanceof Error ? err.message : "Failed to save the global AI configuration.",
+      });
+    } finally {
+      setAiConfigSaving(false);
+    }
+  };
+
+  /**
+   * Asks the provider for its current model catalog so a retired id (404) can be
+   * replaced without a code change.
+   */
+  const handleFetchModels = async (provider: AIProvider) => {
+    const apiKey = (aiConfig[PROVIDER_FIELDS[provider].key] as string) || "";
+    setFetchingModels((prev) => ({ ...prev, [provider]: true }));
+    setModelFetchErrors((prev) => ({ ...prev, [provider]: null }));
+    try {
+      const models = await fetchAvailableModels(provider, apiKey);
+      setModelOptions((prev) => ({ ...prev, [provider]: models }));
+      setToast({
+        type: "success",
+        message: `${AI_PROVIDER_META[provider].label}: ${models.length} model${models.length === 1 ? "" : "s"} available. Pick one in the dropdown.`,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Could not fetch the model list.";
+      setModelOptions((prev) => ({ ...prev, [provider]: [] }));
+      setModelFetchErrors((prev) => ({ ...prev, [provider]: message }));
+      setToast({ type: "error", message });
+    } finally {
+      setFetchingModels((prev) => ({ ...prev, [provider]: false }));
+    }
+  };
+
+  /** Persists the exact model id chosen from the fetched list to global_settings. */
+  const handleSelectModel = async (provider: AIProvider, modelId: string) => {
+    const target = PROVIDER_FIELDS[provider].model;
+    const next = { ...aiConfig, [target]: modelId } as GlobalAIConfig;
+    setAiConfig(next);
+    if (!isAdmin) return;
+
+    setAiConfigSaving(true);
+    try {
+      const saved = await saveGlobalAIConfig(next);
+      setAiConfig(saved);
+      setToast({
+        type: "success",
+        message: `${AI_PROVIDER_META[provider].label} model saved: ${modelId}`,
+      });
+    } catch (err) {
+      setToast({
+        type: "error",
+        message: err instanceof Error ? err.message : "Failed to save the selected model.",
       });
     } finally {
       setAiConfigSaving(false);
@@ -779,9 +848,34 @@ export default function SettingsModal({
                         </div>
 
                         <div>
-                          <label className="text-[11px] font-medium text-slate-300 block mb-1">
-                            {meta.label} API Key
-                          </label>
+                          <div className="flex items-center justify-between gap-2 mb-1">
+                            <label className="text-[11px] font-medium text-slate-300">
+                              {meta.label} API Key
+                            </label>
+                            <button
+                              type="button"
+                              onClick={() => void handleFetchModels(provider)}
+                              disabled={
+                                fetchingModels[provider] ||
+                                !((aiConfig[fields.key] as string) || "").trim()
+                              }
+                              title={
+                                ((aiConfig[fields.key] as string) || "").trim()
+                                  ? `Fetch the live ${meta.label} model list`
+                                  : `Enter the ${meta.label} API key first`
+                              }
+                              className="text-[10px] font-bold uppercase tracking-wide px-2 py-1 rounded border border-cyan-500/40 bg-cyan-500/10 text-cyan-300 hover:bg-cyan-500/20 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1 font-mono"
+                            >
+                              {fetchingModels[provider] ? (
+                                <>
+                                  <Loader2 className="w-3 h-3 animate-spin" />
+                                  Fetching…
+                                </>
+                              ) : (
+                                "Fetch Available Models"
+                              )}
+                            </button>
+                          </div>
                           <div className="relative">
                             <input
                               type={visibleAiKeys[provider] ? "text" : "password"}
@@ -816,10 +910,58 @@ export default function SettingsModal({
                             type="text"
                             value={aiConfig[fields.model] as string}
                             onChange={(e) => setProviderField(provider, "model", e.target.value)}
-                            placeholder={meta.defaultModel}
+                            placeholder="Fetch the model list, then pick one below"
                             autoComplete="off"
                             className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 focus:border-emerald-400 focus:outline-none text-xs text-white placeholder-slate-600 font-mono"
                           />
+
+                          {modelOptions[provider].length > 0 && (
+                            <select
+                              value={(aiConfig[fields.model] as string) || ""}
+                              onChange={(e) => {
+                                if (e.target.value) void handleSelectModel(provider, e.target.value);
+                              }}
+                              className="mt-2 w-full px-3 py-2 rounded-lg bg-slate-950 border border-cyan-500/40 focus:border-cyan-400 focus:outline-none text-xs text-white font-mono"
+                            >
+                              <option value="">Select a fetched model…</option>
+                              {(aiConfig[fields.model] as string) &&
+                                !modelOptions[provider].some(
+                                  (option) => option.id === (aiConfig[fields.model] as string)
+                                ) && (
+                                  <option value={aiConfig[fields.model] as string}>
+                                    {aiConfig[fields.model] as string} (saved, not in current list)
+                                  </option>
+                                )}
+                              {modelOptions[provider].map((option) => (
+                                <option key={option.id} value={option.id}>
+                                  {option.id}
+                                  {option.supportsVision ? " · vision" : ""}
+                                </option>
+                              ))}
+                            </select>
+                          )}
+
+                          {modelOptions[provider].length > 0 && (
+                            <p className="text-[10px] text-slate-500 mt-1">
+                              {modelOptions[provider].length} text-generation model
+                              {modelOptions[provider].length === 1 ? "" : "s"} found · selecting one saves it immediately.
+                            </p>
+                          )}
+
+                          {modelFetchErrors[provider] && (
+                            <p className="text-[10px] text-red-300 mt-1 break-words">
+                              {modelFetchErrors[provider]}
+                            </p>
+                          )}
+
+                          {provider === "gemini" &&
+                            (aiConfig.geminiModel as string) &&
+                            !geminiModelSupportsVision(aiConfig.geminiModel) && (
+                              <p className="text-[10px] text-amber-300 mt-1">
+                                This model is not marked vision-capable — Vision AI will refuse image
+                                uploads until you select a Gemini multimodal model.
+                              </p>
+                            )}
                         </div>
                       </div>
                     );
@@ -827,7 +969,7 @@ export default function SettingsModal({
 
                   <button
                     type="button"
-                    onClick={handleSaveGlobalAIConfig}
+                    onClick={() => void handleSaveGlobalAIConfig()}
                     disabled={aiConfigSaving}
                     className="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-2 transition shadow-md shadow-emerald-950/40 font-mono disabled:opacity-60"
                   >

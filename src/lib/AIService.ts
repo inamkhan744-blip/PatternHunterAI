@@ -11,6 +11,9 @@
  *    with a usable key is tried, so one exhausted quota never takes AI offline.
  *  - Images are Gemini-only: DeepSeek and Groq are text-only, so any request with
  *    `imageBase64` is always routed to Gemini even when another provider is active.
+ *  - Models are never hardcoded. Gemini, DeepSeek and Groq retire/rename models at
+ *    will, so the exact `*_model` value from `global_settings` is used as-is and the
+ *    admin picks it from a live provider model list in Settings.
  */
 
 import { supabase } from "./supabase";
@@ -21,11 +24,11 @@ export const AI_PROVIDER_IDS: readonly AIProvider[] = ["gemini", "deepseek", "gr
 
 export const AI_PROVIDER_META: Record<
   AIProvider,
-  { label: string; defaultModel: string; supportsVision: boolean }
+  { label: string; supportsVision: boolean }
 > = {
-  gemini: { label: "Gemini (Google)", defaultModel: "gemini-2.0-flash", supportsVision: true },
-  deepseek: { label: "DeepSeek", defaultModel: "deepseek-chat", supportsVision: false },
-  groq: { label: "Groq", defaultModel: "llama-3.3-70b-versatile", supportsVision: false },
+  gemini: { label: "Gemini (Google)", supportsVision: true },
+  deepseek: { label: "DeepSeek", supportsVision: false },
+  groq: { label: "Groq", supportsVision: false },
 };
 
 export interface GlobalAIConfig {
@@ -41,12 +44,19 @@ export interface GlobalAIConfig {
 export const DEFAULT_GLOBAL_AI_CONFIG: GlobalAIConfig = {
   activeProvider: "gemini",
   geminiApiKey: "",
-  geminiModel: AI_PROVIDER_META.gemini.defaultModel,
+  geminiModel: "",
   deepseekApiKey: "",
-  deepseekModel: AI_PROVIDER_META.deepseek.defaultModel,
+  deepseekModel: "",
   groqApiKey: "",
-  groqModel: AI_PROVIDER_META.groq.defaultModel,
+  groqModel: "",
 };
+
+export interface AIModelOption {
+  /** Exact model id to store in `global_settings` (e.g. `gemini-2.5-flash`). */
+  id: string;
+  label: string;
+  supportsVision: boolean;
+}
 
 export interface AIRequestOptions {
   /** 0 - 2. Defaults to 0.4. */
@@ -92,9 +102,21 @@ const DEFAULT_TIMEOUT_MS = 45_000;
 const MAX_IMAGE_BASE64_CHARS = 4_000_000;
 const MAX_ERROR_CHARS = 300;
 
-const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models";
+const GEMINI_MODELS_URL = "https://generativelanguage.googleapis.com/v1beta/models";
+const DEEPSEEK_MODELS_URL = "https://api.deepseek.com/models";
+const GROQ_MODELS_URL = "https://api.groq.com/openai/v1/models";
+const GEMINI_BASE_URL = GEMINI_MODELS_URL;
 const DEEPSEEK_URL = "https://api.deepseek.com/chat/completions";
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
+
+const MODEL_LIST_TIMEOUT_MS = 20_000;
+
+/** Gemini ids that are not chat/vision models (embeddings, media generation, TTS...). */
+const NON_VISION_GEMINI_PATTERN = /(embedding|aqa|imagen|veo|tts|audio|live|native-audio|image-generation)/i;
+/** Groq/DeepSeek ids that are not text-generation models. */
+const NON_TEXT_MODEL_PATTERN = /(whisper|tts|speech|audio|embed|moderation|guard)/i;
+/** Upstream wording used when a model id no longer exists. */
+const MODEL_NOT_FOUND_PATTERN = /model[^|]{0,80}(not found|not exist|does not exist|decommission|deprecat|unsupported|invalid)/i;
 
 interface GlobalSettingsRow {
   id?: string;
@@ -134,11 +156,11 @@ function rowToConfig(row: GlobalSettingsRow | null): GlobalAIConfig {
   return {
     activeProvider: normalizeProvider(row.active_provider),
     geminiApiKey: clean(row.gemini_api_key, 400),
-    geminiModel: clean(row.gemini_model, 120) || DEFAULT_GLOBAL_AI_CONFIG.geminiModel,
+    geminiModel: clean(row.gemini_model, 120),
     deepseekApiKey: clean(row.deepseek_api_key, 400),
-    deepseekModel: clean(row.deepseek_model, 120) || DEFAULT_GLOBAL_AI_CONFIG.deepseekModel,
+    deepseekModel: clean(row.deepseek_model, 120),
     groqApiKey: clean(row.groq_api_key, 400),
-    groqModel: clean(row.groq_model, 120) || DEFAULT_GLOBAL_AI_CONFIG.groqModel,
+    groqModel: clean(row.groq_model, 120),
   };
 }
 
@@ -149,9 +171,24 @@ function providerKey(config: GlobalAIConfig, provider: AIProvider): string {
 }
 
 function providerModel(config: GlobalAIConfig, provider: AIProvider): string {
-  if (provider === "gemini") return config.geminiModel || AI_PROVIDER_META.gemini.defaultModel;
-  if (provider === "deepseek") return config.deepseekModel || AI_PROVIDER_META.deepseek.defaultModel;
-  return config.groqModel || AI_PROVIDER_META.groq.defaultModel;
+  if (provider === "gemini") return config.geminiModel;
+  if (provider === "deepseek") return config.deepseekModel;
+  return config.groqModel;
+}
+
+/** A provider is usable only with BOTH a key and an admin-selected model. */
+function isProviderReady(config: GlobalAIConfig, provider: AIProvider): boolean {
+  return Boolean(providerKey(config, provider) && providerModel(config, provider));
+}
+
+/**
+ * Gemini model ids that can accept images. Gemini's model list does not expose an
+ * explicit modality flag, so media/embedding families are excluded by name.
+ */
+export function geminiModelSupportsVision(modelId: string): boolean {
+  const id = clean(modelId, 200).toLowerCase().replace(/^models\//, "");
+  if (!id || !id.startsWith("gemini")) return false;
+  return !NON_VISION_GEMINI_PATTERN.test(id);
 }
 
 export function listConfiguredProviders(config: GlobalAIConfig): AIProvider[] {
@@ -220,11 +257,11 @@ export async function saveGlobalAIConfig(config: GlobalAIConfig): Promise<Global
   const next: GlobalAIConfig = {
     activeProvider: normalizeProvider(config.activeProvider),
     geminiApiKey: clean(config.geminiApiKey, 400),
-    geminiModel: clean(config.geminiModel, 120) || DEFAULT_GLOBAL_AI_CONFIG.geminiModel,
+    geminiModel: clean(config.geminiModel, 120),
     deepseekApiKey: clean(config.deepseekApiKey, 400),
-    deepseekModel: clean(config.deepseekModel, 120) || DEFAULT_GLOBAL_AI_CONFIG.deepseekModel,
+    deepseekModel: clean(config.deepseekModel, 120),
     groqApiKey: clean(config.groqApiKey, 400),
-    groqModel: clean(config.groqModel, 120) || DEFAULT_GLOBAL_AI_CONFIG.groqModel,
+    groqModel: clean(config.groqModel, 120),
   };
 
   const { error } = await supabase.from("global_settings").upsert(
@@ -280,19 +317,25 @@ interface ProviderCallResult {
   model: string;
 }
 
-async function postJson(
+async function requestJson(
   url: string,
-  body: unknown,
-  headers: Record<string, string>,
-  timeoutMs: number
+  init: {
+    method: "GET" | "POST";
+    body?: unknown;
+    headers?: Record<string, string>;
+    timeoutMs: number;
+  }
 ): Promise<unknown> {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const timeoutId = setTimeout(() => controller.abort(), init.timeoutMs);
+  const headers: Record<string, string> = { ...(init.headers ?? {}) };
+  if (init.body !== undefined) headers["Content-Type"] = "application/json";
+
   try {
     const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...headers },
-      body: JSON.stringify(body),
+      method: init.method,
+      headers,
+      body: init.body === undefined ? undefined : JSON.stringify(init.body),
       signal: controller.signal,
     });
 
@@ -323,12 +366,29 @@ async function postJson(
   } catch (err) {
     if (err instanceof AIServiceError) throw err;
     if (err instanceof DOMException && err.name === "AbortError") {
-      throw new AIServiceError(`Provider timed out after ${Math.round(timeoutMs / 1000)}s.`);
+      throw new AIServiceError(`Provider timed out after ${Math.round(init.timeoutMs / 1000)}s.`);
     }
     throw new AIServiceError(truncateError(err));
   } finally {
     clearTimeout(timeoutId);
   }
+}
+
+function postJson(
+  url: string,
+  body: unknown,
+  headers: Record<string, string>,
+  timeoutMs: number
+): Promise<unknown> {
+  return requestJson(url, { method: "POST", body, headers, timeoutMs });
+}
+
+function getJson(
+  url: string,
+  headers: Record<string, string>,
+  timeoutMs: number
+): Promise<unknown> {
+  return requestJson(url, { method: "GET", headers, timeoutMs });
 }
 
 /** Google Gemini `generateContent` REST call (text + optional inline image). */
@@ -419,19 +479,88 @@ async function callOpenAICompatible(
   return { text, model: args.model };
 }
 
+function sortAndDedupeModels(options: AIModelOption[]): AIModelOption[] {
+  const seen = new Set<string>();
+  return options
+    .filter((option) => {
+      const key = option.id.toLowerCase();
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort(
+      (a, b) =>
+        Number(b.supportsVision) - Number(a.supportsVision) || a.id.localeCompare(b.id)
+    );
+}
+
 /**
- * Models to try for one provider. Gemini keeps a small known-good fallback list so
- * a retired/renamed model does not require an admin edit; the others use the single
- * configured model because their catalogs change too quickly to guess safely.
+ * Lists the models a provider currently exposes for this API key. Nothing is
+ * hardcoded: providers retire ids (404s) and the admin picks from this live list.
  */
-function modelsForProvider(config: GlobalAIConfig, provider: AIProvider): string[] {
-  const configured = providerModel(config, provider);
-  if (provider === "gemini") {
-    return Array.from(
-      new Set([configured, "gemini-2.0-flash", "gemini-1.5-flash"].filter(Boolean))
+export async function fetchAvailableModels(
+  provider: AIProvider,
+  apiKey: string
+): Promise<AIModelOption[]> {
+  const key = clean(apiKey, 400);
+  const meta = AI_PROVIDER_META[provider];
+  if (!key) {
+    throw new AIServiceError(
+      `Enter the ${meta.label} API key first, then fetch the model list.`
     );
   }
-  return [configured];
+
+  try {
+    if (provider === "gemini") {
+      const data = (await getJson(
+        `${GEMINI_MODELS_URL}?key=${encodeURIComponent(key)}&pageSize=1000`,
+        {},
+        MODEL_LIST_TIMEOUT_MS
+      )) as { models?: Array<Record<string, unknown>> };
+
+      const models = Array.isArray(data?.models) ? data.models : [];
+      return sortAndDedupeModels(
+        models
+          .filter((model) => typeof model?.name === "string")
+          .filter((model) => {
+            const methods = model.supportedGenerationMethods;
+            return !Array.isArray(methods) || methods.includes("generateContent");
+          })
+          .map((model) => {
+            const id = clean(model.name, 200).replace(/^models\//, "");
+            const display = clean(model.displayName, 120);
+            return {
+              id,
+              label: display && display !== id ? `${display} (${id})` : id,
+              supportsVision: geminiModelSupportsVision(id),
+            };
+          })
+          .filter((option) => Boolean(option.id))
+      );
+    }
+
+    const data = (await getJson(
+      provider === "deepseek" ? DEEPSEEK_MODELS_URL : GROQ_MODELS_URL,
+      { Authorization: `Bearer ${key}` },
+      MODEL_LIST_TIMEOUT_MS
+    )) as { data?: Array<Record<string, unknown>> };
+
+    const models = Array.isArray(data?.data) ? data.data : [];
+    return sortAndDedupeModels(
+      models
+        // Groq marks retired/disabled models with `active: false`.
+        .filter((model) => model?.active !== false)
+        .filter((model) => typeof model?.id === "string")
+        .map((model) => clean(model.id, 200))
+        .filter((id) => Boolean(id) && !NON_TEXT_MODEL_PATTERN.test(id))
+        // DeepSeek and Groq chat models are text-only; vision always goes to Gemini.
+        .map((id) => ({ id, label: id, supportsVision: false }))
+    );
+  } catch (err) {
+    throw new AIServiceError(
+      `Could not fetch ${meta.label} models: ${truncateError(err)}`
+    );
+  }
 }
 
 /**
@@ -439,16 +568,16 @@ function modelsForProvider(config: GlobalAIConfig, provider: AIProvider): string
  * key), then the remaining providers that have keys configured.
  */
 function buildProviderChain(config: GlobalAIConfig, requiresVision: boolean): AIProvider[] {
-  const configured = listConfiguredProviders(config);
+  const ready = AI_PROVIDER_IDS.filter((provider) => isProviderReady(config, provider));
 
   if (requiresVision) {
     // DeepSeek/Groq are text-only — an uploaded image must go to Gemini.
-    return configured.includes("gemini") ? ["gemini"] : [];
+    return ready.includes("gemini") ? ["gemini"] : [];
   }
 
   const chain: AIProvider[] = [];
-  if (configured.includes(config.activeProvider)) chain.push(config.activeProvider);
-  for (const provider of configured) {
+  if (ready.includes(config.activeProvider)) chain.push(config.activeProvider);
+  for (const provider of ready) {
     if (!chain.includes(provider)) chain.push(provider);
   }
   return chain;
@@ -495,13 +624,29 @@ export async function generateAIResponse(
 
   const config = await fetchGlobalAIConfig();
   const requiresVision = Boolean(image);
+
+  if (requiresVision) {
+    // Vision is Gemini-only, and the admin-selected Gemini model has to actually
+    // accept images — a text-only Gemini/DeepSeek/Groq model would fail upstream.
+    if (!config.geminiApiKey || !config.geminiModel) {
+      throw new AIServiceError(
+        "Vision AI requires a Gemini API key and a Gemini model. Ask an administrator to configure both in Settings → Global AI Config."
+      );
+    }
+    if (!geminiModelSupportsVision(config.geminiModel)) {
+      throw new AIServiceError(
+        `The selected Gemini model "${config.geminiModel}" does not support image input. Ask an administrator to pick a Gemini multimodal model (one labelled VISION in "Fetch Available Models") in Settings → Global AI Config.`
+      );
+    }
+  }
+
   const chain = buildProviderChain(config, requiresVision);
 
   if (chain.length === 0) {
     throw new AIServiceError(
       requiresVision
-        ? "Vision analysis requires a Gemini API key. Ask an administrator to configure one in Settings → Global AI Config."
-        : "No AI provider API key is configured. Ask an administrator to add one in Settings → Global AI Config."
+        ? "Vision analysis requires a Gemini API key and model. Ask an administrator to configure them in Settings → Global AI Config."
+        : "No AI provider is fully configured. Ask an administrator to add an API key and select a model in Settings → Global AI Config."
     );
   }
 
@@ -516,53 +661,61 @@ export async function generateAIResponse(
 
   for (const provider of chain) {
     const apiKey = providerKey(config, provider);
-    if (!apiKey) continue;
+    const model = providerModel(config, provider);
+    if (!apiKey || !model) continue;
 
-    for (const model of modelsForProvider(config, provider)) {
-      try {
-        const result =
-          provider === "gemini"
-            ? await callGemini({
-                apiKey,
-                model,
-                prompt: safePrompt,
-                systemPrompt: safeSystemPrompt,
-                imageBase64: image || undefined,
-                imageMimeType: normalizedMime,
-                options: resolved,
-              })
-            : await callOpenAICompatible(provider === "deepseek" ? DEEPSEEK_URL : GROQ_URL, {
-                apiKey,
-                model,
-                prompt: safePrompt,
-                systemPrompt: safeSystemPrompt,
-                imageMimeType: normalizedMime,
-                options: resolved,
-              });
+    try {
+      const result =
+        provider === "gemini"
+          ? await callGemini({
+              apiKey,
+              model,
+              prompt: safePrompt,
+              systemPrompt: safeSystemPrompt,
+              imageBase64: image || undefined,
+              imageMimeType: normalizedMime,
+              options: resolved,
+            })
+          : await callOpenAICompatible(provider === "deepseek" ? DEEPSEEK_URL : GROQ_URL, {
+              apiKey,
+              model,
+              prompt: safePrompt,
+              systemPrompt: safeSystemPrompt,
+              imageMimeType: normalizedMime,
+              options: resolved,
+            });
 
-        return {
-          text: result.text,
-          provider,
-          model: result.model,
-          attempts,
-        };
-      } catch (err) {
-        const failure: AIAttemptFailure = {
-          provider,
-          model,
-          error: truncateError(err),
-        };
-        attempts.push(failure);
-        console.warn(`[AIService] ${provider}/${model} failed: ${failure.error}`);
+      return {
+        text: result.text,
+        provider,
+        model: result.model,
+        attempts,
+      };
+    } catch (err) {
+      const failure: AIAttemptFailure = {
+        provider,
+        model,
+        error: truncateError(err),
+      };
+      attempts.push(failure);
+      console.warn(`[AIService] ${provider}/${model} failed: ${failure.error}`);
 
-        // Gemini model rotation only makes sense for transient model/quota errors;
-        // retrying an invalid-key 400 on three models just burns time.
-        const status = /^HTTP (\d{3})/.exec(failure.error)?.[1];
-        if (status && ["400", "401", "403"].includes(status)) break;
-
-        // Tiny pause before the next provider to smooth over 429 bursts.
-        await delay(150);
+      // A retired/renamed model is a configuration problem, not a transient
+      // outage: surface it to the admin instead of silently retrying providers.
+      const status = /^HTTP (\d{3})/.exec(failure.error)?.[1];
+      if (status === "404" || MODEL_NOT_FOUND_PATTERN.test(failure.error)) {
+        throw new AIServiceError(
+          `${AI_PROVIDER_META[provider].label} model "${model}" was not found upstream (${failure.error}). ` +
+            'Ask an administrator to select a current model in Settings → Global AI Config using "Fetch Available Models".',
+          attempts
+        );
       }
+
+      // Rejected/forbidden key on this provider: try the next configured provider.
+      if (status && ["400", "401", "403"].includes(status)) continue;
+
+      // Tiny pause before the next provider to smooth over 429 bursts.
+      await delay(150);
     }
   }
 

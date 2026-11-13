@@ -239,11 +239,33 @@ export default function ActivePositions({ currentSymbol, currentPrice }: Props) 
               {activeTrades.map((trade) => {
                 const isProfitable = trade.unrealizedPnl >= 0;
                 const isTrulyReal = trade.mode === "REAL" && hasValidBinanceKeys;
+
+                // Pre-compute the risk/reward figures shown in the metrics grid.
+                const isLong = trade.direction === "LONG";
+                const riskDollars = Math.abs(
+                  isLong
+                    ? (trade.entryPrice - trade.stopLossPrice) * trade.quantity
+                    : (trade.stopLossPrice - trade.entryPrice) * trade.quantity
+                );
+                const rewardDollars = Math.abs(
+                  isLong
+                    ? (trade.takeProfitPrice - trade.entryPrice) * trade.quantity
+                    : (trade.entryPrice - trade.takeProfitPrice) * trade.quantity
+                );
+                const riskRewardRatio = riskDollars > 0 ? rewardDollars / riskDollars : 0;
+                const marginUsed =
+                  trade.marginRequired ?? trade.notionalValue / (trade.leverage || 1);
+                const baseAsset = trade.symbol.replace(/USDT$/i, "");
+                const quantityLabel = `${trade.quantity
+                  .toFixed(6)
+                  .replace(/\.?0+$/, "")} ${baseAsset}`;
+
                 return (
                   <div
                     key={trade.id}
-                    className="p-5 rounded-2xl bg-slate-900/90 border border-slate-800 hover:border-slate-700 transition-all shadow-xl flex flex-col md:flex-row md:items-center justify-between gap-4 font-mono"
+                    className="p-5 rounded-2xl bg-slate-900/90 border border-slate-800 hover:border-slate-700 transition-all shadow-xl flex flex-col gap-4 font-mono"
                   >
+                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                     {/* Position details */}
                     <div className="space-y-2">
                       <div className="flex items-center gap-2 flex-wrap">
@@ -357,6 +379,56 @@ export default function ActivePositions({ currentSymbol, currentPrice }: Props) 
                         <XCircle className="w-4 h-4" />
                         <span>Close Trade</span>
                       </button>
+                    </div>
+                    </div>
+
+                    {/* Risk / reward metrics */}
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 pt-3 border-t border-slate-800 text-xs">
+                      <div>
+                        <span className="text-[10px] text-slate-500 block uppercase font-sans">
+                          Position Size
+                        </span>
+                        <span className="font-bold text-white block">{quantityLabel}</span>
+                        <span className="text-[10px] text-slate-400">
+                          ${trade.notionalValue.toFixed(2)} notional
+                        </span>
+                      </div>
+
+                      <div>
+                        <span className="text-[10px] text-slate-500 block uppercase font-sans">
+                          Margin Used
+                        </span>
+                        <span className="font-bold text-slate-200 block">
+                          ${marginUsed.toFixed(2)}
+                        </span>
+                      </div>
+
+                      <div>
+                        <span className="text-[10px] text-slate-500 block uppercase font-sans">
+                          Risk (SL)
+                        </span>
+                        <span className="font-bold text-[#ff3344] block">
+                          ${riskDollars.toFixed(2)}
+                        </span>
+                      </div>
+
+                      <div>
+                        <span className="text-[10px] text-slate-500 block uppercase font-sans">
+                          Reward (TP)
+                        </span>
+                        <span className="font-bold text-[#00ff66] block">
+                          ${rewardDollars.toFixed(2)}
+                        </span>
+                      </div>
+
+                      <div>
+                        <span className="text-[10px] text-slate-500 block uppercase font-sans">
+                          R:R Ratio
+                        </span>
+                        <span className="font-bold text-cyan-300 block">
+                          {riskRewardRatio > 0 ? `1:${riskRewardRatio.toFixed(2)}` : "—"}
+                        </span>
+                      </div>
                     </div>
                   </div>
                 );

@@ -156,7 +156,13 @@ function isAuthorized(req: Request): boolean {
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
   const header = req.headers.get("Authorization") ?? "";
   const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
-  return Boolean(serviceKey && token && timingSafeEqual(serviceKey, token));
+  // pg_cron/pg_net jobs conventionally send the secret on `apikey`.
+  const apiKeyHeader = req.headers.get("apikey") ?? "";
+  return Boolean(
+    serviceKey &&
+      ((token && timingSafeEqual(serviceKey, token)) ||
+        (apiKeyHeader && timingSafeEqual(serviceKey, apiKeyHeader)))
+  );
 }
 
 async function logEvent(

@@ -70,13 +70,28 @@ export async function fetchServerAutoPilotState(userId?: string): Promise<Server
   }
 }
 
-/** Toggles server Auto-Pilot. Returns false when the RPC refused/failed. */
+/**
+ * Toggles server Auto-Pilot for the signed-in user.
+ *
+ * `userId` is sent as `p_user_id` because `auth.uid()` can resolve to NULL when
+ * the project is called with a publishable key. The RPC treats it purely as a
+ * hint: it resolves the caller from the JWT subject and refuses a mismatch, so
+ * this can never change another account's flag.
+ *
+ * Returns false when the RPC refused or failed.
+ */
 export async function setServerAutoPilotEnabled(
+  userId: string | undefined,
   enabled: boolean,
   config?: ServerAutoPilotConfig
 ): Promise<boolean> {
+  if (!userId) {
+    console.warn("[ServerAutoPilot] toggle skipped: no authenticated user id");
+    return false;
+  }
   try {
     const { data, error } = await supabase.rpc("set_auto_pilot_enabled", {
+      p_user_id: userId,
       p_enabled: enabled,
       p_config: config ?? null,
     });
@@ -84,8 +99,12 @@ export async function setServerAutoPilotEnabled(
       console.warn("[ServerAutoPilot] toggle failed:", error.message);
       return false;
     }
-    const result = data as { success?: boolean } | null;
-    return result?.success === true;
+    const result = data as { success?: boolean; error?: string } | null;
+    if (result?.success !== true) {
+      console.warn("[ServerAutoPilot] toggle refused:", result?.error ?? "unknown reason");
+      return false;
+    }
+    return true;
   } catch (err) {
     console.warn(
       "[ServerAutoPilot] toggle threw:",
@@ -143,7 +162,7 @@ export function useServerAutoPilot(user: User | null): {
 
   const setEnabled = useCallback(
     async (enabled: boolean, config?: ServerAutoPilotConfig) => {
-      const ok = await setServerAutoPilotEnabled(enabled, config);
+      const ok = await setServerAutoPilotEnabled(user?.id, enabled, config);
       if (ok) {
         setState((prev) => ({
           enabled,
@@ -152,7 +171,7 @@ export function useServerAutoPilot(user: User | null): {
       }
       return ok;
     },
-    []
+    [user?.id]
   );
 
   return { enabled: state.enabled, config: state.config, loading, refresh, setEnabled };

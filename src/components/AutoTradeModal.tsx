@@ -48,6 +48,7 @@ import {
   FREE_DAILY_MANUAL_TRADE_LIMIT,
 } from "../lib/SubscriptionManager";
 import { useSubscription } from "../lib/useSubscription";
+import { useServerAutoPilot } from "../lib/ServerAutoPilot";
 import {
   loadTelegramConfig,
   saveTelegramConfig,
@@ -74,6 +75,9 @@ export default function AutoTradeModal({
   const { user } = useAuth();
   // Server-verified role/tier (never inferred from email or user_metadata).
   const { isAdmin, isPro } = useSubscription(user);
+  // The server flag is the single source of truth for Auto-Pilot execution.
+  const { enabled: serverAutoPilot, setEnabled: setServerAutoPilot } = useServerAutoPilot(user);
+  const [apSaving, setApSaving] = useState(false);
 
   const [config, setConfig] = useState<AutoTradeConfig>(autoTradeEngine.getConfig());
   const [circuitBreaker, setCircuitBreaker] = useState<CircuitBreakerState>(autoTradeEngine.getCircuitBreaker());
@@ -182,6 +186,50 @@ export default function AutoTradeModal({
     }
   };
 
+
+  /**
+   * Writes the Auto-Pilot flag to Supabase (via the set_auto_pilot_enabled RPC —
+   * clients hold SELECT-only rights on user_profiles) and reflects the result.
+   * On failure the local engine flag is restored, so the UI never claims a state
+   * the database does not have.
+   */
+  const applyServerAutoPilot = async (next: boolean) => {
+    const previousEngineFlag = autoTradeEngine.getConfig().autoPilotEnabled;
+    setApSaving(true);
+    setStatusMessage(null);
+
+    const ok = await setServerAutoPilot(next, {
+      marketType: config.marketType,
+      leverage: config.leverage,
+      riskPercent: config.riskPercent,
+      maxOpenTrades: config.maxOpenTrades,
+      tradeDirectionMode: config.tradeDirectionMode,
+      paperTrading: config.paperTradingEnabled,
+    });
+
+    setApSaving(false);
+
+    if (!ok) {
+      autoTradeEngine.saveConfig({ autoPilotEnabled: previousEngineFlag });
+      setConfig({ ...autoTradeEngine.getConfig() });
+      setStatusMessage({
+        type: "error",
+        text: `Could not ${next ? "enable" : "disable"} server Auto-Pilot. The toggle was reverted.`,
+      });
+      return;
+    }
+
+    const updated = autoTradeEngine.saveConfig({ autoPilotEnabled: next });
+    setConfig({ ...updated });
+    setPauseReason(next ? null : autoTradeEngine.getAutoPilotPauseReason());
+    setAutoPilotState(autoTradeEngine.getAutoPilotState());
+    setStatusMessage({
+      type: "success",
+      text: next
+        ? "Server Auto-Pilot armed — the cloud worker now runs every minute, even when this device is offline."
+        : "Server Auto-Pilot disabled.",
+    });
+  };
 
   const handleDisclaimerAgreed = () => {
     handleConfigChange({ disclaimerAgreed: true });
@@ -522,15 +570,13 @@ export default function AutoTradeModal({
                 <span>AUTO-PILOT PAUSED: {pauseReason}</span>
               </div>
               <button
-                onClick={() => {
-                  const updated = autoTradeEngine.resumeAutoPilot();
-                  setConfig({ ...updated });
-                  setPauseReason(null);
-                  setAutoPilotState(autoTradeEngine.getAutoPilotState());
-                }}
-                className="px-2.5 py-1 bg-red-600 hover:bg-red-500 text-white rounded text-[11px] font-bold transition"
+                onClick={() => void applyServerAutoPilot(true)}
+                disabled={apSaving}
+                aria-busy={apSaving}
+                className="px-2.5 py-1 bg-red-600 hover:bg-red-500 text-white rounded text-[11px] font-bold transition flex items-center gap-1.5 disabled:opacity-60 disabled:cursor-wait"
               >
-                Re-arm Auto-Pilot
+                {apSaving && <RefreshCw className="w-3 h-3 animate-spin" />}
+                {apSaving ? "Saving…" : "Re-arm Auto-Pilot"}
               </button>
             </div>
           )}
@@ -898,10 +944,35 @@ export default function AutoTradeModal({
                   </div>
                 </div>
 
-                <div className="p-2.5 rounded-lg bg-slate-950/80 border border-slate-800 text-[11px] text-slate-400 font-sans flex items-center gap-2">
-                  <Zap className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                  <span>Use Top Header switch to toggle state anytime</span>
-                </div>
+                <button
+                  onClick={() => void applyServerAutoPilot(!serverAutoPilot)}
+                  disabled={apSaving}
+                  aria-busy={apSaving}
+                  className={`w-full p-2.5 rounded-lg border text-[11px] font-sans flex items-center justify-between gap-2 transition disabled:opacity-60 disabled:cursor-wait ${
+                    serverAutoPilot
+                      ? "bg-emerald-500/10 border-emerald-500/40 text-emerald-200 hover:bg-emerald-500/20"
+                      : "bg-slate-950/80 border-slate-700 text-slate-300 hover:bg-slate-800"
+                  }`}
+                  title="Writes user_profiles.auto_pilot_enabled — the 24/7 worker reads this flag"
+                >
+                  <span className="flex items-center gap-2">
+                    {apSaving ? (
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin shrink-0" />
+                    ) : (
+                      <Zap className={`w-3.5 h-3.5 shrink-0 ${serverAutoPilot ? "text-[#00ff66]" : "text-amber-400"}`} />
+                    )}
+                    <span>
+                      {apSaving
+                        ? "Saving to server…"
+                        : serverAutoPilot
+                          ? "Server Auto-Pilot ON — click to disable"
+                          : "Server Auto-Pilot OFF — click to enable 24/7"}
+                    </span>
+                  </span>
+                  <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${serverAutoPilot ? "border-emerald-500/50 text-[#00ff66]" : "border-slate-600 text-slate-400"}`}>
+                    {apSaving ? "…" : serverAutoPilot ? "ON" : "OFF"}
+                  </span>
+                </button>
 
                 {/* Trade Direction Mode Dropdown */}
                 <div className="pt-2 border-t border-slate-800/80">

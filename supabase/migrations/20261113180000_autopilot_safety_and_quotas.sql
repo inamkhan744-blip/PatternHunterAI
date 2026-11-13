@@ -289,14 +289,17 @@ BEGIN
     );
   END IF;
 
-  is_pro := profile.role = 'admin'
-    OR (
+  -- COALESCE every branch: a NULL subscription column makes the whole
+  -- expression NULL, and `IF NOT NULL` is false, which would skip the gate.
+  is_pro := COALESCE(profile.role = 'admin', false)
+    OR COALESCE(
       profile.subscription_tier IN ('pro', 'premium')
       AND profile.subscription_status IN ('active', 'trialing')
-      AND (profile.subscription_expires_at IS NULL OR profile.subscription_expires_at > now())
+      AND (profile.subscription_expires_at IS NULL OR profile.subscription_expires_at > now()),
+      false
     );
 
-  IF NOT is_pro THEN
+  IF is_pro IS NOT TRUE THEN
     RETURN jsonb_build_object(
       'success', false,
       'code', 'PRO_REQUIRED',
@@ -449,10 +452,11 @@ BEGIN
   WHERE id = uid;
 
   pro := COALESCE(prof.role = 'admin', false)
-    OR (
+    OR COALESCE(
       prof.subscription_tier IN ('pro', 'premium')
       AND prof.subscription_status IN ('active', 'trialing')
-      AND (prof.subscription_expires_at IS NULL OR prof.subscription_expires_at > now())
+      AND (prof.subscription_expires_at IS NULL OR prof.subscription_expires_at > now()),
+      false
     );
 
   IF prof.role = 'admin' THEN
@@ -503,10 +507,11 @@ BEGIN
   WHERE id = uid;
 
   pro := COALESCE(prof.role = 'admin', false)
-    OR (
+    OR COALESCE(
       prof.subscription_tier IN ('pro', 'premium')
       AND prof.subscription_status IN ('active', 'trialing')
-      AND (prof.subscription_expires_at IS NULL OR prof.subscription_expires_at > now())
+      AND (prof.subscription_expires_at IS NULL OR prof.subscription_expires_at > now()),
+      false
     );
 
   IF prof.role = 'admin' THEN

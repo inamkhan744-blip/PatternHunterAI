@@ -564,6 +564,51 @@ export async function fetchAvailableModels(
 }
 
 /**
+ * Minimal live probe used by the admin vault's "Test Key" button. One tiny
+ * generation request with no retries and no fallback: any failure (bad key,
+ * retired model, quota, network) returns false.
+ */
+export async function testApiKey(
+  provider: AIProvider,
+  apiKey: string,
+  modelName: string
+): Promise<boolean> {
+  const key = clean(apiKey, 400);
+  const model = clean(modelName, 200);
+  if (!key || !model) return false;
+
+  try {
+    if (provider === "gemini") {
+      await postJson(
+        `${GEMINI_BASE_URL}/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`,
+        {
+          contents: [{ role: "user", parts: [{ text: "Reply with OK." }] }],
+          generationConfig: { maxOutputTokens: 1, temperature: 0 },
+        },
+        {},
+        15_000
+      );
+    } else {
+      await postJson(
+        provider === "deepseek" ? DEEPSEEK_URL : GROQ_URL,
+        {
+          model,
+          messages: [{ role: "user", content: "Reply with OK." }],
+          max_tokens: 1,
+          temperature: 0,
+          stream: false,
+        },
+        { Authorization: `Bearer ${key}` },
+        15_000
+      );
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Ordered provider chain for this request: the active provider first (when it has a
  * key), then the remaining providers that have keys configured.
  */

@@ -58,16 +58,27 @@ import {
   geminiModelSupportsVision,
   listConfiguredProviders,
   saveGlobalAIConfig,
+  testApiKey,
   type AIModelOption,
   type AIProvider,
   type GlobalAIConfig,
 } from "../lib/AIService";
+/** Admin-controlled feature flags; a missing/undefined flag means enabled. */
+export interface SettingsFeatureFlags {
+  visionAI: boolean;
+  autoPilot: boolean;
+  telegram: boolean;
+}
+
 interface Props {
   open: boolean;
   onClose: () => void;
   isAdmin?: boolean;
   onOpenAutoTrade?: () => void;
   onOpenVisionAI?: () => void;
+  /** Admin-only entry point to the Super Admin Panel. */
+  onOpenSuperAdmin?: () => void;
+  features?: Partial<SettingsFeatureFlags>;
 }
 
 interface ToastState {
@@ -88,9 +99,16 @@ export default function SettingsModal({
   isAdmin: propIsAdmin,
   onOpenAutoTrade,
   onOpenVisionAI,
+  onOpenSuperAdmin,
+  features,
 }: Props) {
   // Admin badge is decided by the server-verified profile passed down from App.
   const isAdmin = propIsAdmin === true;
+  const flags: SettingsFeatureFlags = {
+    visionAI: features?.visionAI !== false,
+    autoPilot: features?.autoPilot !== false,
+    telegram: features?.telegram !== false,
+  };
 
   const { isStandalone, triggerInstall } = usePWAInstall();
   const [installStatus, setInstallStatus] = useState<string | null>(null);
@@ -143,6 +161,19 @@ export default function SettingsModal({
     groq: false,
   });
   const [modelFetchErrors, setModelFetchErrors] = useState<Record<AIProvider, string | null>>({
+    gemini: null,
+    deepseek: null,
+    groq: null,
+  });
+  // Result of the per-provider "Test Key" probe (valid / invalid / untested).
+  const [testingKeys, setTestingKeys] = useState<Record<AIProvider, boolean>>({
+    gemini: false,
+    deepseek: false,
+    groq: false,
+  });
+  const [keyTestResults, setKeyTestResults] = useState<
+    Record<AIProvider, "valid" | "invalid" | null>
+  >({
     gemini: null,
     deepseek: null,
     groq: null,
@@ -266,6 +297,28 @@ export default function SettingsModal({
       setToast({ type: "error", message });
     } finally {
       setFetchingModels((prev) => ({ ...prev, [provider]: false }));
+    }
+  };
+
+  /** Verifies the provider API key + selected model with one tiny live request. */
+  const handleTestApiKey = async (provider: AIProvider) => {
+    const meta = AI_PROVIDER_META[provider];
+    const fields = PROVIDER_FIELDS[provider];
+    const apiKey = (aiConfig[fields.key] as string) || "";
+    const modelName = (aiConfig[fields.model] as string) || "";
+
+    setTestingKeys((prev) => ({ ...prev, [provider]: true }));
+    setKeyTestResults((prev) => ({ ...prev, [provider]: null }));
+    try {
+      const valid = await testApiKey(provider, apiKey, modelName);
+      setKeyTestResults((prev) => ({ ...prev, [provider]: valid ? "valid" : "invalid" }));
+      setToast(
+        valid
+          ? { type: "success", message: `${meta.label} key and model verified.` }
+          : { type: "error", message: `${meta.label}: invalid API key or model.` }
+      );
+    } finally {
+      setTestingKeys((prev) => ({ ...prev, [provider]: false }));
     }
   };
 
@@ -697,7 +750,9 @@ export default function SettingsModal({
                 )}
               </div>
 
-              {/* Telegram Bot Token */}
+              {/* Telegram Bot Token (hidden when the admin disables Telegram) */}
+              {flags.telegram && (
+              <>
               <div className="pt-3 border-t border-slate-800">
                 <label className="text-[11px] font-medium text-slate-300 block mb-1">
                   Telegram Bot Token (Optional)
@@ -742,6 +797,9 @@ export default function SettingsModal({
                   </button>
                 </div>
               </div>
+
+              </>
+              )}
 
               {/* Save API Configuration Button */}
               <button
@@ -852,29 +910,56 @@ export default function SettingsModal({
                             <label className="text-[11px] font-medium text-slate-300">
                               {meta.label} API Key
                             </label>
-                            <button
-                              type="button"
-                              onClick={() => void handleFetchModels(provider)}
-                              disabled={
-                                fetchingModels[provider] ||
-                                !((aiConfig[fields.key] as string) || "").trim()
-                              }
-                              title={
-                                ((aiConfig[fields.key] as string) || "").trim()
-                                  ? `Fetch the live ${meta.label} model list`
-                                  : `Enter the ${meta.label} API key first`
-                              }
-                              className="text-[10px] font-bold uppercase tracking-wide px-2 py-1 rounded border border-cyan-500/40 bg-cyan-500/10 text-cyan-300 hover:bg-cyan-500/20 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1 font-mono"
-                            >
-                              {fetchingModels[provider] ? (
-                                <>
-                                  <Loader2 className="w-3 h-3 animate-spin" />
-                                  Fetching…
-                                </>
-                              ) : (
-                                "Fetch Available Models"
-                              )}
-                            </button>
+                            <div className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() => void handleTestApiKey(provider)}
+                                disabled={
+                                  testingKeys[provider] ||
+                                  !((aiConfig[fields.key] as string) || "").trim() ||
+                                  !((aiConfig[fields.model] as string) || "").trim()
+                                }
+                                title={
+                                  ((aiConfig[fields.key] as string) || "").trim() &&
+                                  ((aiConfig[fields.model] as string) || "").trim()
+                                    ? `Send a tiny ${meta.label} request to verify the key and model`
+                                    : `Enter the ${meta.label} API key and model first`
+                                }
+                                className="text-[10px] font-bold uppercase tracking-wide px-2 py-1 rounded border border-emerald-500/40 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1 font-mono"
+                              >
+                                {testingKeys[provider] ? (
+                                  <>
+                                    <Loader2 className="w-3 h-3 animate-spin" />
+                                    Testing…
+                                  </>
+                                ) : (
+                                  "Test Key"
+                                )}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void handleFetchModels(provider)}
+                                disabled={
+                                  fetchingModels[provider] ||
+                                  !((aiConfig[fields.key] as string) || "").trim()
+                                }
+                                title={
+                                  ((aiConfig[fields.key] as string) || "").trim()
+                                    ? `Fetch the live ${meta.label} model list`
+                                    : `Enter the ${meta.label} API key first`
+                                }
+                                className="text-[10px] font-bold uppercase tracking-wide px-2 py-1 rounded border border-cyan-500/40 bg-cyan-500/10 text-cyan-300 hover:bg-cyan-500/20 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1 font-mono"
+                              >
+                                {fetchingModels[provider] ? (
+                                  <>
+                                    <Loader2 className="w-3 h-3 animate-spin" />
+                                    Fetching…
+                                  </>
+                                ) : (
+                                  "Fetch Available Models"
+                                )}
+                              </button>
+                            </div>
                           </div>
                           <div className="relative">
                             <input
@@ -900,6 +985,20 @@ export default function SettingsModal({
                               {visibleAiKeys[provider] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                             </button>
                           </div>
+
+                          {keyTestResults[provider] && (
+                            <p
+                              className={`text-[10px] font-mono font-bold mt-1 ${
+                                keyTestResults[provider] === "valid"
+                                  ? "text-[#00ff66]"
+                                  : "text-[#ff3344]"
+                              }`}
+                            >
+                              {keyTestResults[provider] === "valid"
+                                ? "✅ Key is valid"
+                                : "❌ Invalid Key/Model"}
+                            </p>
+                          )}
                         </div>
 
                         <div>
@@ -993,6 +1092,32 @@ export default function SettingsModal({
                   </p>
                 </>
               )}
+            </div>
+          )}
+
+          {/* Super Admin Panel — ADMIN ONLY */}
+          {isAdmin && onOpenSuperAdmin && (
+            <div className="p-4 rounded-xl bg-[#0d121f] border border-emerald-500/40 space-y-2">
+              <div className="flex items-center gap-2">
+                <Crown className="w-4 h-4 text-emerald-400" />
+                <span className="text-xs font-bold text-white uppercase tracking-wider font-mono">
+                  Super Admin Panel
+                </span>
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded border border-emerald-500/40 bg-emerald-950/60 text-[#00ff66] ml-auto">
+                  ADMIN ONLY
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-400 leading-relaxed">
+                Analytics, user management, maintenance mode, feature toggles and global broadcast.
+              </p>
+              <button
+                type="button"
+                onClick={onOpenSuperAdmin}
+                className="w-full py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-2 transition font-mono"
+              >
+                <Crown className="w-4 h-4" />
+                Open Super Admin Panel
+              </button>
             </div>
           )}
 
@@ -1136,7 +1261,8 @@ export default function SettingsModal({
             )}
           </div>
 
-          {/* Quick AI & Terminal Access */}
+          {/* Quick AI & Terminal Access (hidden when both features are disabled) */}
+          {((onOpenVisionAI && flags.visionAI) || (onOpenAutoTrade && flags.autoPilot)) && (
           <div className="p-4 rounded-xl bg-[#0d121f] border border-slate-800 space-y-3">
             <span className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5 font-mono">
               <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
@@ -1144,7 +1270,7 @@ export default function SettingsModal({
             </span>
 
             <div className="grid grid-cols-2 gap-2 text-xs">
-              {onOpenVisionAI && (
+              {onOpenVisionAI && flags.visionAI && (
                 <button
                   onClick={() => {
                     onClose();
@@ -1157,7 +1283,7 @@ export default function SettingsModal({
                 </button>
               )}
 
-              {onOpenAutoTrade && (
+              {onOpenAutoTrade && flags.autoPilot && (
                 <button
                   onClick={() => {
                     onClose();
@@ -1171,6 +1297,7 @@ export default function SettingsModal({
               )}
             </div>
           </div>
+          )}
 
           {/* Preferences */}
           <div className="p-4 rounded-xl bg-[#0d121f] border border-slate-800 space-y-3">

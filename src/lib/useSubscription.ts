@@ -14,6 +14,7 @@ interface SubscriptionState {
   profile: UserSubscriptionProfile;
   isAdmin: boolean;
   isPro: boolean;
+  isBanned: boolean;
   loading: boolean;
   refresh: () => Promise<void>;
 }
@@ -81,6 +82,9 @@ export function useSubscription(user: User | null): SubscriptionState {
 
   const isPro = useMemo(() => profileIsPro(profile), [profile]);
   const isAdmin = useMemo(() => profileIsAdmin(profile), [profile]);
+  // Admins are never locked out by a ban flag (it would make the platform
+  // unadministrable); everyone else sees the blocking screen.
+  const isBanned = !isAdmin && profile.banned === true;
 
-  return { profile, isAdmin, isPro, loading, refresh };
+  return { profile, isAdmin, isPro, isBanned, loading, refresh };
 }

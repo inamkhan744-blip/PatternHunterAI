@@ -195,6 +195,20 @@ Deno.serve(async (req: Request) => {
   if (pre) return pre;
   if (req.method !== "POST") return json({ ok: false, error: "Method not allowed" }, 405);
 
+  // Read + log the raw payload first so the Supabase logs show exactly what the
+  // frontend sent, even if auth/rate-limiting rejects the request afterwards.
+  let payload: Record<string, unknown> = {};
+  try {
+    const parsed = await req.json();
+    payload =
+      parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : {};
+  } catch {
+    payload = {};
+  }
+  console.log("Incoming payload:", payload);
+
   try {
     const auth = await requireUser(req);
     if (!auth.user) return auth.response!;
@@ -205,18 +219,27 @@ Deno.serve(async (req: Request) => {
     const perDay = await enforceRateLimit(userId, "ai-chat:day", 300, 86_400);
     if (!perDay) return json({ ok: false, error: "Daily AI request limit reached." }, 429);
 
-    let body: Record<string, unknown>;
-    try {
-      body = (await req.json()) as Record<string, unknown>;
-    } catch {
-      return json({ ok: false, error: "Invalid JSON body" }, 400);
-    }
+    const body = payload;
 
-    const prompt = clampString(body.prompt, MAX_PROMPT_CHARS);
+    // Accept the canonical keys plus common aliases so a frontend/backend
+    // payload mismatch degrades to "empty prompt" instead of a hard 400.
+    const promptCandidate =
+      body.prompt ?? body.message ?? body.text ?? body.query ??
+      (Array.isArray(body.messages)
+        ? (body.messages as Array<Record<string, unknown>>)
+            .slice()
+            .reverse()
+            .find((entry) => entry?.role === "user")?.content
+        : undefined);
+    const prompt = clampString(promptCandidate, MAX_PROMPT_CHARS);
     if (!prompt) return json({ ok: false, error: "AI prompt is empty." }, 400);
-    const systemPrompt = clampString(body.systemPrompt, MAX_PROMPT_CHARS);
+    const systemPrompt = clampString(
+      body.systemPrompt ?? body.system ?? body.system_prompt,
+      MAX_PROMPT_CHARS
+    );
 
-    const image = clampString(body.imageBase64, MAX_IMAGE_BASE64_CHARS + 1).replace(/\s/g, "");
+    const imageCandidate = body.imageBase64 ?? body.image ?? body.image_base64;
+    const image = clampString(imageCandidate, MAX_IMAGE_BASE64_CHARS + 1).replace(/\s/g, "");
     if (image.length > MAX_IMAGE_BASE64_CHARS) {
       return json({ ok: false, error: "Image too large for AI analysis." }, 400);
     }
@@ -224,13 +247,15 @@ Deno.serve(async (req: Request) => {
       return json({ ok: false, error: "Image data is not valid base64." }, 400);
     }
 
-    const rawMime = clampString(body.imageMimeType, 64).toLowerCase();
+    const mimeCandidate =
+      body.imageMimeType ?? body.imageMimeType ?? body.mimeType ?? body.mime_type;
+    const rawMime = clampString(mimeCandidate, 64).toLowerCase();
     const imageMimeType = rawMime === "image/jpg" ? "image/jpeg" : rawMime || "image/png";
     if (image && !/^image\/(png|jpeg|webp)$/.test(imageMimeType)) {
       return json({ ok: false, error: "Unsupported image type. Use PNG, JPG, or WEBP." }, 400);
     }
 
-    const rawOptions = (body.options ?? {}) as Record<string, unknown>;
+    const rawOptions = (body.options ?? body.params ?? {}) as Record<string, unknown>;
     const temperature = Math.min(Math.max(Number(rawOptions.temperature ?? 0.4), 0), 2);
     const maxOutputTokens = Math.min(Math.max(Number(rawOptions.maxOutputTokens ?? 800), 1), 8_000);
     const jsonMode = rawOptions.json === true;

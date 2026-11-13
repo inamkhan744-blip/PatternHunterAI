@@ -1639,44 +1639,37 @@ export default function App() {
       return;
     }
     const nextState = !serverAutoPilot;
-    const previousState = serverAutoPilot;
-    const previousEngineFlag = autoTradeEngine.getConfig().autoPilotEnabled;
     const cfg = autoTradeEngine.getConfig();
 
-    // Optimistic flip so the button responds instantly; reverted below if the
-    // database write fails.
-    setAutoPilotActive(nextState);
     setAutoPilotSaving(true);
     setAutoPilotError(null);
 
-    const ok = await setServerAutoPilot(nextState, {
-      marketType: cfg.marketType,
-      leverage: cfg.leverage,
-      riskPercent: cfg.riskPercent,
-      maxOpenTrades: cfg.maxOpenTrades,
-      tradeDirectionMode: cfg.tradeDirectionMode,
-      symbols: AUTO_PILOT_SCAN_UNIVERSE.map((coin) => coin.binanceSymbol),
-      paperTrading: cfg.paperTradingEnabled,
-    });
-
-    setAutoPilotSaving(false);
-
-    if (!ok) {
-      // Revert the optimistic toggle so the UI never claims a state the server
-      // does not have.
-      setAutoPilotActive(previousState);
-      autoTradeEngine.saveConfig({ autoPilotEnabled: previousEngineFlag });
+    // Nothing local changes until the database confirms the write.
+    try {
+      await setServerAutoPilot(nextState, {
+        marketType: cfg.marketType,
+        leverage: cfg.leverage,
+        riskPercent: cfg.riskPercent,
+        maxOpenTrades: cfg.maxOpenTrades,
+        tradeDirectionMode: cfg.tradeDirectionMode,
+        symbols: AUTO_PILOT_SCAN_UNIVERSE.map((coin) => coin.binanceSymbol),
+        paperTrading: cfg.paperTradingEnabled,
+      });
+    } catch (err) {
+      setAutoPilotSaving(false);
       setAutoPilotError(
-        `Could not ${nextState ? "enable" : "disable"} server Auto-Pilot. ` +
-          "Your toggle was reverted — check your connection and try again."
+        `Could not ${nextState ? "enable" : "disable"} server Auto-Pilot: ` +
+          `${err instanceof Error ? err.message : String(err)}`
       );
       setAutoPilotStatusText(
-        previousState
+        serverAutoPilot
           ? "Status: Server Auto-Pilot armed — running 24/7 in the cloud"
           : "Status: Auto-Pilot Idle"
       );
       return;
     }
+
+    setAutoPilotSaving(false);
 
     // Mirror the flag locally for display only; the execution loops stay disabled
     // because they check `serverAutoPilot` first.

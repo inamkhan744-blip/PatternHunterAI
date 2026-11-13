@@ -190,34 +190,33 @@ export default function AutoTradeModal({
   /**
    * Writes the Auto-Pilot flag to Supabase (via the toggle_auto_pilot RPC —
    * clients hold SELECT-only rights on user_profiles) and reflects the result.
-   * On failure the local engine flag is restored, so the UI never claims a state
-   * the database does not have.
+   * The local engine flag is only written after the RPC succeeds, so the UI
+   * never claims a state the database does not have.
    */
   const applyServerAutoPilot = async (next: boolean) => {
-    const previousEngineFlag = autoTradeEngine.getConfig().autoPilotEnabled;
     setApSaving(true);
     setStatusMessage(null);
 
-    const ok = await setServerAutoPilot(next, {
-      marketType: config.marketType,
-      leverage: config.leverage,
-      riskPercent: config.riskPercent,
-      maxOpenTrades: config.maxOpenTrades,
-      tradeDirectionMode: config.tradeDirectionMode,
-      paperTrading: config.paperTradingEnabled,
-    });
-
-    setApSaving(false);
-
-    if (!ok) {
-      autoTradeEngine.saveConfig({ autoPilotEnabled: previousEngineFlag });
-      setConfig({ ...autoTradeEngine.getConfig() });
+    // Nothing local changes until the database confirms the write.
+    try {
+      await setServerAutoPilot(next, {
+        marketType: config.marketType,
+        leverage: config.leverage,
+        riskPercent: config.riskPercent,
+        maxOpenTrades: config.maxOpenTrades,
+        tradeDirectionMode: config.tradeDirectionMode,
+        paperTrading: config.paperTradingEnabled,
+      });
+    } catch (err) {
+      setApSaving(false);
       setStatusMessage({
         type: "error",
-        text: `Could not ${next ? "enable" : "disable"} server Auto-Pilot. The toggle was reverted.`,
+        text: `Could not ${next ? "enable" : "disable"} server Auto-Pilot: ${err instanceof Error ? err.message : String(err)}`,
       });
       return;
     }
+
+    setApSaving(false);
 
     const updated = autoTradeEngine.saveConfig({ autoPilotEnabled: next });
     setConfig({ ...updated });

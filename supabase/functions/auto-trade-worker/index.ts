@@ -356,6 +356,8 @@ interface RunOutcome {
   reason?: string;
   symbol?: string;
   score?: number;
+  /** How many positions this run opened (multi-symbol fill up to maxOpenTrades). */
+  executed?: number;
 }
 
 async function runForUser(
@@ -368,7 +370,7 @@ async function runForUser(
 
   const { data: run } = await supabase
     .from("auto_pilot_runs")
-    .select("last_run_at, last_candle_ms, last_score")
+    .select("last_run_at, last_candle_ms, last_score, last_candle_by_symbol")
     .eq("user_id", userId)
     .maybeSingle();
 
@@ -383,6 +385,17 @@ async function runForUser(
     );
   };
 
+  // Per-symbol candle cursors. A single shared cursor meant one entry on BTC hid
+  // every other symbol until the next candle, so maxOpenTrades > 1 never filled.
+  const candleCursors: Record<string, number> = {};
+  const storedCursors = run?.last_candle_by_symbol;
+  if (storedCursors && typeof storedCursors === "object") {
+    for (const [key, value] of Object.entries(storedCursors as Record<string, unknown>)) {
+      const ts = Number(value);
+      if (Number.isFinite(ts) && ts > 0) candleCursors[key] = ts;
+    }
+  }
+
   const credentials = await loadCredentials(supabase, userId);
   if (!credentials) {
     await logEvent(supabase, userId, "warn", "Auto-Pilot is armed but no Binance API keys are stored.");
@@ -395,7 +408,8 @@ async function runForUser(
     .select("id, symbol")
     .eq("user_id", userId)
     .eq("status", "OPEN")
-    .eq("is_paper", false)
+    // Paper runs must count their own paper positions against maxOpenTrades.
+    .eq("is_paper", config.paperTrading)
     .limit(50);
 
   const openTrades = (openRows ?? []) as Array<{ id: string; symbol: string }>;
@@ -404,11 +418,21 @@ async function runForUser(
     return { user_id: userId, status: "skipped", reason: "Max open trades reached" };
   }
 
-  let best: { symbol: string; score: number; direction: Direction; price: number; atr: number; candle: Candle } | null =
-    null;
+  interface Candidate {
+    symbol: string;
+    score: number;
+    direction: Direction;
+    price: number;
+    atr: number;
+    candle: Candle;
+  }
+
+  const candidates: Candidate[] = [];
+  const openSymbols = new Set(openTrades.map((t) => t.symbol));
+  const cursorFallback = Number(run?.last_candle_ms ?? 0) || 0;
 
   for (const symbol of config.symbols) {
-    if (openTrades.some((t) => t.symbol === symbol)) continue;
+    if (openSymbols.has(symbol)) continue;
     try {
       const entryCandles = await fetchKlines(symbol, config.timeframe, 300);
       const htf1h = await fetchKlines(symbol, "1h", 200);
@@ -418,7 +442,10 @@ async function runForUser(
       // Only ever evaluate closed candles: the last row is still forming.
       const closed = entryCandles.slice(0, -1);
       const lastClosed = closed.at(-1)!;
-      if (run?.last_candle_ms && lastClosed.time <= Number(run.last_candle_ms)) continue;
+      // Per-symbol cursor: an entry on one symbol must not hide a fresh signal on
+      // another symbol during the same candle.
+      const lastSeen = candleCursors[symbol] ?? cursorFallback;
+      if (lastSeen && lastClosed.time <= lastSeen) continue;
 
       const signal = evaluateServerConfluence(closed, htf1h.slice(0, -1), htf4h.slice(0, -1), {
         minScore: config.minScore,
@@ -430,9 +457,14 @@ async function runForUser(
       if (config.tradeDirectionMode === "LONG_ONLY" && direction === "SHORT") continue;
       if (config.tradeDirectionMode === "SHORT_ONLY" && direction === "LONG") continue;
 
-      if (!best || signal.score > best.score) {
-        best = { symbol, score: signal.score, direction, price: signal.price, atr: signal.atr, candle: lastClosed };
-      }
+      candidates.push({
+        symbol,
+        score: signal.score,
+        direction,
+        price: signal.price,
+        atr: signal.atr,
+        candle: lastClosed,
+      });
     } catch (err) {
       await logEvent(
         supabase,
@@ -444,94 +476,150 @@ async function runForUser(
     }
   }
 
-  if (!best) {
+  if (candidates.length === 0) {
     await saveRun({ last_error: null });
     return { user_id: userId, status: "no_signal" };
   }
 
-  // Guard against a stale signal: re-price before sizing the order.
-  const livePrice = await fetchTickerPrice(best.symbol);
-  if (livePrice === null || Math.abs(livePrice - best.price) / best.price > 0.01) {
-    await logEvent(supabase, userId, "warn", "Signal skipped: price moved more than 1% before execution.", best.symbol, {
-      signalPrice: best.price,
-      livePrice,
+  // Strongest setups first, then keep opening until maxOpenTrades is reached or
+  // the candidate list is exhausted — one valid symbol no longer ends the run.
+  candidates.sort((a, b) => b.score - a.score);
+
+  const slots = Math.max(0, config.maxOpenTrades - openTrades.length);
+  const executed: Array<{ symbol: string; score: number }> = [];
+  let lastError: string | null = null;
+
+  for (const candidate of candidates) {
+    if (executed.length >= slots) break;
+
+    // Guard against a stale signal: re-price before sizing the order.
+    const livePrice = await fetchTickerPrice(candidate.symbol);
+    if (livePrice === null || Math.abs(livePrice - candidate.price) / candidate.price > 0.01) {
+      await logEvent(
+        supabase,
+        userId,
+        "warn",
+        "Signal skipped: price moved more than 1% before execution.",
+        candidate.symbol,
+        { signalPrice: candidate.price, livePrice }
+      );
+      candleCursors[candidate.symbol] = candidate.candle.time;
+      continue;
+    }
+
+    const tradeId = `SRV-${now}-${Math.floor(Math.random() * 1000)}`;
+
+    if (config.paperTrading) {
+      const { error } = await supabase.from("trades").insert({
+        id: tradeId,
+        user_id: userId,
+        symbol: candidate.symbol,
+        direction: candidate.direction,
+        entry_price: livePrice,
+        quantity: 0,
+        leverage: config.marketType === "Futures" ? config.leverage : 1,
+        market_type: config.marketType,
+        source: "AUTO-PILOT",
+        is_paper: true,
+        status: "OPEN",
+      });
+      if (error) {
+        lastError = `Paper insert failed: ${error.message}`;
+        continue;
+      }
+      executed.push({ symbol: candidate.symbol, score: candidate.score });
+      candleCursors[candidate.symbol] = candidate.candle.time;
+      await logEvent(
+        supabase,
+        userId,
+        "success",
+        `Paper Auto-Pilot entry ${candidate.direction} (score ${candidate.score}).`,
+        candidate.symbol,
+        { score: candidate.score, price: livePrice }
+      );
+      continue;
+    }
+
+    const result = await executeOnBinance(credentials.apiKey, credentials.apiSecret, {
+      symbol: candidate.symbol,
+      direction: candidate.direction,
+      config,
+      price: livePrice,
+      atr: candidate.atr,
     });
-    await saveRun({ last_candle_ms: best.candle.time, last_score: best.score });
-    return { user_id: userId, status: "skipped", reason: "Slippage guard", symbol: best.symbol };
-  }
 
-  const tradeId = `SRV-${now}-${Math.floor(Math.random() * 1000)}`;
+    if (!result.ok) {
+      lastError = result.error ?? "Trade rejected";
+      await logEvent(
+        supabase,
+        userId,
+        "error",
+        `Trade rejected: ${result.error ?? "unknown error"}`,
+        candidate.symbol,
+        { score: candidate.score }
+      );
+      // A rejection is symbol-specific; keep evaluating the remaining candidates.
+      continue;
+    }
 
-  if (config.paperTrading) {
     await supabase.from("trades").insert({
       id: tradeId,
       user_id: userId,
-      symbol: best.symbol,
-      direction: best.direction,
-      entry_price: livePrice,
-      quantity: 0,
+      symbol: candidate.symbol,
+      direction: candidate.direction,
+      entry_price: result.entryPrice ?? livePrice,
+      quantity: result.quantity ?? 0,
       leverage: config.marketType === "Futures" ? config.leverage : 1,
       market_type: config.marketType,
+      stop_loss_price: result.stopLoss ?? null,
+      take_profit_price: result.takeProfit ?? null,
       source: "AUTO-PILOT",
-      is_paper: true,
+      is_paper: false,
       status: "OPEN",
     });
-    await logEvent(supabase, userId, "success", `Paper Auto-Pilot entry ${best.direction} (score ${best.score}).`, best.symbol, {
-      score: best.score,
-      price: livePrice,
-    });
-    await saveRun({ last_candle_ms: best.candle.time, last_score: best.score, last_symbol: best.symbol });
-    return { user_id: userId, status: "executed", symbol: best.symbol, score: best.score };
+
+    executed.push({ symbol: candidate.symbol, score: candidate.score });
+    candleCursors[candidate.symbol] = candidate.candle.time;
+
+    await logEvent(
+      supabase,
+      userId,
+      "success",
+      `Executed ${candidate.direction} ${candidate.symbol} at ${result.entryPrice?.toFixed(2)} (confluence ${candidate.score}/100).`,
+      candidate.symbol,
+      {
+        score: candidate.score,
+        quantity: result.quantity,
+        stopLoss: result.stopLoss,
+        takeProfit: result.takeProfit,
+      }
+    );
   }
 
-  const result = await executeOnBinance(credentials.apiKey, credentials.apiSecret, {
-    symbol: best.symbol,
-    direction: best.direction,
-    config,
-    price: livePrice,
-    atr: best.atr,
-  });
-
-  if (!result.ok) {
-    await logEvent(supabase, userId, "error", `Trade rejected: ${result.error ?? "unknown error"}`, best.symbol, {
-      score: best.score,
-    });
-    await saveRun({ last_error: result.error ?? "Trade rejected", last_candle_ms: best.candle.time });
-    return { user_id: userId, status: "error", reason: result.error, symbol: best.symbol };
-  }
-
-  await supabase.from("trades").insert({
-    id: tradeId,
-    user_id: userId,
-    symbol: best.symbol,
-    direction: best.direction,
-    entry_price: result.entryPrice ?? livePrice,
-    quantity: result.quantity ?? 0,
-    leverage: config.marketType === "Futures" ? config.leverage : 1,
-    market_type: config.marketType,
-    stop_loss_price: result.stopLoss ?? null,
-    take_profit_price: result.takeProfit ?? null,
-    source: "AUTO-PILOT",
-    is_paper: false,
-    status: "OPEN",
-  });
-
-  await logEvent(
-    supabase,
-    userId,
-    "success",
-    `Executed ${best.direction} ${best.symbol} at ${result.entryPrice?.toFixed(2)} (confluence ${best.score}/100).`,
-    best.symbol,
-    { score: best.score, quantity: result.quantity, stopLoss: result.stopLoss, takeProfit: result.takeProfit }
-  );
   await saveRun({
-    last_candle_ms: best.candle.time,
-    last_score: best.score,
-    last_symbol: best.symbol,
-    last_error: null,
+    last_candle_ms: candidates[0].candle.time,
+    last_score: candidates[0].score,
+    last_symbol: executed[0]?.symbol ?? candidates[0].symbol,
+    last_candle_by_symbol: candleCursors,
+    last_error: executed.length > 0 ? null : lastError,
   });
 
-  return { user_id: userId, status: "executed", symbol: best.symbol, score: best.score };
+  if (executed.length === 0) {
+    return {
+      user_id: userId,
+      status: "skipped",
+      reason: lastError ?? "No executable candidates",
+      symbol: candidates[0].symbol,
+    };
+  }
+
+  return {
+    user_id: userId,
+    status: "executed",
+    symbol: executed[0].symbol,
+    score: executed[0].score,
+    executed: executed.length,
+  };
 }
 
 Deno.serve(async (req: Request) => {

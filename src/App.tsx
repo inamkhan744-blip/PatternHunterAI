@@ -36,6 +36,9 @@ import {
   Cpu,
   Menu,
   SlidersHorizontal,
+  Ban,
+  Megaphone,
+  Wrench,
 } from "lucide-react";
 import { SideDrawer } from "./components/SideDrawer";
 import CandlestickChart from "./components/CandlestickChart";
@@ -72,6 +75,12 @@ import Backtesting from "./components/Backtesting";
 import VisionAIUpload from "./components/VisionAIUpload";
 import SettingsModal from "./components/SettingsModal";
 import AdminModal from "./components/AdminModal";
+import SuperAdminPanel from "./components/SuperAdminPanel";
+import {
+  DEFAULT_SYSTEM_SETTINGS,
+  fetchSystemSettings,
+  type SystemSettings,
+} from "./lib/SystemSettings";
 import LeaderboardModal from "./components/LeaderboardModal";
 import OrderBook from "./components/OrderBook";
 import PnLCalendar from "./components/PnLCalendar";
@@ -225,6 +234,18 @@ export default function App() {
   const [visionAIOpen, setVisionAIOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [adminModalOpen, setAdminModalOpen] = useState(false);
+  const [superAdminOpen, setSuperAdminOpen] = useState(false);
+  // Admin-controlled platform flags (maintenance, broadcast, feature toggles).
+  const [systemSettings, setSystemSettings] = useState<SystemSettings>({
+    ...DEFAULT_SYSTEM_SETTINGS,
+  });
+  const [dismissedBroadcast, setDismissedBroadcast] = useState<string>(() => {
+    try {
+      return localStorage.getItem("fortress_dismissed_broadcast") ?? "";
+    } catch {
+      return "";
+    }
+  });
   const [leaderboardModalOpen, setLeaderboardModalOpen] = useState(false);
   const [mobileToolsOpen, setMobileToolsOpen] = useState(false);
 
@@ -233,9 +254,23 @@ export default function App() {
   const {
     isAdmin,
     isPro: effectiveIsPro,
+    isBanned,
     loading: subscriptionLoading,
     refresh: refreshSubscription,
   } = useSubscription(user);
+
+  // Platform flags are read on load; the Super Admin Panel pushes updates back
+  // through onSettingsChanged so a toggle applies without a reload.
+  useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+    void fetchSystemSettings().then((next) => {
+      if (!cancelled) setSystemSettings(next);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [user]);
 
   // Server-side (24/7) Auto-Pilot. The browser only mirrors the DB flag; the
   // execution loop lives in the auto-trade-worker edge function.
@@ -316,10 +351,10 @@ export default function App() {
 
   // HTF Trend state for Auto-Pilot Confluence Calculation
   const [htfTrendState, setHtfTrendState] = useState<HTFTrendResult | null>(null);
-  const autoTradeExecutionLock = useRef<boolean>(
-    typeof localStorage !== "undefined" &&
-    Number(localStorage.getItem("fortress_autopilot_execution_lock") || 0) > Date.now()
-  );
+  // One in-flight Auto-Pilot execution per symbol. A single global lock used to
+  // block every other symbol for 15s, so Auto-Pilot stopped after one entry and
+  // maxOpenTrades > 1 was never reached.
+  const autoPilotInFlight = useRef<Set<string>>(new Set());
   const autoPilotArmedTimestamp = useRef<number>(Date.now());
   const lastProcessedCandleTimestamp = useRef<number>(0);
   // One entry per (symbol, candle) across both the live tick and the scanner.
@@ -889,18 +924,16 @@ export default function App() {
         return;
       }
 
-      // Debounce: one execution evaluation at a time across all symbols.
-      const storedLock = localStorage.getItem("fortress_autopilot_execution_lock");
-      const isPersistentlyLocked = storedLock ? parseInt(storedLock, 10) > Date.now() : false;
-      if (autoTradeExecutionLock.current || isPersistentlyLocked) {
-        liveWorkerLogStore.addLog("Scanning... execution lock active (debounce)", "info", {
+      // Debounce per symbol only. Other symbols must remain executable so the
+      // scanner can fill the remaining maxOpenTrades slots in the same pass.
+      const inFlightKey = candidate.symbol;
+      if (autoPilotInFlight.current.has(inFlightKey)) {
+        liveWorkerLogStore.addLog("Scanning... execution already in flight for this symbol", "info", {
           symbol: candidate.symbol,
         });
         return;
       }
-
-      autoTradeExecutionLock.current = true;
-      localStorage.setItem("fortress_autopilot_execution_lock", String(Date.now() + 15000));
+      autoPilotInFlight.current.add(inFlightKey);
 
       try {
         // Real AI verdict only. If the AI layer is down the engine pauses itself.
@@ -1069,10 +1102,7 @@ export default function App() {
           );
         }
       } finally {
-        setTimeout(() => {
-          autoTradeExecutionLock.current = false;
-          localStorage.removeItem("fortress_autopilot_execution_lock");
-        }, 15000);
+        autoPilotInFlight.current.delete(inFlightKey);
       }
     },
     [autoPilotOpenSymbolCount, serverAutoPilot]
@@ -1094,12 +1124,22 @@ export default function App() {
       if (autoTradeEngine.getAutoPilotCooldown().isActive) return;
       if (autoTradeEngine.getPostLossCooldown().isActive) return;
 
-      for (const coin of AUTO_PILOT_SCAN_UNIVERSE) {
+      // Watchlist coins first, then the top-market universe. Deduped so a coin in
+      // both lists is evaluated once, and the loop keeps going after a successful
+      // entry until maxOpenTrades is reached or the list is exhausted.
+      const scanSymbols = Array.from(
+        new Set([
+          ...watchlist.map((item) => item.binance_symbol).filter(Boolean),
+          ...AUTO_PILOT_SCAN_UNIVERSE.map((coin) => coin.binanceSymbol),
+        ])
+      );
+
+      for (const symbol of scanSymbols) {
         if (autoPilotOpenSymbolCount(scanMode) >= cfg.maxOpenTrades) break;
-        if (tradeManager.hasActivePosition(coin.binanceSymbol)) continue;
+        if (tradeManager.hasActivePosition(symbol)) continue;
 
         try {
-          const data = await fetchCandles(coin.binanceSymbol, 120, timeframe);
+          const data = await fetchCandles(symbol, 120, timeframe);
           if (data.length < 30) continue;
 
           const smcData = scanSMC(data);
@@ -1139,7 +1179,7 @@ export default function App() {
           const detected = detectPattern(data);
 
           await attemptAutoPilotEntry({
-            symbol: coin.binanceSymbol,
+            symbol,
             price: lastCandle.close,
             signalPrice: lastCandle.close,
             atr: atrVal,
@@ -1162,7 +1202,7 @@ export default function App() {
       void scanOnce();
     }, 60_000);
     return () => clearInterval(timer);
-  }, [user, timeframe, htfTrendState, attemptAutoPilotEntry, autoPilotOpenSymbolCount, serverAutoPilot]);
+  }, [user, timeframe, htfTrendState, attemptAutoPilotEntry, autoPilotOpenSymbolCount, serverAutoPilot, watchlist]);
 
   // Position supervision loop: every open position on every symbol is marked to
   // market (SL/TP, trailing stops, P/L) — not just the chart currently on screen —
@@ -1724,6 +1764,53 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
     return <AuthScreen />;
   }
 
+  // Banned accounts are blocked before any dashboard data is rendered.
+  if (isBanned) {
+    return (
+      <div className="min-h-screen bg-[#070b14] flex flex-col items-center justify-center text-white p-6 font-mono">
+        <div className="max-w-md w-full p-6 rounded-2xl bg-red-950/30 border border-red-500/50 text-center space-y-4">
+          <Ban className="w-10 h-10 text-red-400 mx-auto" />
+          <h1 className="text-xl font-black uppercase tracking-wider text-red-300">You are banned</h1>
+          <p className="text-xs text-slate-300 leading-relaxed">
+            This account has been suspended by an administrator. Trading, Auto-Pilot and all
+            other features are unavailable. Contact support if you believe this is a mistake.
+          </p>
+          <button
+            onClick={() => void supabase.auth.signOut()}
+            className="w-full py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-bold uppercase tracking-wider"
+          >
+            Sign out
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // Maintenance mode blocks everyone except admins (who need access to turn it off).
+  if (systemSettings.maintenanceMode && !isAdmin) {
+    return (
+      <div className="min-h-screen bg-[#070b14] flex flex-col items-center justify-center text-white p-6 font-mono">
+        <div className="max-w-md w-full p-6 rounded-2xl bg-amber-950/20 border border-amber-500/50 text-center space-y-4">
+          <Wrench className="w-10 h-10 text-amber-400 mx-auto" />
+          <h1 className="text-xl font-black uppercase tracking-wider text-amber-300">
+            App is under maintenance
+          </h1>
+          <p className="text-xs text-slate-300 leading-relaxed">
+            PatternHunter AI is being upgraded and will be back shortly. Please refresh in a few
+            minutes.
+          </p>
+          <button
+            onClick={() => void fetchSystemSettings(true).then(setSystemSettings)}
+            className="w-full py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-bold uppercase tracking-wider flex items-center justify-center gap-2"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+            Check again
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-slate-950 text-white flex flex-col lg:flex-row pb-16 lg:pb-0">
       {/* Auto-Pilot save failure toast (the toggle has already been reverted) */}
@@ -1742,6 +1829,35 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
           </button>
         </div>
       )}
+
+      {/* Global broadcast banner (dismissible, per message) */}
+      {systemSettings.broadcastMessage &&
+        dismissedBroadcast !== systemSettings.broadcastMessage && (
+          <div
+            role="status"
+            className="fixed top-0 inset-x-0 z-[75] bg-gradient-to-r from-cyan-700 via-blue-700 to-indigo-700 border-b border-cyan-400/50 px-3 py-2 flex items-center gap-2 text-white text-xs shadow-lg"
+          >
+            <Megaphone className="w-4 h-4 text-cyan-200 shrink-0" />
+            <span className="flex-1 font-medium leading-snug">{systemSettings.broadcastMessage}</span>
+            <button
+              onClick={() => {
+                setDismissedBroadcast(systemSettings.broadcastMessage);
+                try {
+                  localStorage.setItem(
+                    "fortress_dismissed_broadcast",
+                    systemSettings.broadcastMessage
+                  );
+                } catch {
+                  // Private mode: dismissal simply does not persist.
+                }
+              }}
+              className="shrink-0 px-2 py-0.5 rounded border border-white/30 hover:bg-white/10 font-black"
+              aria-label="Dismiss broadcast"
+            >
+              ×
+            </button>
+          </div>
+        )}
 
       {/* Desktop sidebar with consolidated sections */}
       <aside className="hidden lg:flex flex-col w-60 border-r border-slate-800 bg-slate-950/90 shrink-0 sticky top-0 h-screen overflow-y-auto">
@@ -1815,21 +1931,25 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
         </div>
 
         <div className="p-3 border-t border-slate-800 space-y-2">
-          {/* Vision AI Chart Upload Button */}
-          <button
-            onClick={() => setVisionAIOpen(true)}
-            className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-slate-950 text-xs font-bold transition-all shadow-md shadow-cyan-950/40"
-          >
-            <Eye className="w-4 h-4 text-slate-950" />
-            Vision AI Upload
-          </button>
-          <button
-            onClick={() => setAutoTradeOpen(true)}
-            className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-gradient-to-r from-indigo-600 via-blue-600 to-cyan-600 hover:from-indigo-500 hover:to-blue-500 text-white text-xs font-bold transition-all shadow-md shadow-indigo-950/40"
-          >
-            <Zap className="w-4 h-4 text-yellow-300" />
-            Auto-Trade Engine
-          </button>
+          {/* Vision AI Chart Upload Button (hidden when the admin disables the feature) */}
+          {systemSettings.enableVisionAI && (
+            <button
+              onClick={() => setVisionAIOpen(true)}
+              className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-slate-950 text-xs font-bold transition-all shadow-md shadow-cyan-950/40"
+            >
+              <Eye className="w-4 h-4 text-slate-950" />
+              Vision AI Upload
+            </button>
+          )}
+          {systemSettings.enableAutopilot && (
+            <button
+              onClick={() => setAutoTradeOpen(true)}
+              className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-gradient-to-r from-indigo-600 via-blue-600 to-cyan-600 hover:from-indigo-500 hover:to-blue-500 text-white text-xs font-bold transition-all shadow-md shadow-indigo-950/40"
+            >
+              <Zap className="w-4 h-4 text-yellow-300" />
+              Auto-Trade Engine
+            </button>
+          )}
           <button
             onClick={handleScanClick}
             className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-medium transition-colors"
@@ -1907,7 +2027,8 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
               </h1>
             </div>
             <div className="flex items-center gap-1.5 flex-wrap justify-end py-0.5">
-              {/* Single Auto-Pilot Toggle on Mobile Header */}
+              {/* Single Auto-Pilot Toggle on Mobile Header (hidden when disabled) */}
+              {systemSettings.enableAutopilot && (
               <button
                 onClick={() => void handleHeaderToggleAutoPilot()}
                 disabled={autoPilotSaving}
@@ -1925,14 +2046,17 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
                 )}
                 <span>{autoPilotSaving ? "SAVING…" : autoPilotActive ? "ON" : "OFF"}</span>
               </button>
+              )}
 
-              <button
-                onClick={() => setVisionAIOpen(true)}
-                className="flex items-center gap-1 px-2 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold transition-colors shrink-0"
-                title="Vision AI Chart Upload"
-              >
-                <Eye className="w-3.5 h-3.5 text-white" />
-              </button>
+              {systemSettings.enableVisionAI && (
+                <button
+                  onClick={() => setVisionAIOpen(true)}
+                  className="flex items-center gap-1 px-2 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold transition-colors shrink-0"
+                  title="Vision AI Chart Upload"
+                >
+                  <Eye className="w-3.5 h-3.5 text-white" />
+                </button>
+              )}
               <button
                 onClick={() => setSettingsOpen(true)}
                 className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 transition-colors shrink-0"
@@ -2719,13 +2843,15 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
         symbol={selectedCoin.symbol}
       />
 
-      <AutoTradeModal
-        open={autoTradeOpen}
-        onClose={() => setAutoTradeOpen(false)}
-        currentSymbol={selectedCoin.binanceSymbol}
-        currentPrice={lastPrice}
-        currentAtr={currentAtr || ((lastPrice ?? 100) * 0.02)}
-      />
+      {systemSettings.enableAutopilot && (
+        <AutoTradeModal
+          open={autoTradeOpen}
+          onClose={() => setAutoTradeOpen(false)}
+          currentSymbol={selectedCoin.binanceSymbol}
+          currentPrice={lastPrice}
+          currentAtr={currentAtr || ((lastPrice ?? 100) * 0.02)}
+        />
+      )}
       <SwarmTerminal
         open={swarmOpen}
         onClose={() => setSwarmOpen(false)}
@@ -2770,11 +2896,13 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
       />
 
       {/* Vision AI Chart Upload Modal */}
-      <VisionAIUpload
-        open={visionAIOpen}
-        onClose={() => setVisionAIOpen(false)}
-        activeSymbol={selectedCoin.binanceSymbol}
-      />
+      {systemSettings.enableVisionAI && (
+        <VisionAIUpload
+          open={visionAIOpen}
+          onClose={() => setVisionAIOpen(false)}
+          activeSymbol={selectedCoin.binanceSymbol}
+        />
+      )}
 
       {/* System Settings & PWA Installation Modal */}
       <SettingsModal
@@ -2783,6 +2911,22 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
         onClose={() => setSettingsOpen(false)}
         onOpenAutoTrade={() => setAutoTradeOpen(true)}
         onOpenVisionAI={() => setVisionAIOpen(true)}
+        onOpenSuperAdmin={() => {
+          setSettingsOpen(false);
+          setSuperAdminOpen(true);
+        }}
+        features={{
+          visionAI: systemSettings.enableVisionAI,
+          autoPilot: systemSettings.enableAutopilot,
+          telegram: systemSettings.enableTelegram,
+        }}
+      />
+
+      <SuperAdminPanel
+        open={superAdminOpen}
+        onClose={() => setSuperAdminOpen(false)}
+        isAdmin={isAdmin}
+        onSettingsChanged={setSystemSettings}
       />
 
       {/* Enterprise Admin Controls Modal */}

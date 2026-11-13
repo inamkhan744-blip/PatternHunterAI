@@ -28,6 +28,8 @@ export interface UserSubscriptionProfile {
   dailyTradeLimit: number;
   /** Mirrors `user_profiles.is_admin`, which some deployments use instead of `role`. */
   adminFlag: boolean;
+  /** `user_profiles.is_banned` — banned accounts see a blocking screen. */
+  banned: boolean;
 }
 
 export const FREE_DAILY_MANUAL_TRADE_LIMIT = 3;
@@ -41,6 +43,7 @@ export const FREE_PROFILE: UserSubscriptionProfile = {
   expiresAt: null,
   dailyTradeLimit: FREE_DAILY_MANUAL_TRADE_LIMIT,
   adminFlag: false,
+  banned: false,
 };
 
 /** Last profile returned by the server. Display cache only — never an authorization source. */
@@ -104,6 +107,7 @@ function normalizeProfile(row: Record<string, unknown>): UserSubscriptionProfile
     role: normalizeRole(row.role),
     // A row with `is_admin = true` is an admin even if `role` was never updated.
     adminFlag: isTruthyFlag(row.is_admin),
+    banned: isTruthyFlag(row.is_banned),
     tier,
     status: (row.subscription_status as SubscriptionStatus) || "active",
     expiresAt: (row.subscription_expires_at as string | null) ?? null,

@@ -188,7 +188,7 @@ export default function AutoTradeModal({
 
 
   /**
-   * Writes the Auto-Pilot flag to Supabase (via the set_auto_pilot_enabled RPC —
+   * Writes the Auto-Pilot flag to Supabase (via the toggle_auto_pilot RPC —
    * clients hold SELECT-only rights on user_profiles) and reflects the result.
    * On failure the local engine flag is restored, so the UI never claims a state
    * the database does not have.

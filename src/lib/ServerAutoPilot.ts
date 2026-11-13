@@ -4,7 +4,7 @@
  * The execution loop lives in the `auto-trade-worker` edge function and runs
  * every minute regardless of whether any device is online. The browser only:
  *   1. reads `user_profiles.auto_pilot_enabled` (its own row, via RLS), and
- *   2. toggles it through the `set_auto_pilot_enabled` RPC.
+ *   2. toggles it through the `toggle_auto_pilot` RPC.
  *
  * Clients hold SELECT-only rights on `user_profiles`, which is why the toggle is
  * an RPC rather than a direct UPDATE.
@@ -73,43 +73,58 @@ export async function fetchServerAutoPilotState(userId?: string): Promise<Server
 /**
  * Toggles server Auto-Pilot for the signed-in user.
  *
- * `userId` is sent as `p_user_id` because `auth.uid()` can resolve to NULL when
- * the project is called with a publishable key. The RPC treats it purely as a
- * hint: it resolves the caller from the JWT subject and refuses a mismatch, so
- * this can never change another account's flag.
+ * The RPC is called with exactly `p_user_id` and `p_enabled`. `userId` is sent
+ * because `auth.uid()` can resolve to NULL when the project is called with a
+ * publishable key; the database treats it as a hint, resolves the real caller
+ * from the JWT subject, and refuses a mismatch, so it can never change another
+ * account's flag.
  *
  * Returns false when the RPC refused or failed.
  */
 export async function setServerAutoPilotEnabled(
   userId: string | undefined,
-  enabled: boolean,
-  config?: ServerAutoPilotConfig
+  enabled: boolean
 ): Promise<boolean> {
   if (!userId) {
-    console.warn("[ServerAutoPilot] toggle skipped: no authenticated user id");
+    console.error("[ServerAutoPilot] toggle aborted: no authenticated user id in scope");
     return false;
   }
+
+  console.log("[ServerAutoPilot] rpc toggle_auto_pilot ->", {
+    p_user_id: userId,
+    p_enabled: enabled,
+  });
+
   try {
-    const { data, error } = await supabase.rpc("set_auto_pilot_enabled", {
+    const { data, error } = await supabase.rpc("toggle_auto_pilot", {
       p_user_id: userId,
       p_enabled: enabled,
-      p_config: config ?? null,
     });
+
     if (error) {
-      console.warn("[ServerAutoPilot] toggle failed:", error.message);
+      console.error("[ServerAutoPilot] rpc toggle_auto_pilot failed:", {
+        message: error.message,
+        code: error.code,
+        details: error.details,
+        hint: error.hint,
+      });
       return false;
     }
-    const result = data as { success?: boolean; error?: string } | null;
+
+    const result = data as { success?: boolean; error?: string; enabled?: boolean } | null;
     if (result?.success !== true) {
-      console.warn("[ServerAutoPilot] toggle refused:", result?.error ?? "unknown reason");
+      console.error(
+        "[ServerAutoPilot] rpc toggle_auto_pilot refused:",
+        result?.error ?? "unknown reason",
+        result
+      );
       return false;
     }
+
+    console.log("[ServerAutoPilot] rpc toggle_auto_pilot succeeded:", result);
     return true;
   } catch (err) {
-    console.warn(
-      "[ServerAutoPilot] toggle threw:",
-      err instanceof Error ? err.message : String(err)
-    );
+    console.error("[ServerAutoPilot] rpc toggle_auto_pilot threw:", err);
     return false;
   }
 }
@@ -162,7 +177,7 @@ export function useServerAutoPilot(user: User | null): {
 
   const setEnabled = useCallback(
     async (enabled: boolean, config?: ServerAutoPilotConfig) => {
-      const ok = await setServerAutoPilotEnabled(user?.id, enabled, config);
+      const ok = await setServerAutoPilotEnabled(user?.id, enabled);
       if (ok) {
         setState((prev) => ({
           enabled,

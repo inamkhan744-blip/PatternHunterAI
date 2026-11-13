@@ -16,7 +16,7 @@ import {
   Eye,
   Zap,
 } from "lucide-react";
-import { supabase } from "../lib/supabase";
+import { generateAIResponse, parseAIJson } from "../lib/AIService";
 
 export interface VisionAnalysisResult {
   trend: "Bullish" | "Bearish" | "Sideways/Consolidation";
@@ -129,9 +129,9 @@ export default function VisionAIUpload({ open, onClose, activeSymbol = "BTCUSDT"
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   /**
-   * The vision edge function accepts ~3 MB of base64. Charts are usually far larger
-   * than that, so images are downscaled locally before upload instead of being
-   * rejected with a 413 after the user picked a perfectly valid screenshot.
+   * Gemini's inline_data payload tops out around ~3 MB of base64. Charts are usually
+   * far larger than that, so images are downscaled locally before upload instead of
+   * being rejected after the user picked a perfectly valid screenshot.
    */
   const downscaleDataUrl = useCallback(async (dataUrl: string, originalMime: string): Promise<string> => {
     const MAX_CHARS = 3_000_000; // ≈2.2 MB binary, below the backend's 4M-char cap
@@ -217,7 +217,9 @@ export default function VisionAIUpload({ open, onClose, activeSymbol = "BTCUSDT"
   }, [handleFileProcess]);
 
   /**
-   * Run Gemini Vision AI analysis via backend Supabase Edge Function.
+   * Run Gemini Vision analysis directly against the Gemini REST API.
+   * Vision is Gemini-only: AIService routes any image request to Gemini even when
+   * DeepSeek or Groq is the active text provider.
    */
   const analyzeChartWithVision = async () => {
     if (!selectedImage) return;
@@ -225,37 +227,42 @@ export default function VisionAIUpload({ open, onClose, activeSymbol = "BTCUSDT"
     setAnalyzing(true);
     setError(null);
 
-    // Extract base64 without prefix
-    const base64Parts = selectedImage.split(",");
-    const rawBase64 = base64Parts.length > 1 ? base64Parts[1] : base64Parts[0];
+    const prompt = `Carefully examine this candlestick chart image for ${activeSymbol}.
+Identify:
+1. Trend: Overall trend ("Bullish", "Bearish", or "Sideways/Consolidation") with an explanation.
+2. Support & Resistance: The key visible support levels/zones and resistance levels/zones.
+3. Patterns: All visible chart patterns with direction ("bullish"|"bearish"|"neutral"), confidence (50-99), and description.
+4. Key Takeaway: Concise trading recommendation, suggested action ("LONG"|"SHORT"|"WAIT"), and invalidation/stop-loss level.
+
+Respond STRICTLY in valid JSON matching this schema:
+{
+  "trend": "Bullish" | "Bearish" | "Sideways/Consolidation",
+  "trendReason": "Brief explanation of price structure",
+  "supportResistance": { "support": ["Level 1"], "resistance": ["Level 1"] },
+  "patterns": [{ "name": "Pattern Name", "direction": "bullish", "confidence": 85, "description": "Details" }],
+  "suggestedAction": "LONG" | "SHORT" | "WAIT",
+  "invalidationLevel": "Price level that invalidates this setup",
+  "keyTakeaway": "1-2 sentence actionable summary."
+}`;
+
+    const systemPrompt =
+      "You are a Senior Crypto Technical Analyst & Vision AI specialized in reading candlestick charts, " +
+      "order books, SMC liquidity zones, and technical patterns. Only describe what is visible in the image; " +
+      "never invent price levels or claim live market data.";
 
     try {
-      const { data, error: invokeError } = await supabase.functions.invoke("ai-chat", {
-        body: {
-          action: "vision",
-          imageBase64: rawBase64,
-          mimeType: imageMime || "image/png",
-          activeSymbol,
-        },
+      const aiResult = await generateAIResponse(prompt, systemPrompt, selectedImage, {
+        imageMimeType: imageMime || "image/png",
+        temperature: 0.2,
+        maxOutputTokens: 800,
+        json: true,
       });
 
-      if (invokeError) {
-        throw new Error(invokeError.message || "Vision analysis backend error");
-      }
-
-      if (data?.unavailable) {
-        throw new Error(data.error || "Vision analysis is currently unavailable");
-      }
-
-      if (data?.data) {
-        const parsed = parseVisionResult(data.data);
-        parsed.modelUsed = data.modelUsed ? `Gemini Vision (${data.modelUsed})` : "Gemini Multimodal";
-        setResult(parsed);
-      } else {
-        throw new Error("Invalid response format from Vision AI");
-      }
+      const parsed = parseVisionResult(parseAIJson(aiResult.text));
+      parsed.modelUsed = `Gemini Vision (${aiResult.model})`;
+      setResult(parsed);
     } catch (err) {
-      console.error("[Vision AI] ai-chat invoke failed:", err);
+      console.error("[Vision AI] generateAIResponse failed:", err);
       setResult(null);
       setError(
         err instanceof Error

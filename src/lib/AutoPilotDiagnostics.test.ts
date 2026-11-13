@@ -88,7 +88,7 @@ async function runDiagnosticsAndFallbackTests() {
     allowAiFallback: false,
   });
   assert(fallbackDisabledResult.verdict === "NO-GO", "Heuristic engine blocks trade if allowAiFallback is disabled");
-  assert(fallbackDisabledResult.verdictReason.includes("Gemini API unavailable"), "Blocked reason indicates AI fallback disabled");
+  assert(fallbackDisabledResult.verdictReason.includes("AI provider unavailable"), "Blocked reason indicates AI fallback disabled");
 
   // 3. Engine Rejection Logging Verification
   console.log("\nTesting BinanceAutoTrade rejection logs...");

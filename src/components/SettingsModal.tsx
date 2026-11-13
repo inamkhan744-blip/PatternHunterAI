@@ -20,6 +20,8 @@ import {
   Copy,
   Play,
   RotateCw,
+  BrainCircuit,
+  Loader2,
 } from "lucide-react";
 import { usePWAInstall } from "../lib/pwa";
 import { pushNotificationService } from "../lib/PushNotification";
@@ -47,6 +49,16 @@ import {
   saveExchangeCredentials,
   testExchangeConnectivity,
 } from "../lib/MultiExchange";
+import {
+  AI_PROVIDER_IDS,
+  AI_PROVIDER_META,
+  DEFAULT_GLOBAL_AI_CONFIG,
+  fetchGlobalAIConfig,
+  listConfiguredProviders,
+  saveGlobalAIConfig,
+  type AIProvider,
+  type GlobalAIConfig,
+} from "../lib/AIService";
 interface Props {
   open: boolean;
   onClose: () => void;
@@ -59,6 +71,13 @@ interface ToastState {
   type: "success" | "error";
   message: string;
 }
+
+/** Which GlobalAIConfig fields back each provider's key + model input. */
+const PROVIDER_FIELDS: Record<AIProvider, { key: keyof GlobalAIConfig; model: keyof GlobalAIConfig }> = {
+  gemini: { key: "geminiApiKey", model: "geminiModel" },
+  deepseek: { key: "deepseekApiKey", model: "deepseekModel" },
+  groq: { key: "groqApiKey", model: "groqModel" },
+};
 
 export default function SettingsModal({
   open,
@@ -100,6 +119,16 @@ export default function SettingsModal({
   const [toast, setToast] = useState<ToastState | null>(null);
   const [saveSuccess, setSaveSuccess] = useState(false);
 
+  // Admin-only Global AI Config State
+  const [aiConfig, setAiConfig] = useState<GlobalAIConfig>(() => ({ ...DEFAULT_GLOBAL_AI_CONFIG }));
+  const [aiConfigLoading, setAiConfigLoading] = useState(false);
+  const [aiConfigSaving, setAiConfigSaving] = useState(false);
+  const [visibleAiKeys, setVisibleAiKeys] = useState<Record<AIProvider, boolean>>({
+    gemini: false,
+    deepseek: false,
+    groq: false,
+  });
+
   // TradingView Webhook State
   const [webhookUrl, setWebhookUrl] = useState<string>("");
   const [copiedUrl, setCopiedUrl] = useState(false);
@@ -140,6 +169,61 @@ export default function SettingsModal({
     setToast(null);
     setSaveSuccess(false);
   }, [open, selectedExchange]);
+
+  // Load the admin-managed AI configuration. Only admins see (or may write) it;
+  // RLS on global_settings enforces the same rule server-side.
+  useEffect(() => {
+    if (!open || !isAdmin) return;
+    let cancelled = false;
+    setAiConfigLoading(true);
+    void fetchGlobalAIConfig(true)
+      .then((config) => {
+        if (!cancelled) setAiConfig(config);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setToast({
+            type: "error",
+            message: err instanceof Error ? err.message : "Failed to load the global AI configuration.",
+          });
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setAiConfigLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, isAdmin]);
+
+  const updateAiConfig = (patch: Partial<GlobalAIConfig>) => {
+    setAiConfig((prev) => ({ ...prev, ...patch }));
+  };
+
+  const setProviderField = (provider: AIProvider, field: "key" | "model", value: string) => {
+    const target = PROVIDER_FIELDS[provider][field];
+    setAiConfig((prev) => ({ ...prev, [target]: value }) as GlobalAIConfig);
+  };
+
+  const handleSaveGlobalAIConfig = async () => {
+    if (!isAdmin) return;
+    setAiConfigSaving(true);
+    try {
+      const saved = await saveGlobalAIConfig(aiConfig);
+      setAiConfig(saved);
+      setToast({
+        type: "success",
+        message: `Global AI config saved. Active provider: ${AI_PROVIDER_META[saved.activeProvider].label}.`,
+      });
+    } catch (err) {
+      setToast({
+        type: "error",
+        message: err instanceof Error ? err.message : "Failed to save the global AI configuration.",
+      });
+    } finally {
+      setAiConfigSaving(false);
+    }
+  };
 
   const handleRequestPushPermission = async () => {
     const res = await pushNotificationService.requestPermission();
@@ -614,6 +698,161 @@ export default function SettingsModal({
               </button>
             </div>
           </div>
+
+          {/* Global AI Config — ADMIN ONLY (keys are shared by every signed-in user) */}
+          {isAdmin && (
+            <div className="p-4 rounded-xl bg-[#0d121f] border border-emerald-500/30 space-y-4">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-2 font-mono">
+                  <BrainCircuit className="w-4 h-4 text-emerald-400" />
+                  Global AI Config
+                </span>
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded border border-emerald-500/40 bg-emerald-950/60 text-[#00ff66]">
+                  ADMIN ONLY
+                </span>
+              </div>
+
+              <p className="text-[11px] text-slate-400 leading-relaxed">
+                Shared provider keys used by every signed-in user. AI requests now go straight from the
+                browser to the selected provider — the <span className="text-slate-300 font-mono">ai-chat</span>{" "}
+                edge function is no longer involved.
+              </p>
+
+              {aiConfigLoading ? (
+                <div className="flex items-center gap-2 text-[11px] text-slate-400 font-mono">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-400" />
+                  Loading global AI configuration…
+                </div>
+              ) : (
+                <>
+                  <div>
+                    <label className="text-[11px] font-medium text-slate-300 block mb-1">
+                      Active AI Provider
+                    </label>
+                    <select
+                      value={aiConfig.activeProvider}
+                      onChange={(e) => updateAiConfig({ activeProvider: e.target.value as AIProvider })}
+                      className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 focus:border-emerald-400 focus:outline-none text-xs text-white font-mono"
+                    >
+                      {AI_PROVIDER_IDS.map((provider) => (
+                        <option key={provider} value={provider}>
+                          {AI_PROVIDER_META[provider].label}
+                          {AI_PROVIDER_META[provider].supportsVision ? " · Vision capable" : " · Text only"}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="text-[10px] text-slate-500 mt-1">
+                      Configured keys:{" "}
+                      {listConfiguredProviders(aiConfig).length > 0
+                        ? listConfiguredProviders(aiConfig)
+                            .map((p) => AI_PROVIDER_META[p].label)
+                            .join(", ")
+                        : "none yet"}
+                      {" "}· Chat and Vision fall back to the next configured provider on failure · Vision always uses Gemini.
+                    </p>
+                  </div>
+
+                  {AI_PROVIDER_IDS.map((provider) => {
+                    const meta = AI_PROVIDER_META[provider];
+                    const fields = PROVIDER_FIELDS[provider];
+                    const isActive = aiConfig.activeProvider === provider;
+                    return (
+                      <div
+                        key={provider}
+                        className={`p-3 rounded-lg border space-y-2 ${
+                          isActive
+                            ? "bg-emerald-950/20 border-emerald-500/40"
+                            : "bg-slate-950 border-slate-800"
+                        }`}
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="text-[11px] font-bold text-slate-200 font-mono">{meta.label}</span>
+                          <span
+                            className={`text-[10px] font-mono px-1.5 py-0.5 rounded border ${
+                              isActive
+                                ? "bg-emerald-500/20 text-[#00ff66] border-emerald-500/40"
+                                : "bg-slate-800 text-slate-400 border-slate-700"
+                            }`}
+                          >
+                            {isActive ? "ACTIVE" : meta.supportsVision ? "VISION" : "TEXT"}
+                          </span>
+                        </div>
+
+                        <div>
+                          <label className="text-[11px] font-medium text-slate-300 block mb-1">
+                            {meta.label} API Key
+                          </label>
+                          <div className="relative">
+                            <input
+                              type={visibleAiKeys[provider] ? "text" : "password"}
+                              value={aiConfig[fields.key] as string}
+                              onChange={(e) => setProviderField(provider, "key", e.target.value)}
+                              placeholder={
+                                isActive
+                                  ? "Required for the active provider"
+                                  : `${meta.label} API key (optional)`
+                              }
+                              autoComplete="off"
+                              className="w-full px-3 py-2 pr-9 rounded-lg bg-slate-950 border border-slate-700 focus:border-emerald-400 focus:outline-none text-xs text-white placeholder-slate-600 font-mono"
+                            />
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setVisibleAiKeys((prev) => ({ ...prev, [provider]: !prev[provider] }))
+                              }
+                              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
+                              title={visibleAiKeys[provider] ? "Hide API key" : "Show API key"}
+                            >
+                              {visibleAiKeys[provider] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                            </button>
+                          </div>
+                        </div>
+
+                        <div>
+                          <label className="text-[11px] font-medium text-slate-300 block mb-1">
+                            {meta.label} Model Name
+                          </label>
+                          <input
+                            type="text"
+                            value={aiConfig[fields.model] as string}
+                            onChange={(e) => setProviderField(provider, "model", e.target.value)}
+                            placeholder={meta.defaultModel}
+                            autoComplete="off"
+                            className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 focus:border-emerald-400 focus:outline-none text-xs text-white placeholder-slate-600 font-mono"
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                  <button
+                    type="button"
+                    onClick={handleSaveGlobalAIConfig}
+                    disabled={aiConfigSaving}
+                    className="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-2 transition shadow-md shadow-emerald-950/40 font-mono disabled:opacity-60"
+                  >
+                    {aiConfigSaving ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        Saving Global Config…
+                      </>
+                    ) : (
+                      <>
+                        <Check className="w-4 h-4" />
+                        Save Global AI Config
+                      </>
+                    )}
+                  </button>
+
+                  <p className="text-[10px] text-slate-500 leading-relaxed">
+                    Stored in <span className="font-mono text-slate-400">global_settings</span> (id ={" "}
+                    <span className="font-mono text-slate-400">global_config</span>) and readable by signed-in
+                    clients, because the browser calls the providers directly. Only admins can write it.
+                  </p>
+                </>
+              )}
+            </div>
+          )}
 
           {/* TradingView Webhook Integration Section (Bloomberg Terminal Aesthetic) */}
           <div className="p-4 rounded-xl bg-[#080d1a] border border-amber-500/40 shadow-lg shadow-amber-950/20 space-y-4 font-mono">

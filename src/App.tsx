@@ -239,6 +239,8 @@ export default function App() {
   // Server-side (24/7) Auto-Pilot. The browser only mirrors the DB flag; the
   // execution loop lives in the auto-trade-worker edge function.
   const { enabled: serverAutoPilot, setEnabled: setServerAutoPilot } = useServerAutoPilot(user);
+  const [autoPilotSaving, setAutoPilotSaving] = useState(false);
+  const [autoPilotError, setAutoPilotError] = useState<string | null>(null);
 
   // Multi-Exchange State
   const [currentExchange, setCurrentExchange] = useState<ExchangeId>(() => getActiveExchange());
@@ -1637,7 +1639,15 @@ export default function App() {
       return;
     }
     const nextState = !serverAutoPilot;
+    const previousState = serverAutoPilot;
+    const previousEngineFlag = autoTradeEngine.getConfig().autoPilotEnabled;
     const cfg = autoTradeEngine.getConfig();
+
+    // Optimistic flip so the button responds instantly; reverted below if the
+    // database write fails.
+    setAutoPilotActive(nextState);
+    setAutoPilotSaving(true);
+    setAutoPilotError(null);
 
     const ok = await setServerAutoPilot(nextState, {
       marketType: cfg.marketType,
@@ -1649,9 +1659,22 @@ export default function App() {
       paperTrading: cfg.paperTradingEnabled,
     });
 
+    setAutoPilotSaving(false);
+
     if (!ok) {
-      setAutoPilotStatusText("Status: Could not update server Auto-Pilot — retrying on next refresh");
-      void refreshSubscription();
+      // Revert the optimistic toggle so the UI never claims a state the server
+      // does not have.
+      setAutoPilotActive(previousState);
+      autoTradeEngine.saveConfig({ autoPilotEnabled: previousEngineFlag });
+      setAutoPilotError(
+        `Could not ${nextState ? "enable" : "disable"} server Auto-Pilot. ` +
+          "Your toggle was reverted — check your connection and try again."
+      );
+      setAutoPilotStatusText(
+        previousState
+          ? "Status: Server Auto-Pilot armed — running 24/7 in the cloud"
+          : "Status: Auto-Pilot Idle"
+      );
       return;
     }
 
@@ -1665,13 +1688,14 @@ export default function App() {
       }
     }
     setAutoPilotActive(updated.autoPilotEnabled);
+    setAutoPilotError(null);
     setAutoPilotPauseReason(updated.autoPilotEnabled ? null : autoTradeEngine.getAutoPilotPauseReason());
     setAutoPilotStatusText(
       updated.autoPilotEnabled
         ? "Status: Server Auto-Pilot armed — running 24/7 in the cloud"
         : "Status: Auto-Pilot Idle"
     );
-  }, [effectiveIsPro, isAdmin, candles, serverAutoPilot, setServerAutoPilot, refreshSubscription]);
+  }, [effectiveIsPro, isAdmin, candles, serverAutoPilot, setServerAutoPilot]);
 
   // Reflect the authoritative server flag in the header, even after a reload.
   useEffect(() => {
@@ -1705,6 +1729,23 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-950 text-white flex flex-col lg:flex-row pb-16 lg:pb-0">
+      {/* Auto-Pilot save failure toast (the toggle has already been reverted) */}
+      {autoPilotError && (
+        <div
+          role="alert"
+          className="fixed bottom-20 lg:bottom-6 right-4 z-[70] max-w-sm px-4 py-3 rounded-xl bg-red-950 border border-red-500/70 text-red-200 text-xs font-semibold shadow-2xl flex items-start gap-2"
+        >
+          <span className="flex-1">{autoPilotError}</span>
+          <button
+            onClick={() => setAutoPilotError(null)}
+            className="text-red-300 hover:text-white font-black px-1"
+            aria-label="Dismiss Auto-Pilot error"
+          >
+            ×
+          </button>
+        </div>
+      )}
+
       {/* Desktop sidebar with consolidated sections */}
       <aside className="hidden lg:flex flex-col w-60 border-r border-slate-800 bg-slate-950/90 shrink-0 sticky top-0 h-screen overflow-y-auto">
         <div className="flex items-center gap-3 px-5 py-4 border-b border-slate-800">
@@ -1871,15 +1912,21 @@ export default function App() {
             <div className="flex items-center gap-1.5 flex-wrap justify-end py-0.5">
               {/* Single Auto-Pilot Toggle on Mobile Header */}
               <button
-                onClick={handleHeaderToggleAutoPilot}
-                className={`px-2 py-1.5 rounded-lg text-xs font-black uppercase tracking-wider flex items-center gap-1 border font-mono shrink-0 ${
+                onClick={() => void handleHeaderToggleAutoPilot()}
+                disabled={autoPilotSaving}
+                aria-busy={autoPilotSaving}
+                className={`px-2 py-1.5 rounded-lg text-xs font-black uppercase tracking-wider flex items-center gap-1 border font-mono shrink-0 disabled:opacity-60 disabled:cursor-wait ${
                   autoPilotActive
                     ? "bg-emerald-500/20 text-[#00ff66] border-emerald-400 animate-pulse"
                     : "bg-red-500/10 text-red-400 border-red-500/40"
                 }`}
               >
-                <Power className="w-3.5 h-3.5" />
-                <span>{autoPilotActive ? "ON" : "OFF"}</span>
+                {autoPilotSaving ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Power className="w-3.5 h-3.5" />
+                )}
+                <span>{autoPilotSaving ? "SAVING…" : autoPilotActive ? "ON" : "OFF"}</span>
               </button>
 
               <button
@@ -2295,16 +2342,30 @@ export default function App() {
 
                 {/* ONE Prominent AUTO-PILOT Toggle Button in the Top Header */}
                 <button
-                  onClick={handleHeaderToggleAutoPilot}
-                  className={`px-2.5 sm:px-3 py-1.5 rounded-lg font-black text-[11px] sm:text-xs uppercase tracking-wider flex items-center gap-1.5 sm:gap-2 transition-all border font-mono shrink-0 ${
+                  onClick={() => void handleHeaderToggleAutoPilot()}
+                  disabled={autoPilotSaving}
+                  aria-busy={autoPilotSaving}
+                  className={`px-2.5 sm:px-3 py-1.5 rounded-lg font-black text-[11px] sm:text-xs uppercase tracking-wider flex items-center gap-1.5 sm:gap-2 transition-all border font-mono shrink-0 disabled:opacity-60 disabled:cursor-wait ${
                     autoPilotActive
                       ? "bg-emerald-500/20 text-[#00ff66] border-emerald-400 shadow-[0_0_15px_rgba(0,255,102,0.4)] animate-pulse"
                       : "bg-red-500/10 text-red-400 border-red-500/50 hover:bg-red-500/20"
                   }`}
-                  title={autoPilotActive ? "Auto-Pilot is ON. Click to pause." : "Auto-Pilot is OFF. Click to enable high confluence execution."}
+                  title={
+                    autoPilotSaving
+                      ? "Saving Auto-Pilot state to the server…"
+                      : autoPilotActive
+                        ? "Auto-Pilot is ON. Click to pause."
+                        : "Auto-Pilot is OFF. Click to enable 24/7 server execution."
+                  }
                 >
-                  <Power className={`w-3.5 h-3.5 ${autoPilotActive ? "text-[#00ff66]" : "text-red-400"}`} />
-                  <span>AUTO-PILOT: {autoPilotActive ? "ON" : "OFF"}</span>
+                  {autoPilotSaving ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Power className={`w-3.5 h-3.5 ${autoPilotActive ? "text-[#00ff66]" : "text-red-400"}`} />
+                  )}
+                  <span>
+                    AUTO-PILOT: {autoPilotSaving ? "SAVING…" : autoPilotActive ? "ON" : "OFF"}
+                  </span>
                 </button>
 
                 {autoPilotPauseReason && (

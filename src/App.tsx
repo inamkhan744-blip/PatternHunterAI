@@ -63,7 +63,12 @@ import AutoTradeModal from "./components/AutoTradeModal";
 import { parseAnalysisPrices, getFallbackPrices } from "./lib/fallback";
 import { supabase } from "./lib/supabase";
 import { generateAIResponse, parseAIJson } from "./lib/AIService";
-import { canScan, incrementScanCount, getRemainingScans, FREE_LIMIT } from "./lib/scanLimit";
+import {
+  consumeServerScan,
+  fetchScanQuota,
+  getRemainingScans,
+  FREE_LIMIT,
+} from "./lib/scanLimit";
 import { useAuth } from "./lib/auth";
 import AuthScreen from "./components/AuthScreen";
 import ActivePositions from "./components/ActivePositions";
@@ -94,6 +99,10 @@ import { dcaBotEngine } from "./lib/DCABot";
 import { webhookService, type TradingViewSignal } from "./lib/WebhookService";
 import { useSubscription } from "./lib/useSubscription";
 import { useServerAutoPilot } from "./lib/ServerAutoPilot";
+import {
+  useTradingViewSignals,
+  type TradingViewSignal as RealtimeTradingViewSignal,
+} from "./lib/useTradingViewSignals";
 import { isLiveTradingConfigured, refreshCredentialStatus } from "./lib/CredentialVault";
 import { autoTradeEngine, MAX_SLIPPAGE_PCT } from "./lib/BinanceAutoTrade";
 import { liveWorkerLogStore } from "./lib/LiveWorkerLogStore";
@@ -275,6 +284,26 @@ export default function App() {
   // Server-side (24/7) Auto-Pilot. The browser only mirrors the DB flag; the
   // execution loop lives in the auto-trade-worker edge function.
   const { enabled: serverAutoPilot, setEnabled: setServerAutoPilot } = useServerAutoPilot(user);
+
+  // TradingView alerts were broadcast to a per-user channel with no subscriber.
+  const handleTradingViewSignal = useCallback((signal: RealtimeTradingViewSignal) => {
+    const direction = signal.direction.toUpperCase();
+    const price = Number(signal.price);
+    liveWorkerLogStore.addLog(
+      `TradingView alert: ${direction} ${signal.symbol}` +
+        (Number.isFinite(price) && price > 0 ? ` @ ${price}` : ""),
+      "success",
+      { symbol: signal.symbol }
+    );
+    void pushNotificationService.notifyPatternDetected({
+      symbol: signal.symbol,
+      patternName: "TradingView alert",
+      direction: direction.includes("SHORT") || direction.includes("SELL") ? "bearish" : "bullish",
+      price: Number.isFinite(price) ? price : 0,
+    });
+  }, []);
+
+  useTradingViewSignals(user?.id, handleTradingViewSignal);
   const [autoPilotSaving, setAutoPilotSaving] = useState(false);
   const [autoPilotError, setAutoPilotError] = useState<string | null>(null);
 
@@ -387,6 +416,10 @@ export default function App() {
     // record only, and trade/scan quotas are enforced server-side.
     void refreshSubscription();
     setRemainingScans(getRemainingScans());
+    // The server counter survives storage clearing and device changes.
+    void fetchScanQuota().then((quota) => {
+      if (quota) setRemainingScans(Math.max(0, quota.limit - quota.current));
+    });
 
     // Restore existing FOMO lock from localStorage if active
     const savedLockUntil = localStorage.getItem("anti_fomo_lock_until");
@@ -905,7 +938,10 @@ export default function App() {
       }
 
       // Duplicate protection is scoped to the symbol: other symbols remain tradable.
-      const executionMode: "REAL" | "PAPER" = isLiveTradingConfigured() ? "REAL" : "PAPER";
+      // Browser Auto-Pilot is a legacy fallback and is PAPER ONLY. Real-money
+      // execution belongs exclusively to the server worker, which persists
+      // order ids and reconciles brackets; running both paths double-traded.
+      const executionMode: "REAL" | "PAPER" = "PAPER";
       if (
         tradeManager.hasActivePosition(candidate.symbol, executionMode) ||
         autoTradeEngine.getOpenTrades().some((t) => t.symbol === candidate.symbol)
@@ -1010,7 +1046,6 @@ export default function App() {
           { symbol: candidate.symbol, direction, score: signal.score }
         );
 
-        if (executionMode === "PAPER") {
           const pResult = paperTradingEngine.executeOrder({
             symbol: candidate.symbol,
             entryPrice: livePrice,
@@ -1054,53 +1089,6 @@ export default function App() {
             );
           }
           return;
-        }
-
-        const res = await autoTradeEngine.executeTrade({
-          symbol: candidate.symbol,
-          entryPrice: livePrice,
-          atrValue: candidate.atr,
-          direction,
-          marketType: cfg.marketType,
-          autoPilot: true,
-          signalPrice: candidate.signalPrice,
-          orderType: "MARKET",
-        });
-
-        if (res.success && res.trade) {
-          tradeManager.addTrade({
-            symbol: res.trade.symbol,
-            entryPrice: res.trade.entryPrice,
-            currentPrice: livePrice,
-            quantity: res.trade.quantity,
-            stopLossPrice: res.trade.stopLossPrice,
-            takeProfitPrice: res.trade.takeProfitPrice,
-            direction: res.trade.direction,
-            marketType: res.trade.marketType,
-            leverage: res.trade.leverage,
-            source: "AUTO-PILOT",
-            mode: res.trade.executionMode === "PAPER" ? "PAPER" : "REAL",
-            customId: res.trade.id,
-            slOrderId: res.trade.slOrderId,
-            tpOrderId: res.trade.tpOrderId,
-            atrAtEntry: candidate.atr,
-          });
-          pushNotificationService
-            .notifyTradeExecution({
-              symbol: res.trade.symbol,
-              direction: res.trade.direction,
-              entryPrice: res.trade.entryPrice,
-              source: "Auto-Pilot AI Confluence",
-              mode: res.trade.executionMode === "PAPER" ? "PAPER" : "REAL",
-            })
-            .catch(() => {});
-        } else {
-          liveWorkerLogStore.addLog(
-            `Trade Blocked: ${res.error || "exchange rejected the order"}`,
-            "warn",
-            { symbol: candidate.symbol }
-          );
-        }
       } finally {
         autoPilotInFlight.current.delete(inFlightKey);
       }
@@ -1607,6 +1595,19 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
     setScanError(null);
     setScanResults([]);
     try {
+      // Claim the scan server-side before doing any work. Clearing localStorage
+      // used to reset the free quota; the database now owns it.
+      if (!effectiveIsPro && !isAdmin) {
+        const quota = await consumeServerScan();
+        if (quota) {
+          setRemainingScans(Math.max(0, quota.limit - quota.current));
+          if (!quota.allowed) {
+            setScanError(quota.reason ?? "Daily scan limit reached. Upgrade to Pro for unlimited scans.");
+            return;
+          }
+        }
+      }
+
       const coinsToScan = [...COINS.slice(0, 5), ...PRO_COINS.slice(0, 45)];
       const settled = await Promise.allSettled(
         coinsToScan.map(async (coin): Promise<ScanResult | null> => {
@@ -1628,10 +1629,6 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
         .map((s) => (s.status === "fulfilled" ? s.value : null))
         .filter((v): v is ScanResult => v !== null);
       setScanResults(results);
-      if (!effectiveIsPro && !isAdmin) {
-        incrementScanCount();
-        setRemainingScans(getRemainingScans());
-      }
     } catch (e) {
       setScanError(e instanceof Error ? e.message : "Scan failed.");
     } finally {
@@ -1647,8 +1644,9 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
   }, [effectiveIsPro, isAdmin, scanResults.length, scanning, runScan]);
 
   const handleFreeScan = useCallback(() => {
-    if (effectiveIsPro || isAdmin || canScan()) runScan();
-  }, [effectiveIsPro, isAdmin, runScan]);
+    // `remainingScans` is server-fed; the RPC inside runScan is the authority.
+    if (effectiveIsPro || isAdmin || remainingScans > 0) runScan();
+  }, [effectiveIsPro, isAdmin, remainingScans, runScan]);
 
   const selectCoinFromScan = useCallback((binanceSymbol: string) => {
     const coin = ALL_COINS.find((c) => c.binanceSymbol === binanceSymbol);
@@ -1697,6 +1695,9 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
         maxOpenTrades: cfg.maxOpenTrades,
         tradeDirectionMode: cfg.tradeDirectionMode,
         symbols: AUTO_PILOT_SCAN_UNIVERSE.map((coin) => coin.binanceSymbol),
+        // The worker only supports these timeframes; fall back to 1h.
+        timeframe:
+          timeframe === "15m" || timeframe === "1h" || timeframe === "4h" ? timeframe : "1h",
         paperTrading: cfg.paperTradingEnabled,
       });
     } catch (err) {
@@ -1732,7 +1733,7 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
         ? "Status: Server Auto-Pilot armed — running 24/7 in the cloud"
         : "Status: Auto-Pilot Idle"
     );
-  }, [effectiveIsPro, isAdmin, candles, serverAutoPilot, setServerAutoPilot]);
+  }, [effectiveIsPro, isAdmin, candles, serverAutoPilot, setServerAutoPilot, timeframe]);
 
   // Reflect the authoritative server flag in the header, even after a reload.
   useEffect(() => {

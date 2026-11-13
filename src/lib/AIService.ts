@@ -632,6 +632,65 @@ function buildProviderChain(config: GlobalAIConfig, requiresVision: boolean): AI
 // Public API
 // ---------------------------------------------------------------------------
 
+/** Raised only when `ai-chat` is not deployed / unreachable, so callers can fall back. */
+class AIProxyUnavailableError extends Error {}
+
+/**
+ * Server-side generation. Provider keys stay in the database and are only read
+ * by the `ai-chat` edge function with the service role.
+ */
+async function generateViaProxy(
+  prompt: string,
+  systemPrompt: string,
+  imageBase64: string | undefined,
+  imageMimeType: string,
+  options: AIRequestOptions
+): Promise<AIResponseResult> {
+  const { data, error } = await supabase.functions.invoke("ai-chat", {
+    body: {
+      prompt,
+      systemPrompt,
+      imageBase64: imageBase64 ?? null,
+      imageMimeType,
+      options: {
+        temperature: options.temperature,
+        maxOutputTokens: options.maxOutputTokens,
+        json: options.json,
+        timeoutMs: options.timeoutMs,
+      },
+    },
+  });
+
+  if (error) {
+    const status = (error as { context?: { status?: number } }).context?.status;
+    // 404 = function not deployed yet; no status = transport failure.
+    if (!status || status === 404) {
+      throw new AIProxyUnavailableError("ai-chat is unavailable");
+    }
+    throw new AIServiceError(`AI proxy rejected the request (HTTP ${status}).`);
+  }
+
+  const result = data as {
+    ok?: boolean;
+    text?: string;
+    provider?: AIProvider;
+    model?: string;
+    attempts?: AIAttemptFailure[];
+    error?: string;
+  } | null;
+
+  if (!result?.ok || !result.text) {
+    throw new AIServiceError(result?.error ?? "AI proxy returned no response.", result?.attempts ?? []);
+  }
+
+  return {
+    text: result.text,
+    provider: result.provider ?? "gemini",
+    model: result.model ?? "",
+    attempts: result.attempts ?? [],
+  };
+}
+
 /**
  * Generates an AI response using the admin-configured provider, with automatic
  * fallback to the next configured provider when the active one fails.
@@ -665,6 +724,21 @@ export async function generateAIResponse(
     : clean(options.imageMimeType, 64).toLowerCase() || "image/png";
   if (image && !/^image\/(png|jpeg|webp)$/.test(normalizedMime)) {
     throw new AIServiceError("Unsupported image type. Use PNG, JPG, or WEBP.");
+  }
+
+  try {
+    return await generateViaProxy(
+      safePrompt,
+      safeSystemPrompt,
+      image || undefined,
+      normalizedMime,
+      options
+    );
+  } catch (err) {
+    if (!(err instanceof AIProxyUnavailableError)) throw err;
+    // Self-hosted deployments that have not deployed `ai-chat` yet keep working
+    // for admins (the only role that can still read global_settings).
+    console.warn("[AIService] ai-chat unavailable; using direct provider fallback.");
   }
 
   const config = await fetchGlobalAIConfig();

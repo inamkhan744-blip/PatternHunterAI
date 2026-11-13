@@ -82,7 +82,10 @@ export async function fetchServerAutoPilotState(userId?: string): Promise<Server
  * Resolves only after the database confirms the write, and throws on failure so
  * a caller can never render a state the server does not have.
  */
-export async function setServerAutoPilotEnabled(enabled: boolean): Promise<true> {
+export async function setServerAutoPilotEnabled(
+  enabled: boolean,
+  config?: ServerAutoPilotConfig
+): Promise<{ enabled: boolean; config: ServerAutoPilotConfig }> {
   const {
     data: { user },
     error: authError,
@@ -102,6 +105,8 @@ export async function setServerAutoPilotEnabled(enabled: boolean): Promise<true>
     const { data, error } = await supabase.rpc("toggle_auto_pilot", {
       p_enabled: enabled,
       p_user_id: user.id,
+      // Without this the worker fell back to live Futures 5x defaults.
+      p_config: config ?? null,
     });
 
     if (error) {
@@ -109,7 +114,13 @@ export async function setServerAutoPilotEnabled(enabled: boolean): Promise<true>
       throw new Error(error.message);
     }
 
-    const result = data as { success?: boolean; error?: string; enabled?: boolean } | null;
+    const result = data as {
+      success?: boolean;
+      error?: string;
+      code?: string;
+      enabled?: boolean;
+      config?: ServerAutoPilotConfig;
+    } | null;
     // The function reports refusals in-band as { success: false, error }.
     if (result && result.success === false) {
       console.error("RPC Error:", result.error ?? result);
@@ -117,7 +128,10 @@ export async function setServerAutoPilotEnabled(enabled: boolean): Promise<true>
     }
 
     console.log("[ServerAutoPilot] rpc toggle_auto_pilot succeeded:", result);
-    return true;
+    return {
+      enabled: result?.enabled === true,
+      config: normalizeConfig(result?.config),
+    };
   } catch (err) {
     console.error("RPC Error:", err);
     throw err instanceof Error ? err : new Error(String(err));
@@ -173,11 +187,10 @@ export function useServerAutoPilot(user: User | null): {
   const setEnabled = useCallback(
     async (enabled: boolean, config?: ServerAutoPilotConfig) => {
       // Throws if the write fails; local state is only touched afterwards.
-      await setServerAutoPilotEnabled(enabled);
-      setState((prev) => ({
-        enabled,
-        config: { ...prev.config, ...(config ?? {}) },
-      }));
+      const next = await setServerAutoPilotEnabled(enabled, config);
+      // Trust the server's persisted config, not the caller's partial object:
+      // the RPC merges with existing values and fills safety defaults.
+      setState({ enabled: next.enabled, config: next.config });
       return true;
     },
     []

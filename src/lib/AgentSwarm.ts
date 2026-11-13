@@ -15,7 +15,7 @@ export interface SwarmAgentMessage {
   timestamp: string;
 }
 
-import { supabase } from "./supabase";
+import { generateAIResponse, parseAIJson } from "./AIService";
 
 import { liveWorkerLogStore } from "./LiveWorkerLogStore";
 
@@ -84,6 +84,53 @@ function clampConfidence(value: unknown): number | null {
   const n = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(n)) return null;
   return Math.min(100, Math.max(0, Math.round(n)));
+}
+
+function clampNumber(value: unknown, min: number, max: number, fallback: number): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback;
+}
+
+interface ValidatedSwarmPayload {
+  bullThesis: string;
+  bullConfidence: number;
+  bearThesis: string;
+  bearConfidence: number;
+  riskVerdict: "GO" | "NO-GO";
+  riskThesis: string;
+  recommendedDirection: "LONG" | "SHORT" | "HOLD";
+  recommendedLeverage: number;
+  recommendedPositionPct: number;
+}
+
+/**
+ * Validates the model-authored debate payload. A malformed verdict is never used
+ * as if it were a usable trading recommendation.
+ */
+function validSwarmPayload(raw: unknown): ValidatedSwarmPayload | null {
+  if (!raw || typeof raw !== "object") return null;
+  const o = raw as Record<string, unknown>;
+  const bull = sanitizeAiText(o.bullThesis, 700);
+  const bear = sanitizeAiText(o.bearThesis, 700);
+  const risk = sanitizeAiText(o.riskThesis, 700);
+  const verdict = o.riskVerdict === "GO" || o.riskVerdict === "NO-GO" ? o.riskVerdict : null;
+  const direction = ["LONG", "SHORT", "HOLD"].includes(String(o.recommendedDirection))
+    ? (String(o.recommendedDirection) as "LONG" | "SHORT" | "HOLD")
+    : null;
+
+  if (!bull || !bear || !verdict || !direction) return null;
+
+  return {
+    bullThesis: bull,
+    bullConfidence: clampNumber(o.bullConfidence, 0, 100, 50),
+    bearThesis: bear,
+    bearConfidence: clampNumber(o.bearConfidence, 0, 100, 50),
+    riskVerdict: verdict,
+    riskThesis: risk || "Risk thesis omitted by model.",
+    recommendedDirection: direction,
+    recommendedLeverage: clampNumber(o.recommendedLeverage, 1, 10, 1),
+    recommendedPositionPct: clampNumber(o.recommendedPositionPct, 0, 10, 0),
+  };
 }
 
 /**
@@ -222,7 +269,7 @@ export function simulateSwarmDebate(params: SwarmDebateParams): SwarmDebateResul
 
 /**
  * Local Heuristic Engine for AI Swarm:
- * Evaluates RSI, Confluence Score, and Pattern when Gemini API fails or times out.
+ * Evaluates RSI, Confluence Score, and Pattern when the AI provider fails or times out.
  * Instead of defaulting to NO-GO or failing completely, it dynamically verifies
  * whether the setup qualifies for execution under deterministic quant rules.
  */
@@ -234,7 +281,7 @@ export function evaluateLocalHeuristicEngine(params: SwarmDebateParams): SwarmDe
     return {
       ...result,
       verdict: "NO-GO",
-      verdictReason: "Gemini API unavailable and AI Fallback Mode is disabled in Auto-Pilot settings.",
+      verdictReason: "AI provider unavailable and AI Fallback Mode is disabled in Auto-Pilot settings.",
       isFallback: true,
     };
   }
@@ -248,8 +295,10 @@ export function evaluateLocalHeuristicEngine(params: SwarmDebateParams): SwarmDe
 
 /**
  * Real AI Swarm Generator:
- * Invokes Supabase Edge Function 'ai-chat' with action: 'swarm'.
- * Gracefully falls back to Local Heuristic Engine without blocking trades when AI is unavailable.
+ * Asks the active AI provider (Gemini / DeepSeek / Groq, admin-selected) for the
+ * three-agent debate directly from the browser via AIService.
+ * Gracefully falls back to the Local Heuristic Engine without blocking trades when
+ * no provider is reachable.
  */
 export async function runRealSwarmDebate(params: SwarmDebateParams): Promise<SwarmDebateResult> {
   const now = new Date();
@@ -288,69 +337,64 @@ export async function runRealSwarmDebate(params: SwarmDebateParams): Promise<Swa
     };
   }
 
-  const executeEdgeFunction = async () => {
-    return await Promise.race([
-      supabase.functions.invoke("ai-chat", {
-        body: {
-          action: "swarm",
-          symbol: params.symbol,
-          price: params.price,
-          rsi: params.rsi,
-          trend: params.trend,
-          patternName: params.patternName,
-          patternDirection: params.patternDirection,
-          fearGreed: params.fearGreed,
-          atrValue: params.atrValue,
-          spreadPct: params.spreadPct,
-          confluenceScore: params.confluenceScore ?? 75,
-          dataTimestamp: params.dataTimestamp,
-        },
-      }),
-      new Promise<{ data: null; error: Error }>((_, reject) =>
-        setTimeout(() => reject(new Error("AI Edge Function timeout (8s)")), 8000)
-      ),
-    ]);
-  };
+  const prompt = `You are an elite hedge fund investment committee debating an algorithmic trade setup.
+Asset: ${params.symbol}
+Current Price: $${params.price}
+RSI(14): ${params.rsi ?? 50}
+Trend: ${params.trend ?? "neutral"}
+Pattern: ${params.patternName ?? "Consolidation"} (${params.patternDirection ?? "neutral"})
+Fear & Greed Index: ${params.fearGreed ?? 50}
+ATR: ${params.atrValue ?? "N/A"}
+Spread %: ${params.spreadPct ?? "0.02%"}
+Preliminary Confluence Score: ${params.confluenceScore ?? 75}/100
+
+Produce a JSON response strictly matching this schema with NO markdown code fences:
+{
+  "bullThesis": "Concise high-conviction bullish argument from Bull Agent (max 3 sentences)",
+  "bullConfidence": 85,
+  "bearThesis": "Concise risk/supply warning from Bear Agent (max 3 sentences)",
+  "bearConfidence": 70,
+  "riskVerdict": "GO" or "NO-GO",
+  "riskThesis": "Concise risk assessment and sizing rationale from Risk Manager (max 3 sentences)",
+  "recommendedDirection": "LONG" or "SHORT" or "HOLD",
+  "recommendedLeverage": 3,
+  "recommendedPositionPct": 2.5
+}`;
+
+  const systemPrompt =
+    "You are the risk committee of a quantitative crypto fund. Debate both sides of the setup " +
+    "honestly, never invent data outside the supplied metrics, and reply with JSON only.";
 
   try {
-    const { data, error } = await executeEdgeFunction();
+    const aiResult = await generateAIResponse(prompt, systemPrompt, undefined, {
+      temperature: 0.3,
+      maxOutputTokens: 600,
+      json: true,
+      timeoutMs: 8000,
+    });
 
-    if (error || !data || data.unavailable) {
-      const reason = error ? error.message : data?.error || "AI Edge unavailable";
-      liveWorkerLogStore.addLog(`Gemini API Failed / Unavailable (${reason}) - Activating Local Heuristic Fallback`, "warn", { symbol: params.symbol });
-      return evaluateLocalHeuristicEngine(params);
+    let rawParsed: unknown = null;
+    try {
+      rawParsed = parseAIJson(aiResult.text);
+    } catch {
+      rawParsed = null;
     }
 
-    // Backend may return { success: true, data: { ...parsedAI } } or nested { data: { data: ... } } or raw object
-    const parsed = (data.data?.data ? data.data.data : data.data) || (data.bullThesis ? data : null);
+    const parsed = validSwarmPayload(rawParsed);
 
     if (!parsed) {
-      liveWorkerLogStore.addLog("Gemini response parse failed - Activating Local Heuristic Fallback", "warn", { symbol: params.symbol });
+      liveWorkerLogStore.addLog("AI response parse/schema validation failed - Activating Local Heuristic Fallback", "warn", { symbol: params.symbol });
       return evaluateLocalHeuristicEngine(params);
     }
 
     const baseSim = simulateSwarmDebate(params);
 
-    // --- Validate every AI-authored field before it can influence a decision ---
-    const bullThesis = sanitizeAiText(parsed.bullThesis, 700);
-    const bearThesis = sanitizeAiText(parsed.bearThesis, 700);
-    const riskThesis = sanitizeAiText(parsed.riskThesis, 700);
-    const aiVerdict = parsed.riskVerdict === "GO" || parsed.riskVerdict === "NO-GO" ? parsed.riskVerdict : null;
-    const aiDirection =
-      parsed.recommendedDirection === "LONG" ||
-      parsed.recommendedDirection === "SHORT" ||
-      parsed.recommendedDirection === "HOLD"
-        ? parsed.recommendedDirection
-        : null;
-
-    if (!aiVerdict || !bullThesis || !bearThesis) {
-      liveWorkerLogStore.addLog(
-        "Gemini response failed schema validation - using deterministic engine instead",
-        "warn",
-        { symbol: params.symbol }
-      );
-      return evaluateLocalHeuristicEngine(params);
-    }
+    // Every AI-authored field was already sanitised + enum-validated above.
+    const bullThesis = parsed.bullThesis;
+    const bearThesis = parsed.bearThesis;
+    const riskThesis = parsed.riskThesis;
+    const aiVerdict = parsed.riskVerdict;
+    const aiDirection = parsed.recommendedDirection;
 
     // The LLM may never *create* a GO that the deterministic gates reject. It can
     // only confirm or downgrade the quantitative verdict.
@@ -410,7 +454,7 @@ export async function runRealSwarmDebate(params: SwarmDebateParams): Promise<Swa
       verdictReason: verdictMessage,
       // Direction must be a validated enum, and a non-executable verdict can never
       // recommend a position.
-      recommendedDirection: isGo ? aiDirection ?? baseSim.recommendedDirection : "HOLD",
+      recommendedDirection: isGo ? aiDirection : "HOLD",
       recommendedLeverage: Math.min(10, Math.max(1, Number(parsed.recommendedLeverage) || baseSim.recommendedLeverage)),
       recommendedPositionPct: isGo
         ? Math.min(10, Math.max(0.5, Number(parsed.recommendedPositionPct) || baseSim.recommendedPositionPct))
@@ -421,9 +465,9 @@ export async function runRealSwarmDebate(params: SwarmDebateParams): Promise<Swa
       isFallback: false,
     };
   } catch (err) {
-    console.error("[AI Swarm] ai-chat invoke failed:", err);
+    console.error("[AI Swarm] generateAIResponse failed:", err);
     const errMsg = err instanceof Error ? err.message : String(err);
-    liveWorkerLogStore.addLog(`Gemini API Timeout/Error (${errMsg}) - Falling back to Local Heuristic Engine`, "warn", { symbol: params.symbol });
+    liveWorkerLogStore.addLog(`AI provider unavailable (${errMsg}) - Falling back to Local Heuristic Engine`, "warn", { symbol: params.symbol });
     return evaluateLocalHeuristicEngine(params);
   }
 }

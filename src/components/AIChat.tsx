@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { Send, Mic, Loader2, Sparkles, Trash2, Volume2 } from "lucide-react";
 import type { ChatMessage, Coin } from "../types";
 import { COINS, PRO_COINS } from "../constants";
-import { supabase } from "../lib/supabase";
+import { generateAIResponse } from "../lib/AIService";
 
 interface Props {
   coin: Coin;
@@ -137,32 +137,38 @@ export default function AIChat({
       fearGreed: fearGreed ?? undefined,
     };
 
+    const history = messages
+      .slice(-8)
+      .map((m) => `${m.role}: ${m.content.slice(0, 600)}`)
+      .join("\n");
+
+    const systemPrompt = `You are PatternHunter AI, an expert cryptocurrency trading assistant integrated into a real-time crypto pattern detection app.
+You help users understand market conditions, analyze patterns, and make informed trading decisions.
+
+Current market context:
+- Coin: ${currentContext.coin}
+- Price: ${currentContext.price}
+- 24h Change: ${currentContext.change24h ?? "N/A"}
+- RSI: ${currentContext.rsi ?? "N/A"}
+- Trend: ${currentContext.trend ?? "N/A"}
+- Detected Pattern: ${currentContext.pattern ?? "None"}
+- Fear & Greed Index: ${currentContext.fearGreed ?? "N/A"}
+
+${history ? `Previous conversation:\n${history}\n` : ""}
+Guidelines:
+- Be concise but thorough. Use clear, professional language.
+- When users ask to "show" or "display" a coin chart, respond with: [ACTION:show_chart:SYMBOL].
+- Trading guidance is educational, never financial advice. Always include a disclaimer for trade-related questions.
+- Keep responses under 150 words unless the user asks for detail.
+- Use plain text with line breaks, no markdown headers.`;
+
     try {
-      const { data, error: invokeError } = await supabase.functions.invoke("ai-chat", {
-        body: {
-          action: "chat",
-          message: text,
-          marketContext: currentContext,
-          dataTimestamp,
-          conversationHistory: messages.slice(-8).map((m) => ({ role: m.role, content: m.content })),
-        },
+      const aiResult = await generateAIResponse(text, systemPrompt, undefined, {
+        temperature: 0.6,
+        maxOutputTokens: 500,
       });
 
-      if (invokeError) {
-        throw new Error(invokeError.message || "AI backend service error");
-      }
-
-      // Check wrapped format { success: true, data: { ... } } or { response: "..." }
-      const resolvedReply =
-        data?.response ||
-        (data?.data && typeof data.data === "string" ? data.data : data?.data?.response || data?.data?.explanation || data?.data?.text) ||
-        null;
-
-      if (data?.unavailable || !resolvedReply) {
-        throw new Error(data?.error || "AI edge unavailable");
-      }
-
-      const replyText: string = String(resolvedReply).slice(0, 6000);
+      const replyText: string = aiResult.text.slice(0, 6000);
       const actionTag = replyText.match(/\[ACTION:show_chart:(\w+)\]/);
       if (actionTag) {
         const sym = actionTag[1].toUpperCase();
@@ -172,7 +178,7 @@ export default function AIChat({
       const reply: ChatMessage = { role: "assistant", content: cleanText, timestamp: Date.now() };
       setMessages((prev) => [...prev, reply]);
     } catch (err) {
-      console.error("[AI Chat] ai-chat invoke failed:", err);
+      console.error("[AI Chat] generateAIResponse failed:", err);
       const reason = err instanceof Error ? err.message : "AI service unavailable";
       // Do not impersonate the assistant. State plainly that AI is unavailable and
       // show only raw, attributable metrics the app itself measured.

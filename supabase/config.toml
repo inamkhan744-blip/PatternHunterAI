@@ -2,12 +2,6 @@ project_id = ""
 
 # Every user-facing function requires a verified Supabase JWT at the gateway.
 # The functions also re-verify the token server-side (defence in depth).
-[functions.ai-chat]
-verify_jwt = true
-
-[functions.explain-pattern]
-verify_jwt = true
-
 [functions.binance-proxy]
 verify_jwt = true
 

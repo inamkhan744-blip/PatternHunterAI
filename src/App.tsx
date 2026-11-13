@@ -59,6 +59,7 @@ import { rsi, sma, atr } from "./lib/indicators";
 import AutoTradeModal from "./components/AutoTradeModal";
 import { parseAnalysisPrices, getFallbackPrices } from "./lib/fallback";
 import { supabase } from "./lib/supabase";
+import { generateAIResponse, parseAIJson } from "./lib/AIService";
 import { canScan, incrementScanCount, getRemainingScans, FREE_LIMIT } from "./lib/scanLimit";
 import { useAuth } from "./lib/auth";
 import AuthScreen from "./components/AuthScreen";
@@ -265,7 +266,7 @@ export default function App() {
           setAutoPilotStatusText(`Status: ${reason}`);
         } else if (latestLog.message.includes("Auto-Pilot Paused")) {
           setAutoPilotStatusText("Status: Auto-Pilot Paused — AI Engine Offline");
-        } else if (latestLog.message.includes("AI Engine Offline") || latestLog.message.includes("Gemini API")) {
+        } else if (latestLog.message.includes("AI Engine Offline") || latestLog.message.includes("AI provider")) {
           setAutoPilotStatusText("Status: AI Engine Offline — paused");
         } else if (latestLog.message.includes("Cooldown active")) {
           setAutoPilotStatusText("Status: Cooldown active — preventing revenge trading");
@@ -1361,49 +1362,45 @@ export default function App() {
     setAiError(null);
 
     try {
-      // First try 'ai-chat' with action: 'explain'
-      let responseData: unknown = null;
-      const { data: aiChatData, error: aiChatError } = await supabase.functions.invoke("ai-chat", {
-        body: {
-          action: "explain",
-          patternName: pattern.name,
-          direction: pattern.direction,
-          description: pattern.description,
-          coin: selectedCoin.symbol,
-          price: lastPrice,
-          recentCandles: candles.slice(-20),
-        },
+      const candleSummary = candles
+        .slice(-20)
+        .map((c) => (typeof c?.close === "number" ? c.close.toFixed(2) : null))
+        .filter((v): v is string => v !== null)
+        .join(", ");
+
+      const prompt = `A technical pattern has been detected on ${selectedCoin.symbol}/USDT.
+Pattern: ${pattern.name}
+Direction: ${pattern.direction}
+Description: ${pattern.description}
+Current Price: $${lastPrice}
+Recent Close Prices: ${candleSummary || "N/A"}
+
+Produce a JSON response strictly matching this schema with NO markdown code fences:
+{
+  "explanation": "Pattern found: ${pattern.name} at $${lastPrice.toFixed(2)}. <concise summary>",
+  "entry": <calculated numeric entry price>,
+  "sl": <calculated numeric stop loss price>,
+  "tp": <calculated numeric take profit price>,
+  "reasoning": "<1-2 sentences explaining the institutional edge and invalidation conditions>"
+}`;
+
+      const systemPrompt =
+        "You are a Senior Quantitative Analyst & Pattern Specialist. Base every level on the supplied " +
+        "price and candle data, keep stop/target on the protecting side of entry, and reply with JSON only.";
+
+      const aiResult = await generateAIResponse(prompt, systemPrompt, undefined, {
+        temperature: 0.2,
+        maxOutputTokens: 600,
+        json: true,
       });
 
-      if (!aiChatError && aiChatData && !aiChatData.unavailable) {
-        responseData = aiChatData;
-      } else {
-        // Log the raw failure before falling back: "Failed to send a request to
-        // the Edge Function" hides whether it was a 404 (not deployed), a 401
-        // (bad session) or a network/CORS rejection.
-        console.error(
-          "[AI Analysis] ai-chat invoke failed:",
-          aiChatError ?? aiChatData
-        );
-        // Fallback to 'explain-pattern' function
-        const { data: explainData, error: explainError } = await supabase.functions.invoke("explain-pattern", {
-          body: {
-            patternName: pattern.name,
-            direction: pattern.direction,
-            description: pattern.description,
-            coin: selectedCoin.symbol,
-            price: lastPrice,
-            recentCandles: candles.slice(-20),
-          },
-        });
-        if (explainError || explainData?.unavailable) {
-          throw explainError || new Error(explainData?.error || "All AI edges unavailable");
-        }
-        responseData = explainData;
+      let resolvedData: unknown = null;
+      try {
+        resolvedData = parseAIJson(aiResult.text);
+      } catch {
+        // A non-JSON reply is still shown as free text rather than discarded.
+        resolvedData = aiResult.text;
       }
-
-      // Backend may return direct format { explanation } or wrapped format { success: true, data: { ...parsedAI } | string, modelUsed: "..." }
-      const resolvedData = (responseData as { data?: unknown })?.data !== undefined ? (responseData as { data: unknown }).data : responseData;
 
       let text = "";
       let entryVal: number | null = null;

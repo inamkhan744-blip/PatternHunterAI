@@ -16,6 +16,7 @@
 import {
   adminClient,
   clampString,
+  corsHeaders,
   decryptSecret,
   enforceRateLimit,
   hmacSha256Hex,
@@ -117,13 +118,15 @@ Deno.serve(async (req: Request) => {
     if (!auth.user) return auth.response!;
     const userId = auth.user.id;
 
-    const perMinute = await enforceRateLimit(userId, "binance-proxy:min", 120, 60);
-    if (!perMinute) {
-      return json({ error: "Rate limit exceeded (120 requests/minute)." }, 429);
-    }
+    // Check the hourly window first: otherwise every rejected hourly request
+    // still burned a minute-bucket slot.
     const perHour = await enforceRateLimit(userId, "binance-proxy:hour", 1000, 3600);
     if (!perHour) {
       return json({ error: "Hourly limit reached (1000 requests/hour)." }, 429);
+    }
+    const perMinute = await enforceRateLimit(userId, "binance-proxy:min", 120, 60);
+    if (!perMinute) {
+      return json({ error: "Rate limit exceeded (120 requests/minute)." }, 429);
     }
 
     let payload: Record<string, unknown>;
@@ -240,7 +243,7 @@ Deno.serve(async (req: Request) => {
     return new Response(text, {
       status: upstream.status,
       headers: {
-        ...corsHeadersForResponse(),
+        ...corsHeaders(req),
         "Content-Type": contentType,
         "Cache-Control": "no-store",
       },
@@ -250,13 +253,3 @@ Deno.serve(async (req: Request) => {
     return json({ error: "Binance proxy internal processing error" }, 500);
   }
 });
-
-function corsHeadersForResponse(): Record<string, string> {
-  // Reuse the shared CORS policy while keeping the response builder local.
-  return {
-    "Access-Control-Allow-Origin": Deno.env.get("FRONTEND_ORIGIN") || "*",
-    "Vary": "Origin",
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-  };
-}

@@ -8,6 +8,15 @@ verify_jwt = true
 [functions.binance-credentials]
 verify_jwt = true
 
+# Provider keys never leave the server; callers are verified inside the function.
+[functions.ai-chat]
+verify_jwt = true
+
+# pg_cron cannot present a Supabase JWT. The function authenticates the
+# x-cron-secret (constant-time compare) or a service-role bearer token itself.
+[functions.auto-trade-worker]
+verify_jwt = false
+
 # TradingView cannot send a Supabase JWT, so the gateway check is disabled.
 # This function authenticates every request itself: 256-bit per-user token
 # (hashed lookup + constant-time compare), mandatory timestamp within +/- 300 s,

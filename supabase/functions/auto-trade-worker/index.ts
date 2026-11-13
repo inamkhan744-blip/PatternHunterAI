@@ -9,11 +9,15 @@
  * `20261112180000_server_auto_pilot.sql` migration for the schedule).
  *
  * PER RUN, PER ENABLED USER
- *   1. Respect a 55s cooldown so overlapping cron invocations cannot double-trade.
- *   2. Decrypt the user's Binance keys from the vault (service role only).
- *   3. Score fresh 15m candles with the server Confluence engine (HTF 1h/4h).
- *   4. Execute at most one trade when the score is >= 85, with ATR-based sizing,
- *      a stop-loss / take-profit bracket, and a `trades` row for the UI.
+ *   1. Re-check entitlement server-side: Pro, not banned, not expired, global
+ *      maintenance/Auto-Pilot flags clear.
+ *   2. Respect a 55s cooldown so overlapping cron invocations cannot double-trade.
+ *   3. Settle paper positions and reconcile live brackets before opening anything.
+ *   4. Decrypt the user's Binance keys from the vault (service role only). Live
+ *      mode only: paper trading must never require exchange credentials.
+ *   5. Score fresh candles with the server Confluence engine (HTF 1h/4h).
+ *   6. Open up to maxOpenTrades positions with ATR-based sizing, a stop-loss /
+ *      take-profit bracket, and a `trades` row containing the exchange order ids.
  *
  * AUTH
  *   - pg_cron:   x-cron-secret: <AUTOPILOT_CRON_SECRET>   (compared in constant time)
@@ -41,6 +45,10 @@ import { evaluateServerConfluence } from "../_shared/confluence.ts";
 
 const MAX_USERS_PER_RUN = 25;
 const RUN_COOLDOWN_MS = 55_000;
+/** Soft deadline for one user, so a slow exchange cannot consume the whole batch. */
+const USER_RUN_BUDGET_MS = 15_000;
+/** Virtual starting balance for server-side paper trading. */
+const PAPER_STARTING_BALANCE = 10_000;
 const DEFAULT_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"];
 const DEFAULT_TIMEFRAME = "15m";
 const MIN_CONFLUENCE_SCORE = 85;
@@ -66,6 +74,26 @@ interface PilotConfig {
 interface ProfileRow {
   id: string;
   auto_pilot_config: Record<string, unknown> | null;
+  is_banned: boolean | null;
+  role: string | null;
+  subscription_tier: string | null;
+  subscription_status: string | null;
+  subscription_expires_at: string | null;
+  auto_pilot_armed_at: string | null;
+}
+
+interface GlobalFlags {
+  maintenanceMode: boolean;
+  autoPilotEnabled: boolean;
+}
+
+function isProProfile(profile: ProfileRow): boolean {
+  if (profile.role === 'admin') return true;
+  if (profile.subscription_tier !== 'pro' && profile.subscription_tier !== 'premium') return false;
+  if (profile.subscription_status !== 'active' && profile.subscription_status !== 'trialing') return false;
+  if (!profile.subscription_expires_at) return true;
+  const expires = Date.parse(profile.subscription_expires_at);
+  return Number.isFinite(expires) && expires > Date.now();
 }
 
 function asNumber(value: unknown, fallback: number, min: number, max: number): number {
@@ -98,7 +126,25 @@ function normalizeConfig(raw: Record<string, unknown> | null): PilotConfig {
     maxOpenTrades: Math.round(asNumber(config.maxOpenTrades, 2, 1, 5)),
     tradeDirectionMode: (["BOTH", "LONG_ONLY", "SHORT_ONLY"].includes(mode) ? mode : "BOTH") as DirectionMode,
     minScore: Math.max(MIN_CONFLUENCE_SCORE, Math.round(asNumber(config.minScore, MIN_CONFLUENCE_SCORE, 0, 100))),
-    paperTrading: config.paperTrading === true,
+    // Safety default: anything that is not an explicit boolean false runs paper.
+    // This prevents a legacy/empty config from silently enabling live trading.
+    paperTrading: config.paperTrading === false ? false : true,
+  };
+}
+
+async function loadGlobalFlags(
+  supabase: ReturnType<typeof adminClient>
+): Promise<GlobalFlags> {
+  const { data } = await supabase
+    .from('global_settings')
+    .select('maintenance_mode, enable_autopilot')
+    .eq('id', 'global_config')
+    .maybeSingle();
+
+  return {
+    maintenanceMode: data?.maintenance_mode === true,
+    // Fail open only if the row/column is unavailable, matching the client.
+    autoPilotEnabled: data?.enable_autopilot !== false,
   };
 }
 
@@ -110,7 +156,13 @@ function isAuthorized(req: Request): boolean {
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
   const header = req.headers.get("Authorization") ?? "";
   const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
-  return Boolean(serviceKey && token && timingSafeEqual(serviceKey, token));
+  // pg_cron/pg_net jobs conventionally send the secret on `apikey`.
+  const apiKeyHeader = req.headers.get("apikey") ?? "";
+  return Boolean(
+    serviceKey &&
+      ((token && timingSafeEqual(serviceKey, token)) ||
+        (apiKeyHeader && timingSafeEqual(serviceKey, apiKeyHeader)))
+  );
 }
 
 async function logEvent(
@@ -129,7 +181,10 @@ async function logEvent(
       symbol: symbol ?? null,
       details: details ?? null,
     });
-    await supabase.rpc("trim_auto_pilot_events", { p_keep: MAX_EVENTS_KEPT });
+    await supabase.rpc("trim_auto_pilot_events", {
+      p_user_id: userId,
+      p_keep: MAX_EVENTS_KEPT,
+    });
   } catch {
     // Logging must never break execution.
   }
@@ -191,11 +246,14 @@ async function accountBalance(
 
 interface ExecutionResult {
   ok: boolean;
-  tradeId?: string;
   entryPrice?: number;
   quantity?: number;
   stopLoss?: number;
   takeProfit?: number;
+  entryOrderId?: string;
+  slOrderId?: string;
+  tpOrderId?: string;
+  fees?: number;
   error?: string;
 }
 
@@ -254,6 +312,7 @@ async function executeOnBinance(
 
     const closeSide = direction === "LONG" ? "SELL" : "BUY";
     const entryPrice = Number((entry.data?.avgPrice as string) ?? price) || price;
+    const entryOrderId = entry.data?.orderId ? String(entry.data.orderId) : undefined;
 
     // Protective bracket: fail the trade closed if the stop cannot be placed.
     const stop = await binanceSigned(apiKey, apiSecret, {
@@ -285,7 +344,7 @@ async function executeOnBinance(
       return { ok: false, error: `Stop-loss rejected, position closed: ${stop.error}` };
     }
 
-    await binanceSigned(apiKey, apiSecret, {
+    const takeProfitOrder = await binanceSigned(apiKey, apiSecret, {
       target,
       method: "POST",
       path: "/fapi/v1/order",
@@ -299,12 +358,26 @@ async function executeOnBinance(
       },
     });
 
+    if (!takeProfitOrder.ok) {
+      // The stop is already live, so the position is protected. Surface the
+      // failure in the event log instead of pretending the bracket is complete.
+      console.warn(
+        `[auto-trade-worker] take-profit rejected for ${symbol}: ${takeProfitOrder.error ?? "unknown"}`
+      );
+    }
+
     return {
       ok: true,
       entryPrice,
       quantity,
       stopLoss: floorTo(stopLoss, 2),
       takeProfit: floorTo(takeProfit, 2),
+      entryOrderId,
+      slOrderId: stop.data?.orderId ? String(stop.data.orderId) : undefined,
+      tpOrderId: takeProfitOrder.data?.orderId
+        ? String(takeProfitOrder.data.orderId)
+        : undefined,
+      fees: 0,
     };
   }
 
@@ -326,7 +399,7 @@ async function executeOnBinance(
   const quantity = floorTo(executedQty, 6);
   if (!(quantity > 0)) return { ok: false, error: "Spot order filled with zero quantity." };
 
-  await binanceSigned(apiKey, apiSecret, {
+  const oco = await binanceSigned(apiKey, apiSecret, {
     target,
     method: "POST",
     path: "/api/v3/orderList/oco",
@@ -341,13 +414,281 @@ async function executeOnBinance(
     },
   });
 
+  if (!oco.ok) {
+    // A spot position without a stop is worse than no position. Close it now.
+    const unwind = await binanceSigned(apiKey, apiSecret, {
+      target,
+      method: "POST",
+      path: "/api/v3/order",
+      params: { symbol, side: "SELL", type: "MARKET", quantity },
+    });
+    return {
+      ok: false,
+      error: `Protective OCO was rejected${unwind.ok ? "; the spot position was closed" : "; manual intervention required to close the spot position"}: ${oco.error ?? "unknown error"}`,
+    };
+  }
+
   return {
     ok: true,
     entryPrice,
     quantity,
     stopLoss: floorTo(stopLoss, 2),
     takeProfit: floorTo(takeProfit, 2),
+    entryOrderId: entry.data?.orderId ? String(entry.data.orderId) : undefined,
+    tpOrderId: oco.data?.orderListId !== undefined ? String(oco.data.orderListId) : undefined,
+    fees: 0,
   };
+}
+
+interface OpenTradeRow {
+  id: string;
+  symbol: string;
+  direction: Direction;
+  entry_price: number | string;
+  quantity: number | string;
+  leverage: number | string | null;
+  market_type: string | null;
+  stop_loss_price: number | string | null;
+  take_profit_price: number | string | null;
+  sl_order_id: string | null;
+  tp_order_id: string | null;
+}
+
+function signedPnl(
+  direction: Direction,
+  entryPrice: number,
+  exitPrice: number,
+  quantity: number
+): number {
+  return (exitPrice - entryPrice) * quantity * (direction === "LONG" ? 1 : -1);
+}
+
+/** Virtual paper equity: starting balance plus every realised paper P&L. */
+async function paperAccountBalance(
+  supabase: ReturnType<typeof adminClient>,
+  userId: string
+): Promise<number> {
+  const { data } = await supabase
+    .from("trades")
+    .select("pnl")
+    .eq("user_id", userId)
+    .eq("is_paper", true)
+    .eq("status", "CLOSED")
+    .limit(1000);
+
+  const realised = (data ?? []).reduce((sum, row) => sum + Number(row.pnl ?? 0), 0);
+  return PAPER_STARTING_BALANCE + realised;
+}
+
+/** Settles paper positions whose SL/TP has been touched since the last run. */
+async function settlePaperPositions(
+  supabase: ReturnType<typeof adminClient>,
+  userId: string
+): Promise<number> {
+  const { data } = await supabase
+    .from("trades")
+    .select("id, symbol, direction, entry_price, quantity, leverage, market_type, stop_loss_price, take_profit_price, sl_order_id, tp_order_id")
+    .eq("user_id", userId)
+    .eq("is_paper", true)
+    .eq("status", "OPEN")
+    .limit(50);
+
+  const rows = (data ?? []) as OpenTradeRow[];
+  if (rows.length === 0) return 0;
+
+  const prices = new Map<string, number | null>();
+  let closed = 0;
+
+  for (const row of rows) {
+    const quantity = Number(row.quantity);
+    const entryPrice = Number(row.entry_price);
+    // Legacy broken rows have quantity 0 and cannot be settled meaningfully.
+    if (!(quantity > 0) || !(entryPrice > 0)) continue;
+
+    if (!prices.has(row.symbol)) {
+      prices.set(row.symbol, await fetchTickerPrice(row.symbol));
+    }
+    const price = prices.get(row.symbol);
+    if (price === null || price === undefined) continue;
+
+    const stop = Number(row.stop_loss_price ?? 0);
+    const target = Number(row.take_profit_price ?? 0);
+    const isLong = row.direction === "LONG";
+
+    let exitReason: "SL" | "TP" | null = null;
+    if (stop > 0 && (isLong ? price <= stop : price >= stop)) exitReason = "SL";
+    else if (target > 0 && (isLong ? price >= target : price <= target)) exitReason = "TP";
+    if (!exitReason) continue;
+
+    const exitPrice = exitReason === "SL" ? stop : target;
+    const pnl = signedPnl(row.direction, entryPrice, exitPrice, quantity);
+    const leverage = Math.max(1, Number(row.leverage ?? 1));
+    const margin = (entryPrice * quantity) / leverage;
+    const pnlPercent = margin > 0 ? (pnl / margin) * 100 : 0;
+
+    const { error } = await supabase
+      .from("trades")
+      .update({
+        status: "CLOSED",
+        exit_price: exitPrice,
+        exit_reason: exitReason,
+        pnl,
+        pnl_percent: pnlPercent,
+        closed_at: new Date().toISOString(),
+        closed_by: "AUTO_PILOT",
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", row.id)
+      .eq("user_id", userId)
+      .eq("status", "OPEN");
+
+    if (!error) closed += 1;
+  }
+
+  return closed;
+}
+
+async function closeLivePosition(
+  apiKey: string,
+  apiSecret: string,
+  params: { symbol: string; direction: Direction; quantity: number; marketType: "Spot" | "Futures" }
+): Promise<boolean> {
+  const target: MarketTarget = params.marketType === "Futures" ? "futures" : "spot";
+  const quantity = floorTo(params.quantity, 6);
+  if (!(quantity > 0)) return false;
+
+  const res = await binanceSigned(apiKey, apiSecret, {
+    target,
+    method: "POST",
+    path: target === "futures" ? "/fapi/v1/order" : "/api/v3/order",
+    params: {
+      symbol: params.symbol,
+      side: params.direction === "LONG" ? "SELL" : "BUY",
+      type: "MARKET",
+      quantity,
+      ...(target === "futures" ? { reduceOnly: "true" } : {}),
+    },
+  });
+
+  return res.ok;
+}
+
+async function markTradeClosed(
+  supabase: ReturnType<typeof adminClient>,
+  userId: string,
+  row: OpenTradeRow,
+  exitPrice: number,
+  exitReason: "SL" | "TP" | "MANUAL",
+  fees = 0
+): Promise<void> {
+  const entryPrice = Number(row.entry_price);
+  const quantity = Number(row.quantity);
+  const leverage = Math.max(1, Number(row.leverage ?? 1));
+  const pnl = signedPnl(row.direction, entryPrice, exitPrice, quantity) - fees;
+  const margin = (entryPrice * quantity) / leverage;
+  const pnlPercent = margin > 0 ? (pnl / margin) * 100 : 0;
+
+  await supabase
+    .from("trades")
+    .update({
+      status: "CLOSED",
+      exit_price: exitPrice,
+      exit_reason: exitReason,
+      pnl,
+      pnl_percent: pnlPercent,
+      fees,
+      closed_at: new Date().toISOString(),
+      closed_by: "EXCHANGE_BRACKET",
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", row.id)
+    .eq("user_id", userId)
+    .eq("status", "OPEN");
+}
+
+/**
+ * Detects fills of the stop/take-profit orders the worker placed. Without this,
+ * a position closed by Binance while the app was offline stayed OPEN forever.
+ */
+async function reconcileLivePositions(
+  supabase: ReturnType<typeof adminClient>,
+  userId: string,
+  apiKey: string,
+  apiSecret: string
+): Promise<number> {
+  const { data } = await supabase
+    .from("trades")
+    .select("id, symbol, direction, entry_price, quantity, leverage, market_type, stop_loss_price, take_profit_price, sl_order_id, tp_order_id")
+    .eq("user_id", userId)
+    .eq("is_paper", false)
+    .eq("status", "OPEN")
+    .limit(20);
+
+  const rows = (data ?? []) as OpenTradeRow[];
+  let reconciled = 0;
+
+  for (const row of rows) {
+    const futures = row.market_type === "Futures";
+
+    if (futures) {
+      // Futures brackets are two separate orders with their own order ids.
+      for (const [reason, orderId] of [
+        ["SL", row.sl_order_id],
+        ["TP", row.tp_order_id],
+      ] as Array<["SL" | "TP", string | null]>) {
+        if (!orderId) continue;
+        try {
+          const res = await binanceSigned(apiKey, apiSecret, {
+            target: "futures",
+            method: "GET",
+            path: "/fapi/v1/order",
+            params: { symbol: row.symbol, orderId },
+          });
+          if (!res.ok || !res.data) continue;
+          if (String(res.data.status).toUpperCase() !== "FILLED") continue;
+
+          const fillPrice = Number(
+            res.data.avgPrice ?? res.data.price ??
+              (reason === "SL" ? row.stop_loss_price : row.take_profit_price)
+          );
+          if (!(fillPrice > 0)) continue;
+
+          await markTradeClosed(supabase, userId, row, fillPrice, reason);
+          reconciled += 1;
+          break;
+        } catch {
+          // A single order lookup must not stop the reconciliation pass.
+        }
+      }
+      continue;
+    }
+
+    // Spot OCO is stored as an order-list id in tp_order_id, not an order id.
+    if (!row.tp_order_id) continue;
+    try {
+      const res = await binanceSigned(apiKey, apiSecret, {
+        target: "spot",
+        method: "GET",
+        path: "/api/v3/orderList",
+        params: { orderListId: row.tp_order_id },
+      });
+      const orders = Array.isArray(res.data?.orders) ? res.data.orders : [];
+      const filled = orders.find(
+        (order: Record<string, unknown>) => String(order.status).toUpperCase() === "FILLED"
+      ) as Record<string, unknown> | undefined;
+      if (filled) {
+        const fillPrice = Number(filled.price ?? row.take_profit_price ?? 0);
+        if (fillPrice > 0) {
+          await markTradeClosed(supabase, userId, row, fillPrice, "TP");
+          reconciled += 1;
+        }
+      }
+    } catch {
+      // best effort
+    }
+  }
+
+  return reconciled;
 }
 
 interface RunOutcome {
@@ -362,11 +703,47 @@ interface RunOutcome {
 
 async function runForUser(
   supabase: ReturnType<typeof adminClient>,
-  profile: ProfileRow
+  profile: ProfileRow,
+  flags: GlobalFlags,
+  deadline: number
 ): Promise<RunOutcome> {
   const userId = profile.id;
   const config = normalizeConfig(profile.auto_pilot_config);
   const now = Date.now();
+
+  // Entitlement gates are re-checked here, not just at toggle time: a
+  // subscription can expire or an account can be banned while Auto-Pilot is on.
+  if (profile.is_banned) {
+    await supabase
+      .from("user_profiles")
+      .update({ auto_pilot_enabled: false, updated_at: new Date().toISOString() })
+      .eq("id", userId);
+    await logEvent(supabase, userId, "warn", "Auto-Pilot disabled: this account is suspended.");
+    return { user_id: userId, status: "skipped", reason: "Account suspended" };
+  }
+
+  if (!isProProfile(profile)) {
+    await supabase
+      .from("user_profiles")
+      .update({ auto_pilot_enabled: false, updated_at: new Date().toISOString() })
+      .eq("id", userId);
+    await logEvent(
+      supabase,
+      userId,
+      "warn",
+      "Auto-Pilot disabled: an active Pro subscription is required."
+    );
+    return { user_id: userId, status: "skipped", reason: "Subscription inactive" };
+  }
+
+  if (profile.role !== "admin" && (flags.maintenanceMode || !flags.autoPilotEnabled)) {
+    // Do not flip the user's flag: the platform may re-enable Auto-Pilot.
+    return { user_id: userId, status: "skipped", reason: "Platform Auto-Pilot disabled" };
+  }
+
+  if (Date.now() >= deadline) {
+    return { user_id: userId, status: "skipped", reason: "Batch deadline reached" };
+  }
 
   const { data: run } = await supabase
     .from("auto_pilot_runs")
@@ -377,6 +754,13 @@ async function runForUser(
   if (run?.last_run_at && now - Date.parse(String(run.last_run_at)) < RUN_COOLDOWN_MS) {
     return { user_id: userId, status: "skipped", reason: "Cooldown" };
   }
+
+  // Fairness: the next batch orders by this column, so users beyond
+  // MAX_USERS_PER_RUN rotate instead of being starved forever.
+  await supabase
+    .from("user_profiles")
+    .update({ last_worker_run_at: new Date(now).toISOString() })
+    .eq("id", userId);
 
   const saveRun = async (patch: Record<string, unknown>) => {
     await supabase.from("auto_pilot_runs").upsert(
@@ -396,11 +780,31 @@ async function runForUser(
     }
   }
 
-  const credentials = await loadCredentials(supabase, userId);
-  if (!credentials) {
-    await logEvent(supabase, userId, "warn", "Auto-Pilot is armed but no Binance API keys are stored.");
-    await saveRun({ last_error: "Missing Binance credentials" });
-    return { user_id: userId, status: "skipped", reason: "Missing credentials" };
+  // Settle/reconcile before counting open positions, so a bracket that filled
+  // since the last run frees its slot in this same run.
+  let credentials: { apiKey: string; apiSecret: string } | null = null;
+  if (config.paperTrading) {
+    const settled = await settlePaperPositions(supabase, userId);
+    if (settled > 0) {
+      await logEvent(supabase, userId, "info", `Settled ${settled} paper position(s) at SL/TP.`);
+    }
+  } else {
+    credentials = await loadCredentials(supabase, userId);
+    if (!credentials) {
+      await logEvent(supabase, userId, "warn", "Auto-Pilot is armed in live mode but no Binance API keys are stored.");
+      await saveRun({ last_error: "Missing Binance credentials" });
+      return { user_id: userId, status: "skipped", reason: "Missing credentials" };
+    }
+
+    const reconciled = await reconcileLivePositions(
+      supabase,
+      userId,
+      credentials.apiKey,
+      credentials.apiSecret
+    );
+    if (reconciled > 0) {
+      await logEvent(supabase, userId, "info", `Reconciled ${reconciled} closed exchange position(s).`);
+    }
   }
 
   const { data: openRows } = await supabase
@@ -418,6 +822,8 @@ async function runForUser(
     return { user_id: userId, status: "skipped", reason: "Max open trades reached" };
   }
 
+  const paperBalance = config.paperTrading ? await paperAccountBalance(supabase, userId) : 0;
+
   interface Candidate {
     symbol: string;
     score: number;
@@ -432,6 +838,7 @@ async function runForUser(
   const cursorFallback = Number(run?.last_candle_ms ?? 0) || 0;
 
   for (const symbol of config.symbols) {
+    if (Date.now() >= deadline) break;
     if (openSymbols.has(symbol)) continue;
     try {
       const entryCandles = await fetchKlines(symbol, config.timeframe, 300);
@@ -491,6 +898,10 @@ async function runForUser(
 
   for (const candidate of candidates) {
     if (executed.length >= slots) break;
+    if (Date.now() >= deadline) {
+      lastError = lastError ?? "Batch deadline reached before every candidate was executed.";
+      break;
+    }
 
     // Guard against a stale signal: re-price before sizing the order.
     const livePrice = await fetchTickerPrice(candidate.symbol);
@@ -507,21 +918,51 @@ async function runForUser(
       continue;
     }
 
-    const tradeId = `SRV-${now}-${Math.floor(Math.random() * 1000)}`;
+    const leverage = config.marketType === "Futures" ? config.leverage : 1;
+    const stopDistance = candidate.atr * ATR_STOP_MULTIPLIER;
+    if (!(stopDistance > 0)) {
+      lastError = "ATR unavailable for position sizing.";
+      continue;
+    }
+
+    const stopLoss =
+      candidate.direction === "LONG" ? livePrice - stopDistance : livePrice + stopDistance;
+    const takeProfit =
+      candidate.direction === "LONG"
+        ? livePrice + candidate.atr * ATR_TAKE_PROFIT_MULTIPLIER
+        : livePrice - candidate.atr * ATR_TAKE_PROFIT_MULTIPLIER;
+    const tradeId = `SRV-${crypto.randomUUID()}`;
+    const clientOrderId = `${config.paperTrading ? "paper" : "live"}-${crypto.randomUUID()}`;
 
     if (config.paperTrading) {
+      const riskAmount = (paperBalance * config.riskPercent) / 100;
+      const maxNotional = paperBalance * leverage * 0.95;
+      const quantity = floorTo(
+        Math.min(riskAmount / stopDistance, maxNotional / livePrice),
+        6
+      );
+
+      if (!(quantity > 0)) {
+        lastError = "Computed paper quantity is zero.";
+        continue;
+      }
+
       const { error } = await supabase.from("trades").insert({
         id: tradeId,
         user_id: userId,
         symbol: candidate.symbol,
         direction: candidate.direction,
         entry_price: livePrice,
-        quantity: 0,
-        leverage: config.marketType === "Futures" ? config.leverage : 1,
+        quantity,
+        leverage,
         market_type: config.marketType,
+        stop_loss_price: floorTo(stopLoss, 2),
+        take_profit_price: floorTo(takeProfit, 2),
         source: "AUTO-PILOT",
         is_paper: true,
         status: "OPEN",
+        client_order_id: clientOrderId,
+        fees: 0,
       });
       if (error) {
         lastError = `Paper insert failed: ${error.message}`;
@@ -533,11 +974,16 @@ async function runForUser(
         supabase,
         userId,
         "success",
-        `Paper Auto-Pilot entry ${candidate.direction} (score ${candidate.score}).`,
+        `Paper Auto-Pilot entry ${candidate.direction} ${candidate.symbol} qty ${quantity} (score ${candidate.score}).`,
         candidate.symbol,
-        { score: candidate.score, price: livePrice }
+        { score: candidate.score, price: livePrice, quantity, stopLoss, takeProfit }
       );
       continue;
+    }
+
+    if (!credentials) {
+      lastError = "Missing Binance credentials.";
+      break;
     }
 
     const result = await executeOnBinance(credentials.apiKey, credentials.apiSecret, {
@@ -562,21 +1008,49 @@ async function runForUser(
       continue;
     }
 
-    await supabase.from("trades").insert({
+    const { error: insertError } = await supabase.from("trades").insert({
       id: tradeId,
       user_id: userId,
       symbol: candidate.symbol,
       direction: candidate.direction,
       entry_price: result.entryPrice ?? livePrice,
       quantity: result.quantity ?? 0,
-      leverage: config.marketType === "Futures" ? config.leverage : 1,
+      leverage,
       market_type: config.marketType,
       stop_loss_price: result.stopLoss ?? null,
       take_profit_price: result.takeProfit ?? null,
+      entry_order_id: result.entryOrderId ?? null,
+      sl_order_id: result.slOrderId ?? null,
+      tp_order_id: result.tpOrderId ?? null,
+      client_order_id: clientOrderId,
+      fees: result.fees ?? 0,
       source: "AUTO-PILOT",
       is_paper: false,
       status: "OPEN",
     });
+
+    if (insertError) {
+      // The exchange position exists but the UI has no record of it. Close it
+      // immediately rather than leaving an unmanaged live position.
+      const closed = await closeLivePosition(credentials.apiKey, credentials.apiSecret, {
+        symbol: candidate.symbol,
+        direction: candidate.direction,
+        quantity: result.quantity ?? 0,
+        marketType: config.marketType,
+      });
+      lastError = `Entry filled but the trade record failed: ${insertError.message}`;
+      await logEvent(
+        supabase,
+        userId,
+        "error",
+        closed
+          ? `Trade record failed; the live position was closed automatically (${insertError.message}).`
+          : `Trade record failed AND the live position could not be closed. Manual action required (${insertError.message}).`,
+        candidate.symbol,
+        { score: candidate.score, quantity: result.quantity }
+      );
+      continue;
+    }
 
     executed.push({ symbol: candidate.symbol, score: candidate.score });
     candleCursors[candidate.symbol] = candidate.candle.time;
@@ -646,10 +1120,13 @@ Deno.serve(async (req: Request) => {
     }
 
     const supabase = adminClient();
+    const flags = await loadGlobalFlags(supabase);
     let query = supabase
       .from("user_profiles")
-      .select("id, auto_pilot_config")
+      .select("id, auto_pilot_config, is_banned, role, subscription_tier, subscription_status, subscription_expires_at, auto_pilot_armed_at")
       .eq("auto_pilot_enabled", true)
+      // Least-recently-run first, so users beyond the batch limit still run.
+      .order("last_worker_run_at", { ascending: true, nullsFirst: true })
       .limit(MAX_USERS_PER_RUN);
 
     if (requestedUser) query = query.eq("id", requestedUser);
@@ -662,10 +1139,12 @@ Deno.serve(async (req: Request) => {
 
     const profiles = (data ?? []) as ProfileRow[];
     const results: RunOutcome[] = [];
+    const batchDeadline = Date.now() + 90_000;
 
     for (const profile of profiles) {
       try {
-        results.push(await runForUser(supabase, profile));
+        const userDeadline = Math.min(batchDeadline, Date.now() + USER_RUN_BUDGET_MS);
+        results.push(await runForUser(supabase, profile, flags, userDeadline));
       } catch (err) {
         const message = err instanceof Error ? err.message : "unknown error";
         console.error(`[auto-trade-worker] user ${profile.id} failed:`, message);

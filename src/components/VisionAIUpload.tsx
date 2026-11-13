@@ -255,7 +255,7 @@ export default function VisionAIUpload({ open, onClose, activeSymbol = "BTCUSDT"
         throw new Error("Invalid response format from Vision AI");
       }
     } catch (err) {
-      console.warn("Vision AI analysis failed:", err);
+      console.error("[Vision AI] ai-chat invoke failed:", err);
       setResult(null);
       setError(
         err instanceof Error

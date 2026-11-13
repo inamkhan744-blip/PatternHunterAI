@@ -172,6 +172,7 @@ export default function AIChat({
       const reply: ChatMessage = { role: "assistant", content: cleanText, timestamp: Date.now() };
       setMessages((prev) => [...prev, reply]);
     } catch (err) {
+      console.error("[AI Chat] ai-chat invoke failed:", err);
       const reason = err instanceof Error ? err.message : "AI service unavailable";
       // Do not impersonate the assistant. State plainly that AI is unavailable and
       // show only raw, attributable metrics the app itself measured.

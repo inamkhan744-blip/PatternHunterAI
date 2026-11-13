@@ -421,6 +421,7 @@ export async function runRealSwarmDebate(params: SwarmDebateParams): Promise<Swa
       isFallback: false,
     };
   } catch (err) {
+    console.error("[AI Swarm] ai-chat invoke failed:", err);
     const errMsg = err instanceof Error ? err.message : String(err);
     liveWorkerLogStore.addLog(`Gemini API Timeout/Error (${errMsg}) - Falling back to Local Heuristic Engine`, "warn", { symbol: params.symbol });
     return evaluateLocalHeuristicEngine(params);

@@ -20,6 +20,7 @@ import {
   normalizeSymbol,
   preflight,
   requireUser,
+  withCors,
 } from "../_shared/security.ts";
 
 const GEMINI_TIMEOUT_MS = 25000;
@@ -91,7 +92,7 @@ function parseJsonResponse(text: string): unknown {
   return JSON.parse(stripMarkdownJson(text));
 }
 
-Deno.serve(async (req: Request) => {
+async function route(req: Request): Promise<Response> {
   const pre = preflight(req);
   if (pre) return pre;
 
@@ -449,5 +450,17 @@ Guidelines:
   } catch (err) {
     console.error("[ai-chat] unexpected error:", err instanceof Error ? err.message : err);
     return json({ unavailable: true, error: "AI service internal error" }, 500);
+  }
+}
+
+Deno.serve(async (req: Request) => {
+  try {
+    // Every response — including preflight and errors — echoes the caller's
+    // Origin when it is allowed, so a browser on the deployed domain never sees
+    // an opaque CORS failure instead of the real status.
+    return withCors(req, await route(req));
+  } catch (err) {
+    console.error("[ai-chat] fatal:", err instanceof Error ? err.message : err);
+    return withCors(req, json({ unavailable: true, error: "AI service internal error" }, 500));
   }
 });

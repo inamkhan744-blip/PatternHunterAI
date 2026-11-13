@@ -11,19 +11,63 @@
 
 import { createClient, type SupabaseClient, type User } from "https://esm.sh/@supabase/supabase-js@2.48.0";
 
-const ALLOWED_ORIGIN = Deno.env.get("FRONTEND_ORIGIN") ?? "";
+/**
+ * Comma-separated allow-list, e.g.
+ *   FRONTEND_ORIGIN="https://patternhunter.vercel.app,https://*.vercel.app"
+ * Entries may contain `*` to match a whole label (Vercel preview deployments).
+ * An empty setting falls back to `*`; that is acceptable because every endpoint
+ * still requires a bearer JWT and none of them rely on cookies.
+ */
+const CONFIGURED_ORIGINS = (Deno.env.get("FRONTEND_ORIGIN") ?? "")
+  .split(",")
+  .map((value) => value.trim().replace(/\/+$/, ""))
+  .filter(Boolean);
 
-export function corsHeaders(): Record<string, string> {
-  // Set FRONTEND_ORIGIN to lock CORS to your deployed origin. The wildcard fallback
-  // is safe here because every endpoint still verifies a bearer JWT (no cookies).
-  const origin = ALLOWED_ORIGIN || "*";
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** True when `origin` is on the allow-list (or the list is empty). */
+export function originAllowed(origin: string | null): boolean {
+  if (!origin) return false;
+  if (CONFIGURED_ORIGINS.length === 0) return true;
+  const normalized = origin.replace(/\/+$/, "");
+  return CONFIGURED_ORIGINS.some((allowed) => {
+    if (!allowed.includes("*")) return allowed === normalized;
+    const pattern = new RegExp(
+      `^${allowed.split("*").map(escapeRegExp).join("[^/]*")}$`,
+      "i"
+    );
+    return pattern.test(normalized);
+  });
+}
+
+function allowOriginHeader(req?: Request): string {
+  const origin = req?.headers.get("Origin") ?? null;
+  if (origin && originAllowed(origin)) return origin;
+  return CONFIGURED_ORIGINS[0] ?? "*";
+}
+
+export function corsHeaders(req?: Request): Record<string, string> {
   return {
-    "Access-Control-Allow-Origin": origin,
+    "Access-Control-Allow-Origin": allowOriginHeader(req),
     "Vary": "Origin",
     "Access-Control-Allow-Methods": "POST, OPTIONS",
     "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-webhook-timestamp, x-webhook-signature",
     "Access-Control-Max-Age": "600",
   };
+}
+
+/**
+ * Rewrites a response's CORS headers to echo the caller's Origin when it is
+ * allowed. Wrapping the whole handler means every response — success, 4xx, 5xx
+ * and the preflight — carries a header the browser will accept.
+ */
+export function withCors(req: Request, res: Response): Response {
+  const headers = new Headers(res.headers);
+  headers.set("Access-Control-Allow-Origin", allowOriginHeader(req));
+  headers.set("Vary", "Origin");
+  return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
 }
 
 export function json(body: unknown, status = 200): Response {
@@ -35,7 +79,7 @@ export function json(body: unknown, status = 200): Response {
 
 export function preflight(req: Request): Response | null {
   if (req.method === "OPTIONS") {
-    return new Response(null, { status: 204, headers: corsHeaders() });
+    return new Response(null, { status: 204, headers: corsHeaders(req) });
   }
   return null;
 }

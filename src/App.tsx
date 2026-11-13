@@ -1378,6 +1378,13 @@ export default function App() {
       if (!aiChatError && aiChatData && !aiChatData.unavailable) {
         responseData = aiChatData;
       } else {
+        // Log the raw failure before falling back: "Failed to send a request to
+        // the Edge Function" hides whether it was a 404 (not deployed), a 401
+        // (bad session) or a network/CORS rejection.
+        console.error(
+          "[AI Analysis] ai-chat invoke failed:",
+          aiChatError ?? aiChatData
+        );
         // Fallback to 'explain-pattern' function
         const { data: explainData, error: explainError } = await supabase.functions.invoke("explain-pattern", {
           body: {

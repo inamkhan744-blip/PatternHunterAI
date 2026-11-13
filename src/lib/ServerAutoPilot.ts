@@ -73,59 +73,54 @@ export async function fetchServerAutoPilotState(userId?: string): Promise<Server
 /**
  * Toggles server Auto-Pilot for the signed-in user.
  *
- * The RPC is called with exactly `p_user_id` and `p_enabled`. `userId` is sent
- * because `auth.uid()` can resolve to NULL when the project is called with a
- * publishable key; the database treats it as a hint, resolves the real caller
- * from the JWT subject, and refuses a mismatch, so it can never change another
- * account's flag.
+ * The identity is re-read from Supabase Auth here rather than taken from a
+ * React prop, so the RPC always receives the session's real user id. The id is
+ * sent as `p_user_id` because `auth.uid()` can resolve to NULL when the project
+ * is called with a publishable key; the database treats it as a hint, resolves
+ * the caller from the JWT subject, and refuses a mismatch.
  *
- * Returns false when the RPC refused or failed.
+ * Resolves only after the database confirms the write, and throws on failure so
+ * a caller can never render a state the server does not have.
  */
-export async function setServerAutoPilotEnabled(
-  userId: string | undefined,
-  enabled: boolean
-): Promise<boolean> {
-  if (!userId) {
-    console.error("[ServerAutoPilot] toggle aborted: no authenticated user id in scope");
-    return false;
+export async function setServerAutoPilotEnabled(enabled: boolean): Promise<true> {
+  const {
+    data: { user },
+    error: authError,
+  } = await supabase.auth.getUser();
+
+  if (authError || !user?.id) {
+    console.error("[ServerAutoPilot] toggle blocked: no signed-in user", authError);
+    throw new Error(authError?.message ?? "You must be signed in to change Auto-Pilot.");
   }
 
   console.log("[ServerAutoPilot] rpc toggle_auto_pilot ->", {
-    p_user_id: userId,
     p_enabled: enabled,
+    p_user_id: user.id,
   });
 
   try {
     const { data, error } = await supabase.rpc("toggle_auto_pilot", {
-      p_user_id: userId,
       p_enabled: enabled,
+      p_user_id: user.id,
     });
 
     if (error) {
-      console.error("[ServerAutoPilot] rpc toggle_auto_pilot failed:", {
-        message: error.message,
-        code: error.code,
-        details: error.details,
-        hint: error.hint,
-      });
-      return false;
+      console.error("RPC Error:", error);
+      throw new Error(error.message);
     }
 
     const result = data as { success?: boolean; error?: string; enabled?: boolean } | null;
-    if (result?.success !== true) {
-      console.error(
-        "[ServerAutoPilot] rpc toggle_auto_pilot refused:",
-        result?.error ?? "unknown reason",
-        result
-      );
-      return false;
+    // The function reports refusals in-band as { success: false, error }.
+    if (result && result.success === false) {
+      console.error("RPC Error:", result.error ?? result);
+      throw new Error(result.error ?? "The Auto-Pilot toggle was refused.");
     }
 
     console.log("[ServerAutoPilot] rpc toggle_auto_pilot succeeded:", result);
     return true;
   } catch (err) {
-    console.error("[ServerAutoPilot] rpc toggle_auto_pilot threw:", err);
-    return false;
+    console.error("RPC Error:", err);
+    throw err instanceof Error ? err : new Error(String(err));
   }
 }
 
@@ -177,16 +172,15 @@ export function useServerAutoPilot(user: User | null): {
 
   const setEnabled = useCallback(
     async (enabled: boolean, config?: ServerAutoPilotConfig) => {
-      const ok = await setServerAutoPilotEnabled(user?.id, enabled);
-      if (ok) {
-        setState((prev) => ({
-          enabled,
-          config: { ...prev.config, ...(config ?? {}) },
-        }));
-      }
-      return ok;
+      // Throws if the write fails; local state is only touched afterwards.
+      await setServerAutoPilotEnabled(enabled);
+      setState((prev) => ({
+        enabled,
+        config: { ...prev.config, ...(config ?? {}) },
+      }));
+      return true;
     },
-    [user?.id]
+    []
   );
 
   return { enabled: state.enabled, config: state.config, loading, refresh, setEnabled };

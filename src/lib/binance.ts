@@ -52,7 +52,14 @@ export async function fetchTopUsdtPairs(limit = 100): Promise<Coin[]> {
     if (!res.ok) throw new Error(`Ticker fetch failed (${res.status})`);
     const data = await res.json() as Array<{ symbol: string; quoteVolume: string }>;
     return data
-      .filter((item) => item.symbol.endsWith("USDT") && !item.symbol.includes("UP") && !item.symbol.includes("DOWN"))
+      .filter(
+        (item) =>
+          item.symbol.endsWith("USDT") &&
+          !item.symbol.endsWith("UPUSDT") &&
+          !item.symbol.endsWith("DOWNUSDT") &&
+          !item.symbol.endsWith("BULLUSDT") &&
+          !item.symbol.endsWith("BEARUSDT")
+      )
       .sort((a, b) => parseFloat(b.quoteVolume) - parseFloat(a.quoteVolume))
       .slice(0, limit)
       .map((item) => ({

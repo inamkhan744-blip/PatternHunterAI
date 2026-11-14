@@ -46,6 +46,27 @@ export async function fetchMarketStats(symbol: string): Promise<MarketStats | nu
   }
 }
 
+/**
+ * Single-symbol live quote used by the AI chat when the user asks about a coin
+ * that is not the one currently on the chart. Returns null instead of throwing
+ * so callers can state that live data is unavailable rather than guessing.
+ */
+export async function fetchTickerPrice(
+  symbol: string
+): Promise<{ price: number; change24h: number } | null> {
+  try {
+    const res = await fetch(`${TICKER_API}?symbol=${symbol}`);
+    if (!res.ok) return null;
+    const data = (await res.json()) as { lastPrice: string; priceChangePercent: string };
+    const price = parseFloat(data.lastPrice);
+    if (!Number.isFinite(price) || price <= 0) return null;
+    const change24h = parseFloat(data.priceChangePercent);
+    return { price, change24h: Number.isFinite(change24h) ? change24h : 0 };
+  } catch {
+    return null;
+  }
+}
+
 let topPairsCache: { data: Coin[]; timestamp: number } | null = null;
 let volumes24hCache: { data: Record<string, number>; timestamp: number } | null = null;
 let marketCapsCache: { data: Record<string, number>; timestamp: number } | null = null;

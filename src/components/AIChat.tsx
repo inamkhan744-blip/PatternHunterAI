@@ -3,6 +3,7 @@ import { Send, Mic, Loader2, Sparkles, Trash2, Volume2 } from "lucide-react";
 import type { ChatMessage, Coin } from "../types";
 import { COINS, PRO_COINS } from "../constants";
 import { generateAIResponse } from "../lib/AIService";
+import { fetchTickerPrice } from "../lib/binance";
 
 interface Props {
   coin: Coin;
@@ -20,6 +21,31 @@ interface Props {
 const MAX_CONTEXT_AGE_MS = 10 * 60 * 1000;
 
 const ALL_COINS = [...COINS, ...PRO_COINS];
+const COIN_SYMBOLS = new Set(ALL_COINS.map((c) => c.symbol));
+
+/**
+ * Lowercase English words that are also ticker symbols. Matching these when the
+ * user typed them lowercase ("the dot above", "near future") would fire a price
+ * lookup for an unrelated sentence, so only an uppercase token counts for them.
+ */
+const LOWERCASE_COLLISIONS = new Set([
+  "near", "link", "dot", "one", "gas", "all", "ace", "api", "sun", "ton",
+  "cake", "fun", "flow", "mask", "time", "rose", "charm", "waves", "ocean",
+  "render", "fetch", "sushi", "sand", "moon", "hot", "key", "ark", "amp",
+]);
+
+/** Ticker symbols mentioned in a chat message, longest first. */
+function detectCoinSymbols(text: string): string[] {
+  const found = new Set<string>();
+  for (const match of text.matchAll(/\b([A-Za-z]{2,10})\b/g)) {
+    const token = match[1];
+    const upper = token.toUpperCase();
+    if (!COIN_SYMBOLS.has(upper)) continue;
+    if (token !== upper && LOWERCASE_COLLISIONS.has(token.toLowerCase())) continue;
+    found.add(upper);
+  }
+  return [...found].sort((a, b) => b.length - a.length);
+}
 
 export default function AIChat({
   coin,
@@ -89,6 +115,16 @@ export default function AIChat({
       }
     }
 
+    // --- Live quotes for coins the user named but is not viewing -------------
+    // Without this the model only ever sees the chart's coin, so "DOT price"
+    // while BTC is selected used to produce an invented number.
+    const mentionedSymbols = detectCoinSymbols(text).filter((sym) => sym !== coin.symbol);
+    const liveQuotes: { symbol: string; price: number; change24h: number }[] = [];
+    for (const sym of mentionedSymbols.slice(0, 3)) {
+      const quote = await fetchTickerPrice(`${sym}USDT`);
+      if (quote) liveQuotes.push({ symbol: sym, ...quote });
+    }
+
     // --- Market-context freshness gate -------------------------------------
     // Never let the model analyse stale or missing data: that is how hallucinated
     // "live" prices end up presented as current market state.
@@ -142,6 +178,17 @@ export default function AIChat({
       .map((m) => `${m.role}: ${m.content.slice(0, 600)}`)
       .join("\n");
 
+    const requestedCoinLine = mentionedSymbols.length
+      ? mentionedSymbols
+          .map((sym) => {
+            const quote = liveQuotes.find((q) => q.symbol === sym);
+            return quote
+              ? `User is asking about ${sym}. Live ${sym} price is currently $${quote.price.toLocaleString(undefined, { maximumFractionDigits: 8 })} (24h change ${quote.change24h >= 0 ? "+" : ""}${quote.change24h.toFixed(2)}%).`
+              : `User is asking about ${sym}. Live ${sym} price could not be fetched right now.`;
+          })
+          .join("\n")
+      : "";
+
     const systemPrompt = `You are PatternHunter AI, an expert cryptocurrency trading assistant integrated into a real-time crypto pattern detection app.
 You help users understand market conditions, analyze patterns, and make informed trading decisions.
 
@@ -153,6 +200,7 @@ Current market context:
 - Trend: ${currentContext.trend ?? "N/A"}
 - Detected Pattern: ${currentContext.pattern ?? "None"}
 - Fear & Greed Index: ${currentContext.fearGreed ?? "N/A"}
+${requestedCoinLine ? `\nAdditional live data (just fetched from Binance):\n${requestedCoinLine}` : ""}
 
 ${history ? `Previous conversation:\n${history}\n` : ""}
 Guidelines:
@@ -160,7 +208,10 @@ Guidelines:
 - When users ask to "show" or "display" a coin chart, respond with: [ACTION:show_chart:SYMBOL].
 - Trading guidance is educational, never financial advice. Always include a disclaimer for trade-related questions.
 - Keep responses under 150 words unless the user asks for detail.
-- Use plain text with line breaks, no markdown headers.`;
+- Use plain text with line breaks, no markdown headers.
+- Only state a price that literally appears in the market context above. Never estimate, round from memory, or recall a historical price as if it were live.
+- If the user asks for a price of a coin not mentioned in your context, state that you don't have the live data, but DO NOT guess or hallucinate a price.
+- If live data for a named coin is marked as unavailable above, say it could not be fetched and suggest refreshing.`;
 
     try {
       const aiResult = await generateAIResponse(text, systemPrompt, undefined, {

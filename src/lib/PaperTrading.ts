@@ -224,6 +224,20 @@ export class PaperTradingEngine {
     trade.status = "CLOSED";
     trade.closePrice = exitPrice;
     trade.closeTime = Date.now();
+
+    if (exitReason === "MANUAL") {
+      const crossedSl =
+        trade.direction === "LONG"
+          ? exitPrice <= trade.stopLossPrice
+          : exitPrice >= trade.stopLossPrice;
+      const crossedTp =
+        trade.direction === "LONG"
+          ? exitPrice >= trade.takeProfitPrice
+          : exitPrice <= trade.takeProfitPrice;
+      if (crossedSl) exitReason = "SL";
+      else if (crossedTp) exitReason = "TP";
+    }
+
     trade.exitReason = exitReason;
 
     const diff = trade.direction === "LONG"

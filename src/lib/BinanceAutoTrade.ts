@@ -1386,6 +1386,11 @@ export class BinanceAutoTradeEngine {
     entryPrice: number;
     atrValue: number;
     direction?: TradeDirection;
+    /** Optional overrides for manual 1-click trades from the scanner. */
+    stopLossPrice?: number;
+    takeProfitPrice?: number;
+    leverageOverride?: number;
+    riskPercentOverride?: number;
     marketType?: MarketType;
     accountBalance?: number;
     /** "PAPER" forces a pure local simulation. Defaults to REAL only when the
@@ -1594,13 +1599,22 @@ export class BinanceAutoTradeEngine {
       };
     }
 
-    // ATR Stop Loss / Take Profit (computed before sizing so risk can be sized off the stop)
-    const { stopLossPrice, takeProfitPrice } = calculateAtrStopLoss(
+    // ATR Stop Loss / Take Profit (computed before sizing so risk can be sized off the stop).
+    // Manual scanner trades may pass exact card levels; otherwise derive from ATR.
+    const computedLevels = calculateAtrStopLoss(
       params.entryPrice,
       params.atrValue,
       direction,
       this.config.atrMultiplier
     );
+    const stopLossPrice =
+      typeof params.stopLossPrice === "number" && params.stopLossPrice > 0
+        ? params.stopLossPrice
+        : computedLevels.stopLossPrice;
+    const takeProfitPrice =
+      typeof params.takeProfitPrice === "number" && params.takeProfitPrice > 0
+        ? params.takeProfitPrice
+        : computedLevels.takeProfitPrice;
 
     // Balance & Sizing
     let balance: number;
@@ -1619,9 +1633,11 @@ export class BinanceAutoTradeEngine {
       balance = 10000; // virtual paper balance only
     }
 
-    const leverage = marketType === "Futures" ? this.config.leverage : 1;
+    const leverage =
+      marketType === "Futures" ? (params.leverageOverride ?? this.config.leverage) : 1;
+    const riskPercent = params.riskPercentOverride ?? this.config.riskPercent;
     const sizing = calculatePositionSize(
-      this.config.riskPercent,
+      riskPercent,
       balance,
       leverage,
       params.entryPrice,

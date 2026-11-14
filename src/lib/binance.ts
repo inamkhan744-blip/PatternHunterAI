@@ -50,6 +50,8 @@ let topPairsCache: { data: Coin[]; timestamp: number } | null = null;
 let volumes24hCache: { data: Record<string, number>; timestamp: number } | null = null;
 let marketCapsCache: { data: Record<string, number>; timestamp: number } | null = null;
 
+const STABLECOIN_AND_FIAT_BASES = ["USDT", "USDC", "FDUSD", "DAI", "TUSD", "BUSD", "EUR", "GBP", "AUD", "TRY", "BRL", "ARS", "ZAR"];
+
 export async function fetchTopUsdtPairs(limit = 100): Promise<Coin[]> {
   const now = Date.now();
   if (topPairsCache && now - topPairsCache.timestamp < 5 * 60 * 1000) {
@@ -67,7 +69,8 @@ export async function fetchTopUsdtPairs(limit = 100): Promise<Coin[]> {
           !item.symbol.endsWith("UPUSDT") &&
           !item.symbol.endsWith("DOWNUSDT") &&
           !item.symbol.endsWith("BULLUSDT") &&
-          !item.symbol.endsWith("BEARUSDT")
+          !item.symbol.endsWith("BEARUSDT") &&
+          !STABLECOIN_AND_FIAT_BASES.includes(item.symbol.replace("USDT", ""))
       )
       .sort((a, b) => parseFloat(b.quoteVolume) - parseFloat(a.quoteVolume))
       .map((item) => ({

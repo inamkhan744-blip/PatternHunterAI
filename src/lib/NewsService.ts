@@ -9,8 +9,7 @@ export interface NewsEvent {
   negative: boolean;
 }
 
-const API_KEY = import.meta.env.VITE_CRYPTOPANIC_API_KEY as string | undefined;
-const BASE_URL = "https://cryptopanic.com/api/developer/v2/posts/";
+const NEWS_URL = "https://cryptocurrency.cv/api/news";
 
 const COIN_NAME_MAP: Record<string, string> = {
   bitcoin: "BTC",
@@ -77,10 +76,11 @@ const NEGATIVE_KEYWORDS = [
   "dump",
   "plunge",
   "rug",
+  "bearish",
 ];
 
-function extractSymbols(text: string, apiCurrencies: string[] = []): string[] {
-  const symbols = new Set<string>(apiCurrencies.map((currency) => currency.toUpperCase()));
+function extractSymbols(text: string): string[] {
+  const symbols = new Set<string>();
   const lower = text.toLowerCase();
 
   for (const [name, symbol] of Object.entries(COIN_NAME_MAP)) {
@@ -88,65 +88,49 @@ function extractSymbols(text: string, apiCurrencies: string[] = []): string[] {
   }
 
   for (const coin of KNOWN_COINS) {
-    if (new RegExp(`\\b${coin.symbol}\\b`, "i").test(text)) {
+    const pattern = new RegExp(`\\b${coin.symbol}(?:USD|USDT|USDC)?\\b`, "i");
+    if (pattern.test(text)) {
       symbols.add(coin.symbol);
-    }
-  }
-
-  const tickerMatches = text.match(/\b[A-Z]{2,6}\b/g) || [];
-  for (const match of tickerMatches) {
-    if (KNOWN_COINS.some((coin) => coin.symbol === match)) {
-      symbols.add(match);
     }
   }
 
   return [...symbols];
 }
 
-function isNegative(title: string): boolean {
-  const lower = title.toLowerCase();
+function isNegative(title: string, description: string): boolean {
+  const lower = `${title} ${description}`.toLowerCase();
   return NEGATIVE_KEYWORDS.some((keyword) => lower.includes(keyword));
 }
 
 export async function fetchLatestNews(): Promise<NewsEvent[]> {
-  if (!API_KEY) {
-    return [];
-  }
-
   try {
-    const params = new URLSearchParams({
-      auth_token: API_KEY,
-      public: "true",
-      kind: "news",
-      filter: "hot",
-    });
-    const response = await fetch(`${BASE_URL}?${params.toString()}`);
+    const response = await fetch(NEWS_URL);
     if (!response.ok) return [];
 
     const data = (await response.json()) as {
-      results?: Array<{
-        id: string | number;
+      articles?: Array<{
         title: string;
-        url: string;
-        published_at: string;
-        currencies?: Array<{ code: string }>;
+        description?: string;
+        link: string;
+        pubDate: string;
+        source?: string;
       }>;
     };
 
-    return (data.results || [])
-      .map((post) => {
-        const apiCurrencies = (post.currencies || []).map((currency) => currency.code);
-        const symbols = extractSymbols(post.title, apiCurrencies);
+    return (data.articles || [])
+      .map((article, index) => {
+        const text = `${article.title} ${article.description || ""}`;
         return {
-          id: String(post.id),
-          title: post.title,
-          url: post.url,
-          symbols,
-          publishedAt: post.published_at,
-          negative: isNegative(post.title),
+          id: article.link || String(index),
+          title: article.title,
+          url: article.link,
+          symbols: extractSymbols(text),
+          publishedAt: article.pubDate,
+          negative: isNegative(article.title, article.description || ""),
         };
       })
-      .filter((event) => event.symbols.length > 0);
+      .filter((event) => event.symbols.length > 0)
+      .slice(0, 20);
   } catch {
     return [];
   }

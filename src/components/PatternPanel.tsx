@@ -13,6 +13,7 @@ import {
   Shield,
 } from "lucide-react";
 import { useState } from "react";
+import ConfirmActionModal from "./ui/ConfirmActionModal";
 import type { Coin, DetectedPattern, Timeframe, PatternWithConfidence } from "../types";
 import { formatPrice } from "../lib/patterns";
 import { getPatternColor } from "../lib/patterns";
@@ -71,6 +72,7 @@ export default function PatternPanel({
   void _coin;
   void _timeframe;
   const [saved, setSaved] = useState(false);
+  const [infoModal, setInfoModal] = useState<{ title: string; message: string } | null>(null);
 
   if (!pattern) {
     return (
@@ -253,7 +255,7 @@ export default function PatternPanel({
                 <button
                   onClick={() => {
                     if (fomoLocked) {
-                      alert("🚨 Trade execution disabled: Anti-FOMO Lock active. Please wait for cooldown.");
+                      setInfoModal({ title: "Trade Blocked", message: "🚨 Trade execution disabled: Anti-FOMO Lock active. Please wait for cooldown." });
                       return;
                     }
                     openBinanceApp();
@@ -278,7 +280,7 @@ export default function PatternPanel({
         <button
           onClick={() => {
             if (fomoLocked) {
-              alert("🚨 Auto-Trade execution disabled: Anti-FOMO Lock active.");
+              setInfoModal({ title: "Auto-Trade Blocked", message: "🚨 Auto-Trade execution disabled: Anti-FOMO Lock active." });
               return;
             }
             if (onOpenAutoTrade) {
@@ -316,6 +318,18 @@ export default function PatternPanel({
           </button>
         )}
       </div>
+    {infoModal && (
+      <ConfirmActionModal
+        isOpen={!!infoModal}
+        title={infoModal.title}
+        message={infoModal.message}
+        variant="neutral"
+        confirmText="OK"
+        cancelText=""
+        onConfirm={() => setInfoModal(null)}
+        onCancel={() => setInfoModal(null)}
+      />
+    )}
     </div>
   );
 }

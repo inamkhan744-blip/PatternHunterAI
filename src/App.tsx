@@ -116,6 +116,7 @@ import { subscribeTicker } from "./lib/websocket";
 import type { Candle, Coin, DetectedPattern, ScanResult, Timeframe, WatchlistItem, AppTab, MarketStats, PatternWithConfidence } from "./types";
 import type { ScannerExecutionSettings } from "./components/ScannerTradeSettings";
 import type { SignalCard } from "./components/SignalCardsGrid";
+import ConfirmActionModal from "./components/ui/ConfirmActionModal";
 
 const TIMEFRAMES: { value: Timeframe; label: string }[] = [
   { value: "5m", label: "5m" },
@@ -242,6 +243,8 @@ export default function App() {
   const [watchSymbols, setWatchSymbols] = useState<Set<string>>(new Set());
   const [historyRefresh, setHistoryRefresh] = useState(0);
   const [autoTradeOpen, setAutoTradeOpen] = useState(false);
+  const [killSwitchConfirmOpen, setKillSwitchConfirmOpen] = useState(false);
+  const [killSwitchResult, setKillSwitchResult] = useState<string | null>(null);
   const [autoTradeCoin, setAutoTradeCoin] = useState<{ symbol: string; price: number; atr: number } | null>(null);
   const [currentAtr, setCurrentAtr] = useState<number>(0);
   const [swarmOpen, setSwarmOpen] = useState(false);
@@ -1933,6 +1936,21 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
       }
     };
 
+  const handleKillSwitch = async () => {
+    const stopResult = await autoTradeEngine.emergencyStop();
+    tradeManager.closeAllTrades("KILL_SWITCH");
+    autoTradeEngine.setAutoPilotState(autoTradeEngine.getAutoPilotPauseReason() ? "PAUSED" : "IDLE");
+    setAutoPilotActive(false);
+    setAutoPilotPauseReason(autoTradeEngine.getAutoPilotPauseReason());
+    setKillSwitchResult(
+      `Emergency stop triggered. ${stopResult.cancelledOrdersCount} order group(s) cancelled, ${stopResult.closedPositionsCount} position(s) closed. Auto-Pilot paused.` +
+        (stopResult.failures.length > 0
+          ? `\n\nATTENTION — these positions could not be closed automatically:\n${stopResult.failures.join("\n")}`
+          : "")
+    );
+    setKillSwitchConfirmOpen(false);
+  };
+
   return (
     <div className="min-h-screen bg-slate-950 text-white flex flex-col lg:flex-row pb-16 lg:pb-0">
       {/* Auto-Pilot save failure toast (the toggle has already been reverted) */}
@@ -2557,25 +2575,7 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
 
                 {/* Global Emergency STOP Kill Switch */}
                 <button
-                  onClick={async () => {
-                    const confirmed = window.confirm(
-                      "EMERGENCY KILL SWITCH ACTIVATED!\n\nThis will instantly halt Auto-Pilot, cancel all open orders, and close live/paper positions. Proceed?"
-                    );
-                    if (confirmed) {
-                      const stopResult = await autoTradeEngine.emergencyStop();
-                      // Settle paper positions too so the UI reflects a flat book.
-                      tradeManager.closeAllTrades("KILL_SWITCH");
-                      autoTradeEngine.setAutoPilotState(autoTradeEngine.getAutoPilotPauseReason() ? "PAUSED" : "IDLE");
-                      setAutoPilotActive(false);
-                      setAutoPilotPauseReason(autoTradeEngine.getAutoPilotPauseReason());
-                      alert(
-                        `Emergency stop triggered. ${stopResult.cancelledOrdersCount} order group(s) cancelled, ${stopResult.closedPositionsCount} position(s) closed. Auto-Pilot paused.` +
-                          (stopResult.failures.length > 0
-                            ? `\n\nATTENTION — these positions could not be closed automatically:\n${stopResult.failures.join("\n")}`
-                            : "")
-                      );
-                    }
-                  }}
+                  onClick={() => setKillSwitchConfirmOpen(true)}
                   className="px-2 sm:px-2.5 py-1.5 rounded-lg bg-red-600/20 hover:bg-red-600/40 border border-red-500/60 text-[#ff3344] font-black text-[11px] sm:text-xs uppercase tracking-wider flex items-center gap-1 sm:gap-1.5 transition font-mono shadow-sm shadow-red-950/40 shrink-0"
                   title="Global Emergency Kill Switch — Halts Auto-Pilot & cancels open orders"
                 >
@@ -2983,6 +2983,26 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
           currentAtr={autoTradeCoin?.atr ?? currentAtr ?? ((lastPrice ?? 100) * 0.02)}
         />
       )}
+      <ConfirmActionModal
+        isOpen={killSwitchConfirmOpen}
+        title="Emergency Kill Switch"
+        message="This will instantly halt Auto-Pilot, cancel all open orders, and close live/paper positions. Proceed?"
+        confirmText="Activate Kill Switch"
+        cancelText="Cancel"
+        variant="danger"
+        onConfirm={() => void handleKillSwitch()}
+        onCancel={() => setKillSwitchConfirmOpen(false)}
+      />
+      <ConfirmActionModal
+        isOpen={!!killSwitchResult}
+        title="Kill Switch Result"
+        message={killSwitchResult ?? ""}
+        confirmText="OK"
+        cancelText=""
+        variant="neutral"
+        onConfirm={() => setKillSwitchResult(null)}
+        onCancel={() => setKillSwitchResult(null)}
+      />
       <SwarmTerminal
         open={swarmOpen}
         onClose={() => setSwarmOpen(false)}

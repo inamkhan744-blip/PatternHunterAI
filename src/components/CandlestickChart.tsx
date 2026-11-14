@@ -1,4 +1,5 @@
 import { useEffect, useRef, useCallback, useState, useMemo } from "react";
+import ConfirmActionModal from "./ui/ConfirmActionModal";
 import {
   createChart,
   ColorType,
@@ -91,6 +92,7 @@ export default function CandlestickChart({
   // Liquidation Heatmap toggle & detail modal state
   const [showLiquidationHeatmap, setShowLiquidationHeatmap] = useState(true);
   const [heatmapModalOpen, setHeatmapModalOpen] = useState(false);
+  const [infoModal, setInfoModal] = useState<{ title: string; message: string } | null>(null);
 
   // Grid bot state for chart overlay
   const [gridState, setGridState] = useState<GridBotState>(gridTradingBot.getState());
@@ -1226,10 +1228,10 @@ export default function CandlestickChart({
         fomoRemainingSeconds={fomoRemainingSeconds}
         onExecuteTrade={() => {
           if (fomoLocked) {
-            alert("🚨 Trade execution disabled: Anti-FOMO Lock active.");
+            setInfoModal({ title: "Trade Blocked", message: "🚨 Trade execution disabled: Anti-FOMO Lock active." });
             return;
           }
-          alert(`Trade executed with High Confluence (${confluenceResult?.score}/100)!`);
+          setInfoModal({ title: "Trade Executed", message: `Trade executed with High Confluence (${confluenceResult?.score}/100)!` });
         }}
       />
 
@@ -1245,6 +1247,18 @@ export default function CandlestickChart({
           </div>
         </div>
       )}
+    {infoModal && (
+      <ConfirmActionModal
+        isOpen={!!infoModal}
+        title={infoModal.title}
+        message={infoModal.message}
+        variant="neutral"
+        confirmText="OK"
+        cancelText=""
+        onConfirm={() => setInfoModal(null)}
+        onCancel={() => setInfoModal(null)}
+      />
+    )}
     </div>
   );
 }

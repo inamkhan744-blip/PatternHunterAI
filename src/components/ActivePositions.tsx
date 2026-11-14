@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from "react";
+import ConfirmActionModal from "./ui/ConfirmActionModal";
 import {
   TrendingUp,
   TrendingDown,
@@ -59,8 +60,17 @@ export default function ActivePositions({ currentSymbol, currentPrice }: Props) 
   }, [currentSymbol, currentPrice]);
 
   const [closeError, setCloseError] = useState<string | null>(null);
+  const [pendingCloseTrade, setPendingCloseTrade] = useState<ActiveTrade | null>(null);
+  const [closeAllConfirm, setCloseAllConfirm] = useState(false);
 
-  const handleCloseTrade = async (trade: ActiveTrade) => {
+  const handleCloseTrade = (trade: ActiveTrade) => {
+    setPendingCloseTrade(trade);
+  };
+
+  const confirmCloseTrade = async () => {
+    if (!pendingCloseTrade) return;
+    const trade = pendingCloseTrade;
+    setPendingCloseTrade(null);
     setCloseError(null);
     const { closed, error } = await tradeManager.closeTradeWithExchange(
       trade.id,
@@ -72,9 +82,13 @@ export default function ActivePositions({ currentSymbol, currentPrice }: Props) 
     }
   };
 
-  const handleCloseAll = async () => {
+  const handleCloseAll = () => {
     if (activeTrades.length === 0) return;
-    if (!confirm("Close all active open positions immediately at current market prices?")) return;
+    setCloseAllConfirm(true);
+  };
+
+  const confirmCloseAll = async () => {
+    setCloseAllConfirm(false);
     setCloseError(null);
     const failures: string[] = [];
     for (const trade of activeTrades) {
@@ -561,6 +575,30 @@ export default function ActivePositions({ currentSymbol, currentPrice }: Props) 
           )}
         </div>
       )}
+    {pendingCloseTrade && (
+      <ConfirmActionModal
+        isOpen={!!pendingCloseTrade}
+        title="Close Trade"
+        message={`Close ${pendingCloseTrade.symbol} at current market price?`}
+        variant="danger"
+        confirmText="Close"
+        cancelText="Cancel"
+        onConfirm={confirmCloseTrade}
+        onCancel={() => setPendingCloseTrade(null)}
+      />
+    )}
+    {closeAllConfirm && (
+      <ConfirmActionModal
+        isOpen={closeAllConfirm}
+        title="Close All Positions"
+        message="Close all active open positions immediately at current market prices?"
+        variant="danger"
+        confirmText="Close All"
+        cancelText="Cancel"
+        onConfirm={confirmCloseAll}
+        onCancel={() => setCloseAllConfirm(false)}
+      />
+    )}
     </div>
   );
 }

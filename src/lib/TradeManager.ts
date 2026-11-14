@@ -771,6 +771,20 @@ export class TradeManager {
     const candidate = exitPrice ?? trade.currentPrice;
     const closePrice = Number.isFinite(candidate) && candidate > 0 ? candidate : trade.currentPrice;
 
+    // A manually closed trade should only be recorded as SL/TP if the price
+    // actually crossed that threshold; otherwise it stays MANUAL.
+    if (exitReason === "MANUAL") {
+      const crossedSl =
+        trade.direction === "LONG"
+          ? closePrice <= trade.stopLossPrice
+          : closePrice >= trade.stopLossPrice;
+      const crossedTp =
+        trade.direction === "LONG"
+          ? closePrice >= trade.takeProfitPrice
+          : closePrice <= trade.takeProfitPrice;
+      if (crossedSl) exitReason = "SL";
+      else if (crossedTp) exitReason = "TP";
+    }
     const pnl = this.calculatePnl(
       trade.entryPrice,
       closePrice,

@@ -4,6 +4,7 @@ import { fetchTopUsdtPairs, fetchCandles, fetch24hQuoteVolumes, fetchMarketCaps 
 import { fetchLatestNews } from "../lib/NewsService";
 import type { NewsEvent } from "../lib/NewsService";
 import { evaluateConfluence } from "../lib/ConfluenceEngine";
+import { ema } from "../lib/indicators";
 import ScannerTradeSettings, { loadScannerExecutionSettings } from "./ScannerTradeSettings";
 import type { ScannerExecutionSettings } from "./ScannerTradeSettings";
 import TradeConfirmModal from "./TradeConfirmModal";
@@ -200,6 +201,19 @@ function Sparkline({ values }: { values: number[] }) {
   );
 }
 
+function computeObv(candles: { close: number; volume: number }[]): number[] {
+  const obv: number[] = [0];
+  for (let i = 1; i < candles.length; i++) {
+    const prev = candles[i - 1];
+    const curr = candles[i];
+    let next = obv[i - 1];
+    if (curr.close > prev.close) next += curr.volume;
+    else if (curr.close < prev.close) next -= curr.volume;
+    obv.push(next);
+  }
+  return obv;
+}
+
 export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectCoin, watchlistSymbols, onToggleWatch, onOneClickTrade, activeTrades, onManagePosition }: Props) {
   const [selectedTimeframe, setSelectedTimeframe] = useState<Timeframe>(() => {
     const stored = localStorage.getItem("scanner_timeframe");
@@ -386,6 +400,19 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
     const newsSymbols = new Set(newsEvents.flatMap((event) => event.symbols));
     const nextNewsCards: SignalCard[] = [];
 
+    // Higher-timeframe (4H) BTC trend filter: only allow signals aligned with BTC.
+    let btcBullish = true;
+    try {
+      const btcCandles = await fetchCandles("BTCUSDT", 60, "4h");
+      const closes = btcCandles.map((c) => c.close);
+      const emaSeries = ema(closes, 50);
+      const lastEma = emaSeries[emaSeries.length - 1];
+      const lastClose = closes[closes.length - 1];
+      if (Number.isFinite(lastEma as number)) btcBullish = lastClose > (lastEma as number);
+    } catch {
+      btcBullish = true;
+    }
+
     await mapWithConcurrency(newsEvents, 5, async (event) => {
       const symbol = event.symbols[0];
       if (!symbol) return null;
@@ -406,7 +433,19 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
         const atrSeries = atr(data, 14);
         const atrValue = atrSeries[atrSeries.length - 1] || price * 0.02;
         const direction: "LONG" | "SHORT" = event.negative ? "SHORT" : "LONG";
-        const levels = calculateAtrStopLoss(price, atrValue, direction, 1.5, 2.0);
+        if (direction === "LONG" && !btcBullish) return null;
+        if (direction === "SHORT" && btcBullish) return null;
+
+        const volume24h = volumes24h[coin.symbol] || 0;
+        if (volume24h < 10_000_000) return null;
+        const obvSeries = computeObv(data);
+        const obvTrend =
+          obvSeries[obvSeries.length - 1] -
+          (obvSeries[Math.max(0, obvSeries.length - 6)] ?? obvSeries[0]);
+        if (direction === "LONG" && !(obvTrend > 0)) return null;
+        if (direction === "SHORT" && !(obvTrend < 0)) return null;
+
+        const levels = calculateAtrStopLoss(price, atrValue, direction, 2.0, 2.0);
 
         const card: SignalCard = {
           coin,
@@ -419,7 +458,7 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
           entryPrice: price,
           atr: atrValue,
           volume: currentVolume,
-          volume24h: volumes24h[coin.symbol] || 0,
+          volume24h: volume24h,
           marketCap: marketCaps[coin.symbol] || 0,
           sparkline: data.slice(-20).map((candle) => candle.close),
           bbWidth: 0,
@@ -469,8 +508,20 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
         const direction: "LONG" | "SHORT" =
           confluence?.setupBias?.includes("Buy") ? "LONG" : "SHORT";
 
+        if (direction === "LONG" && !btcBullish) return null;
+        if (direction === "SHORT" && btcBullish) return null;
+
+        const volume24h = volumes24h[coin.symbol] || 0;
+        if (volume24h < 10_000_000) return null;
+        const obvSeries = computeObv(data);
+        const obvTrend =
+          obvSeries[obvSeries.length - 1] -
+          (obvSeries[Math.max(0, obvSeries.length - 6)] ?? obvSeries[0]);
+        if (direction === "LONG" && !(obvTrend > 0)) return null;
+        if (direction === "SHORT" && !(obvTrend < 0)) return null;
+
         const entryPrice = direction === "LONG" ? squeeze.squeezeHigh : squeeze.squeezeLow;
-        const levels = calculateAtrStopLoss(entryPrice, atrValue, direction, 1.5, 2.0);
+        const levels = calculateAtrStopLoss(entryPrice, atrValue, direction, 2.0, 2.0);
 
         return {
           coin,

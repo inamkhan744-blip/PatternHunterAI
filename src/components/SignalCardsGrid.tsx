@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Zap, RefreshCw, TrendingUp, TrendingDown, Rocket, Newspaper, Star } from "lucide-react";
+import { Zap, RefreshCw, TrendingUp, TrendingDown, Rocket, Newspaper, Star, Volume2, VolumeX, AlertCircle } from "lucide-react";
 import { fetchTopUsdtPairs, fetchCandles } from "../lib/binance";
 import { fetchLatestNews } from "../lib/NewsService";
 import type { NewsEvent } from "../lib/NewsService";
@@ -108,12 +108,31 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
   const [newsCards, setNewsCards] = useState<SignalCard[]>([]);
   const [squeezeCards, setSqueezeCards] = useState<SignalCard[]>([]);
   const [loading, setLoading] = useState(true);
+  const [marketError, setMarketError] = useState<string | null>(null);
+  const [newsError, setNewsError] = useState<string | null>(null);
   const [filter, setFilter] = useState<"all" | "long" | "short" | "blast">("all");
   const [sort, setSort] = useState<"squeeze" | "volume" | "score">("squeeze");
+  const [soundEnabled, setSoundEnabled] = useState(true);
+  const [watchedSymbols, setWatchedSymbols] = useState<Set<string>>(new Set(watchlistSymbols || []));
 
   const audioContextRef = useRef<AudioContext | null>(null);
   const previousKeysRef = useRef<Set<string>>(new Set());
   const hasScannedRef = useRef(false);
+  const isMountedRef = useRef(true);
+  const hasCardsRef = useRef(false);
+  const soundEnabledRef = useRef(soundEnabled);
+
+  useEffect(() => {
+    soundEnabledRef.current = soundEnabled;
+  }, [soundEnabled]);
+
+  useEffect(() => {
+    hasCardsRef.current = newsCards.length > 0 || squeezeCards.length > 0;
+  }, [newsCards, squeezeCards]);
+
+  useEffect(() => {
+    setWatchedSymbols(new Set(watchlistSymbols || []));
+  }, [watchlistSymbols]);
 
   const playBeep = useCallback(() => {
     try {
@@ -137,40 +156,60 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
   }, []);
 
   useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
     setSelectedTimeframe(initialTimeframe);
   }, [initialTimeframe]);
 
-  useEffect(() => {
-    let active = true;
-    void fetchTopUsdtPairs(100).then((result) => {
-      if (active) setCoins(result);
-    });
-    return () => {
-      active = false;
-    };
+  const loadCoins = useCallback(async () => {
+    if (!isMountedRef.current) return;
+    setMarketError(null);
+    try {
+      const result = await fetchTopUsdtPairs(100);
+      if (isMountedRef.current) setCoins(result);
+    } catch (error) {
+      if (isMountedRef.current) {
+        setMarketError(error instanceof Error ? error.message : "Failed to load market data.");
+      }
+    }
+  }, []);
+
+  const loadNews = useCallback(async () => {
+    if (!isMountedRef.current) return;
+    setNewsError(null);
+    try {
+      const events = await fetchLatestNews();
+      if (isMountedRef.current) setNewsEvents(events);
+    } catch (error) {
+      if (isMountedRef.current) {
+        setNewsError(error instanceof Error ? error.message : "Failed to load news.");
+      }
+    }
   }, []);
 
   useEffect(() => {
-    let active = true;
-    const loadNews = async () => {
-      const events = await fetchLatestNews();
-      if (active) setNewsEvents(events);
-    };
+    void loadCoins();
+  }, [loadCoins]);
+
+  useEffect(() => {
     void loadNews();
     const timer = setInterval(() => void loadNews(), 30000);
-    return () => {
-      active = false;
-      clearInterval(timer);
-    };
-  }, []);
+    return () => clearInterval(timer);
+  }, [loadNews]);
 
   const scan = useCallback(async () => {
+    if (!isMountedRef.current) return;
     if (coins.length === 0) {
-      setLoading(false);
+      if (isMountedRef.current) setLoading(false);
       return;
     }
 
-    setLoading(newsCards.length === 0 && squeezeCards.length === 0);
+    if (!hasCardsRef.current) setLoading(true);
 
     const newsSymbols = new Set(newsEvents.flatMap((event) => event.symbols));
     const nextNewsCards: SignalCard[] = [];
@@ -182,7 +221,7 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
         const coin = findCoin(symbol);
         try {
           const data = await fetchCandles(coin.binanceSymbol, 30, selectedTimeframe);
-          if (data.length < 21) return;
+          if (!isMountedRef.current || data.length < 21) return;
 
           const volumes = data.map((candle) => candle.volume);
           const avgVolume =
@@ -221,12 +260,14 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
       })
     );
 
+    if (!isMountedRef.current) return;
+
     const settled = await Promise.allSettled(
       coins
         .filter((coin) => !newsSymbols.has(coin.symbol))
         .map(async (coin) => {
           const data = await fetchCandles(coin.binanceSymbol, 100, selectedTimeframe);
-          if (data.length < 50) return null;
+          if (!isMountedRef.current || data.length < 50) return null;
 
           const squeeze = detectSqueeze(data);
           if (!squeeze.blastReady) return null;
@@ -265,28 +306,41 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
         })
     );
 
+    if (!isMountedRef.current) return;
+
     const nextSqueezeCards = settled
       .map((result) => (result.status === "fulfilled" ? result.value : null))
       .filter((value): value is SignalCard => value !== null)
       .sort((a, b) => a.bbWidth - b.bbWidth);
 
     const nextKeys = new Set([...nextNewsCards, ...nextSqueezeCards].map((card) => `${card.news ? "news" : "squeeze"}-${card.coin.binanceSymbol}`));
-    if (hasScannedRef.current && [...nextKeys].some((key) => !previousKeysRef.current.has(key))) {
+    if (hasScannedRef.current && soundEnabledRef.current && [...nextKeys].some((key) => !previousKeysRef.current.has(key))) {
       playBeep();
     }
     hasScannedRef.current = true;
     previousKeysRef.current = nextKeys;
 
+    if (!isMountedRef.current) return;
     setNewsCards(nextNewsCards);
     setSqueezeCards(nextSqueezeCards);
     setLoading(false);
-  }, [coins, selectedTimeframe, newsEvents, newsCards.length, squeezeCards.length, playBeep]);
+  }, [coins, selectedTimeframe, newsEvents, playBeep]);
 
   useEffect(() => {
     void scan();
     const timer = setInterval(() => void scan(), 5000);
     return () => clearInterval(timer);
   }, [scan]);
+
+  const handleToggleWatch = useCallback((coin: Coin) => {
+    setWatchedSymbols((previous) => {
+      const next = new Set(previous);
+      if (next.has(coin.binanceSymbol)) next.delete(coin.binanceSymbol);
+      else next.add(coin.binanceSymbol);
+      return next;
+    });
+    onToggleWatch?.(coin);
+  }, [onToggleWatch]);
 
   const filteredNewsCards = newsCards.filter((card) => {
     if (filter === "long") return card.direction === "LONG";
@@ -307,13 +361,12 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
     squeezeCards.filter((card) => {
       if (filter === "long") return card.direction === "LONG";
       if (filter === "short") return card.direction === "SHORT";
-      if (filter === "blast") return true;
       return true;
     })
   );
 
   const renderCard = (card: SignalCard) => {
-    const watched = watchlistSymbols?.has(card.coin.binanceSymbol) ?? false;
+    const watched = watchedSymbols.has(card.coin.binanceSymbol);
     return (
       <div
         key={`${card.news ? "news" : "squeeze"}-${card.coin.binanceSymbol}`}
@@ -338,7 +391,7 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
               <button
                 onClick={(event) => {
                   event.stopPropagation();
-                  onToggleWatch(card.coin);
+                  handleToggleWatch(card.coin);
                 }}
                 className="text-slate-500 hover:text-yellow-400 transition"
                 title={watched ? "Remove from watchlist" : "Add to watchlist"}
@@ -436,6 +489,13 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
             ))}
           </select>
           <button
+            onClick={() => setSoundEnabled((value) => !value)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-slate-300 transition"
+            title={soundEnabled ? "Mute sound alerts" : "Unmute sound alerts"}
+          >
+            {soundEnabled ? <Volume2 className="w-3.5 h-3.5" /> : <VolumeX className="w-3.5 h-3.5" />}
+          </button>
+          <button
             onClick={() => void scan()}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-slate-300 transition"
           >
@@ -481,13 +541,43 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
         </div>
       </div>
 
+      {marketError && (
+        <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-xs text-red-200 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            <span>{marketError}</span>
+          </div>
+          <button
+            onClick={() => void loadCoins()}
+            className="px-3 py-1.5 rounded-lg bg-red-500/20 hover:bg-red-500/30 border border-red-500/40 text-xs font-bold"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
+      {newsError && (
+        <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-xs text-amber-200 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            <span>{newsError}</span>
+          </div>
+          <button
+            onClick={() => void loadNews()}
+            className="px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-xs font-bold"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
       {filteredNewsCards.length > 0 && filter !== "blast" && (
         <section className="space-y-3">
           <div>
             <h2 className="text-lg font-bold text-white">🔥 Trending / News Alerts</h2>
             <p className="text-xs text-slate-500">Breaking news with live volume spikes</p>
           </div>
-          <div className="grid grid-cols-2 gap-3">{filteredNewsCards.map(renderCard)}</div>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">{filteredNewsCards.map(renderCard)}</div>
         </section>
       )}
 
@@ -502,12 +592,12 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
             <RefreshCw className="w-5 h-5 animate-spin mr-2" />
             Scanning markets...
           </div>
-        ) : filteredSqueezeCards.length === 0 ? (
+        ) : filteredSqueezeCards.length === 0 && !marketError ? (
           <div className="flex items-center justify-center py-16 text-slate-500">
             No matching setups found right now.
           </div>
         ) : (
-          <div className="grid grid-cols-2 gap-3">{filteredSqueezeCards.map(renderCard)}</div>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">{filteredSqueezeCards.map(renderCard)}</div>
         )}
       </section>
     </div>

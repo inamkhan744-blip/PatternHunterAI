@@ -88,7 +88,11 @@ function extractSymbols(text: string): string[] {
   }
 
   for (const coin of KNOWN_COINS) {
-    const pattern = new RegExp(`\\b${coin.symbol}(?:USD|USDT|USDC)?\\b`, "i");
+    const escaped = coin.symbol.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const pattern = new RegExp(
+      `(?:^|[^A-Za-z0-9])#?${escaped}(?:[\\/\\-_ ]?(?:USD|USDT|USDC))?(?:[^A-Za-z0-9]|$)`,
+      "i"
+    );
     if (pattern.test(text)) {
       symbols.add(coin.symbol);
     }
@@ -103,9 +107,10 @@ function isNegative(title: string, description: string): boolean {
 }
 
 export async function fetchLatestNews(): Promise<NewsEvent[]> {
-  try {
-    const response = await fetch(NEWS_URL);
-    if (!response.ok) return [];
+  const response = await fetch(NEWS_URL);
+  if (!response.ok) {
+    throw new Error(`News request failed (${response.status})`);
+  }
 
     const data = (await response.json()) as {
       articles?: Array<{
@@ -131,7 +136,4 @@ export async function fetchLatestNews(): Promise<NewsEvent[]> {
       })
       .filter((event) => event.symbols.length > 0)
       .slice(0, 20);
-  } catch {
-    return [];
-  }
 }

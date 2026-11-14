@@ -1,13 +1,22 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { Zap, RefreshCw, TrendingUp, TrendingDown, Flame, Droplet } from "lucide-react";
-import { COINS, PRO_COINS } from "../constants";
-import { fetchCandles } from "../lib/binance";
+import React, { useCallback, useEffect, useState } from "react";
+import { Zap, RefreshCw, TrendingUp, TrendingDown, Rocket } from "lucide-react";
+import { fetchTopUsdtPairs, fetchCandles } from "../lib/binance";
 import { evaluateConfluence } from "../lib/ConfluenceEngine";
 import { scanSMC } from "../lib/SMCScanner";
-import { rsi, atr, bollingerBands } from "../lib/indicators";
+import { atr, bollingerBands } from "../lib/indicators";
 import { calculateAtrStopLoss } from "../lib/BinanceAutoTrade";
 import { formatPrice } from "../lib/patterns";
 import type { Coin, Timeframe } from "../types";
+
+interface SqueezeResult {
+  blastReady: boolean;
+  squeeze: boolean;
+  volumeDryUp: boolean;
+  tight: boolean;
+  bbWidth: number;
+  squeezeHigh: number;
+  squeezeLow: number;
+}
 
 interface SignalCard {
   coin: Coin;
@@ -17,8 +26,10 @@ interface SignalCard {
   direction: "LONG" | "SHORT";
   stopLoss: number;
   takeProfit: number;
-  pump: boolean;
-  dump: boolean;
+  entryPrice: number;
+  atr: number;
+  blastReady: boolean;
+  bbWidth: number;
   alertReason: string;
 }
 
@@ -26,62 +37,78 @@ interface Props {
   timeframe: Timeframe;
   onSelectCoin: (coin: Coin) => void;
   onTradeNow: (coin: Coin, price: number, atr: number) => void;
-  isPro?: boolean;
 }
 
-function detectPump(candles: { close: number; volume: number }[]) {
+function detectSqueeze(candles: { high: number; low: number; close: number; volume: number }[]): SqueezeResult {
   const closes = candles.map((c) => c.close);
-  const volumes = candles.map((c) => c.volume);
   const bb = bollingerBands(closes, 20, 2);
-  const rsiSeries = rsi(closes, 14);
-
   const last = candles.length - 1;
-  const bandwidth = bb.upper[last] && bb.lower[last] && bb.middle[last]
-    ? (bb.upper[last]! - bb.lower[last]!) / bb.middle[last]!
-    : 1;
-  const squeeze = bandwidth < 0.045;
 
-  const recentVolumes = volumes.slice(-21, -1);
+  const widths: number[] = [];
+  for (let i = 19; i <= last; i++) {
+    const upper = bb.upper[i];
+    const lower = bb.lower[i];
+    const middle = bb.middle[i];
+    if (upper != null && lower != null && middle) {
+      widths.push((upper - lower) / middle);
+    }
+  }
+
+  const currentWidth = widths.length ? widths[widths.length - 1] : 1;
+  const recentWidths = widths.slice(-50);
+  const minRecentWidth = recentWidths.length ? Math.min(...recentWidths) : currentWidth;
+  const squeeze = recentWidths.length >= 10 && currentWidth <= minRecentWidth + 1e-9;
+
+  const recentVolumes = candles.slice(-21, -1).map((c) => c.volume);
   const avgVolume =
     recentVolumes.reduce((sum, value) => sum + value, 0) / Math.max(1, recentVolumes.length);
-  const volumeSpike = volumes[last] > Math.max(1, avgVolume) * 3;
+  const volumeDryUp = candles[last].volume < Math.max(1, avgVolume) * 0.5;
 
-  const rsiNow = rsiSeries[last];
-  const rsiPrev = rsiSeries[Math.max(0, last - 5)];
-  const priceNow = closes[last];
-  const pricePrev = closes[Math.max(0, last - 5)];
-  const bullishDivergence = priceNow < pricePrev && rsiNow !== null && rsiPrev !== null && rsiNow > rsiPrev;
-  const bearishDivergence = priceNow > pricePrev && rsiNow !== null && rsiPrev !== null && rsiNow < rsiPrev;
+  const recentFive = candles.slice(-5);
+  const highMax = Math.max(...recentFive.map((c) => c.high));
+  const lowMin = Math.min(...recentFive.map((c) => c.low));
+  const tight = lowMin > 0 && (highMax - lowMin) / lowMin < 0.03;
 
-  const pump = squeeze && volumeSpike && bullishDivergence;
-  const dump = squeeze && volumeSpike && bearishDivergence;
-
-  let alertReason = "";
-  if (pump) alertReason = "Bollinger squeeze, volume spike, and bullish RSI divergence";
-  else if (dump) alertReason = "Bollinger squeeze, volume spike, and bearish RSI divergence";
-
-  return { pump, dump, alertReason };
+  return {
+    blastReady: squeeze && volumeDryUp && tight,
+    squeeze,
+    volumeDryUp,
+    tight,
+    bbWidth: currentWidth,
+    squeezeHigh: highMax,
+    squeezeLow: lowMin,
+  };
 }
 
-export default function SignalCardsGrid({ timeframe, onSelectCoin, onTradeNow, isPro = false }: Props) {
+export default function SignalCardsGrid({ timeframe, onSelectCoin, onTradeNow }: Props) {
+  const [coins, setCoins] = useState<Coin[]>([]);
   const [cards, setCards] = useState<SignalCard[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const coins = useMemo(() => {
-    const all = [
-      ...COINS.map((coin) => ({ coin, isPro: false })),
-      ...PRO_COINS.map((coin) => ({ coin, isPro: true })),
-    ];
-    const accessible = isPro ? all : all.filter((item) => !item.isPro);
-    return accessible.slice(0, 6);
-  }, [isPro]);
+  useEffect(() => {
+    let active = true;
+    void fetchTopUsdtPairs(100).then((result) => {
+      if (active) setCoins(result);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const scan = useCallback(async () => {
+    if (coins.length === 0) {
+      setLoading(false);
+      return;
+    }
+
     setLoading(cards.length === 0);
     const settled = await Promise.allSettled(
-      coins.map(async ({ coin }) => {
+      coins.map(async (coin) => {
         const data = await fetchCandles(coin.binanceSymbol, 100, timeframe);
-        if (data.length < 30) return null;
+        if (data.length < 50) return null;
+
+        const squeeze = detectSqueeze(data);
+        if (!squeeze.blastReady) return null;
 
         const smcData = scanSMC(data);
         const confluence = evaluateConfluence(data, smcData, null);
@@ -90,24 +117,26 @@ export default function SignalCardsGrid({ timeframe, onSelectCoin, onTradeNow, i
         const change = first > 0 ? ((price - first) / first) * 100 : 0;
         const atrSeries = atr(data, 14);
         const atrValue = atrSeries[atrSeries.length - 1] || price * 0.02;
-        const { pump, dump, alertReason } = detectPump(data);
 
         const direction: "LONG" | "SHORT" =
-          pump ? "LONG" : dump ? "SHORT" : confluence.setupBias.includes("Buy") ? "LONG" : "SHORT";
+          confluence?.setupBias?.includes("Buy") ? "LONG" : "SHORT";
 
-        const levels = calculateAtrStopLoss(price, atrValue, direction, 1.5, 2.0);
+        const entryPrice = direction === "LONG" ? squeeze.squeezeHigh : squeeze.squeezeLow;
+        const levels = calculateAtrStopLoss(entryPrice, atrValue, direction, 1.5, 2.0);
 
         return {
           coin,
           price,
           change,
-          score: confluence.score,
+          score: confluence?.score ?? 0,
           direction,
           stopLoss: levels.stopLossPrice,
           takeProfit: levels.takeProfitPrice,
-          pump,
-          dump,
-          alertReason,
+          entryPrice,
+          atr: atrValue,
+          blastReady: true,
+          bbWidth: squeeze.bbWidth,
+          alertReason: "BB squeeze, volume dry-up, and tight 5-candle range",
         } as SignalCard;
       })
     );
@@ -115,11 +144,11 @@ export default function SignalCardsGrid({ timeframe, onSelectCoin, onTradeNow, i
     const next = settled
       .map((result) => (result.status === "fulfilled" ? result.value : null))
       .filter((value): value is SignalCard => value !== null)
-      .sort((a, b) => b.score - a.score);
+      .sort((a, b) => a.bbWidth - b.bbWidth);
 
     setCards(next);
     setLoading(false);
-  }, [coins, timeframe]);
+  }, [coins, timeframe, cards.length]);
 
   useEffect(() => {
     void scan();
@@ -131,8 +160,8 @@ export default function SignalCardsGrid({ timeframe, onSelectCoin, onTradeNow, i
     <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-4">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <h2 className="text-lg font-bold text-white">Signal Cards</h2>
-          <p className="text-xs text-slate-500">Auto-refreshing every 5 seconds</p>
+          <h2 className="text-lg font-bold text-white">Pre-Breakout Squeeze Scanner</h2>
+          <p className="text-xs text-slate-500">Top 100 USDT pairs by volume • auto-refreshing every 5 seconds</p>
         </div>
         <button
           onClick={() => void scan()}
@@ -147,6 +176,10 @@ export default function SignalCardsGrid({ timeframe, onSelectCoin, onTradeNow, i
         <div className="flex items-center justify-center py-16 text-slate-500">
           <RefreshCw className="w-5 h-5 animate-spin mr-2" />
           Scanning markets...
+        </div>
+      ) : cards.length === 0 ? (
+        <div className="flex items-center justify-center py-16 text-slate-500">
+          No pre-breakout squeezes found right now.
         </div>
       ) : (
         <div className="grid grid-cols-2 gap-3">
@@ -176,19 +209,15 @@ export default function SignalCardsGrid({ timeframe, onSelectCoin, onTradeNow, i
                 </span>
               </div>
 
-              {(card.pump || card.dump) && (
-                <div
-                  className={`mt-2 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                    card.pump
-                      ? "bg-orange-500/20 text-orange-300 border border-orange-500/40"
-                      : "bg-rose-500/20 text-rose-300 border border-rose-500/40"
-                  }`}
-                  title={card.alertReason}
-                >
-                  {card.pump ? <Flame className="w-3 h-3" /> : <Droplet className="w-3 h-3" />}
-                  {card.pump ? "Pump Alert" : "Dump Alert"}
-                </div>
-              )}
+              <div className="mt-2 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/40">
+                <Rocket className="w-3 h-3" />
+                🚀 Blast Ready
+              </div>
+
+              <div className="mt-2 text-[11px] text-slate-300">
+                Pending Entry:{" "}
+                <span className="font-mono font-bold text-cyan-300">{formatPrice(card.entryPrice)}</span>
+              </div>
 
               <div className="mt-3 grid grid-cols-2 gap-2 text-[11px]">
                 <div className="rounded-lg bg-slate-950/70 border border-slate-800 p-2">
@@ -211,7 +240,7 @@ export default function SignalCardsGrid({ timeframe, onSelectCoin, onTradeNow, i
                   </span>
                 </div>
                 <button
-                  onClick={() => onTradeNow(card.coin, card.price, card.stopLoss > 0 ? Math.abs(card.price - card.stopLoss) / 1.5 : card.price * 0.02)}
+                  onClick={() => onTradeNow(card.coin, card.entryPrice, card.atr)}
                   className="px-3 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-[11px] font-black transition"
                 >
                   Trade Now

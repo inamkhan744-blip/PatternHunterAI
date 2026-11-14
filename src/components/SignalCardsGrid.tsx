@@ -1,11 +1,14 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { Zap, RefreshCw, TrendingUp, TrendingDown, Rocket } from "lucide-react";
+import { Zap, RefreshCw, TrendingUp, TrendingDown, Rocket, Newspaper } from "lucide-react";
 import { fetchTopUsdtPairs, fetchCandles } from "../lib/binance";
+import { fetchLatestNews } from "../lib/NewsService";
+import type { NewsEvent } from "../lib/NewsService";
 import { evaluateConfluence } from "../lib/ConfluenceEngine";
 import { scanSMC } from "../lib/SMCScanner";
 import { atr, bollingerBands } from "../lib/indicators";
 import { calculateAtrStopLoss } from "../lib/BinanceAutoTrade";
 import { formatPrice } from "../lib/patterns";
+import { COINS, PRO_COINS } from "../constants";
 import type { Coin, Timeframe } from "../types";
 
 interface SqueezeResult {
@@ -28,8 +31,9 @@ interface SignalCard {
   takeProfit: number;
   entryPrice: number;
   atr: number;
-  blastReady: boolean;
   bbWidth: number;
+  news: boolean;
+  headline?: string;
   alertReason: string;
 }
 
@@ -37,6 +41,18 @@ interface Props {
   timeframe: Timeframe;
   onSelectCoin: (coin: Coin) => void;
   onTradeNow: (coin: Coin, price: number, atr: number) => void;
+}
+
+const ALL_KNOWN_COINS = [...COINS, ...PRO_COINS];
+
+function findCoin(symbol: string): Coin {
+  return (
+    ALL_KNOWN_COINS.find((coin) => coin.symbol === symbol) || {
+      symbol,
+      label: symbol,
+      binanceSymbol: `${symbol}USDT`,
+    }
+  );
 }
 
 function detectSqueeze(candles: { high: number; low: number; close: number; volume: number }[]): SqueezeResult {
@@ -82,7 +98,9 @@ function detectSqueeze(candles: { high: number; low: number; close: number; volu
 
 export default function SignalCardsGrid({ timeframe, onSelectCoin, onTradeNow }: Props) {
   const [coins, setCoins] = useState<Coin[]>([]);
-  const [cards, setCards] = useState<SignalCard[]>([]);
+  const [newsEvents, setNewsEvents] = useState<NewsEvent[]>([]);
+  const [newsCards, setNewsCards] = useState<SignalCard[]>([]);
+  const [squeezeCards, setSqueezeCards] = useState<SignalCard[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -95,60 +113,125 @@ export default function SignalCardsGrid({ timeframe, onSelectCoin, onTradeNow }:
     };
   }, []);
 
+  useEffect(() => {
+    let active = true;
+    const loadNews = async () => {
+      const events = await fetchLatestNews();
+      if (active) setNewsEvents(events);
+    };
+    void loadNews();
+    const timer = setInterval(() => void loadNews(), 30000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, []);
+
   const scan = useCallback(async () => {
     if (coins.length === 0) {
       setLoading(false);
       return;
     }
 
-    setLoading(cards.length === 0);
-    const settled = await Promise.allSettled(
-      coins.map(async (coin) => {
-        const data = await fetchCandles(coin.binanceSymbol, 100, timeframe);
-        if (data.length < 50) return null;
+    setLoading(newsCards.length === 0 && squeezeCards.length === 0);
 
-        const squeeze = detectSqueeze(data);
-        if (!squeeze.blastReady) return null;
+    const newsSymbols = new Set(newsEvents.flatMap((event) => event.symbols));
+    const nextNewsCards: SignalCard[] = [];
 
-        const smcData = scanSMC(data);
-        const confluence = evaluateConfluence(data, smcData, null);
-        const price = data[data.length - 1].close;
-        const first = data[Math.max(0, data.length - 25)].close;
-        const change = first > 0 ? ((price - first) / first) * 100 : 0;
-        const atrSeries = atr(data, 14);
-        const atrValue = atrSeries[atrSeries.length - 1] || price * 0.02;
+    await Promise.all(
+      newsEvents.map(async (event) => {
+        const symbol = event.symbols[0];
+        if (!symbol) return;
+        const coin = findCoin(symbol);
+        try {
+          const data = await fetchCandles(coin.binanceSymbol, 30, timeframe);
+          if (data.length < 21) return;
 
-        const direction: "LONG" | "SHORT" =
-          confluence?.setupBias?.includes("Buy") ? "LONG" : "SHORT";
+          const volumes = data.map((candle) => candle.volume);
+          const avgVolume =
+            volumes.slice(-21, -1).reduce((sum, value) => sum + value, 0) / 20;
+          const currentVolume = volumes[volumes.length - 1];
+          if (!(currentVolume > Math.max(1, avgVolume) * 3)) return;
 
-        const entryPrice = direction === "LONG" ? squeeze.squeezeHigh : squeeze.squeezeLow;
-        const levels = calculateAtrStopLoss(entryPrice, atrValue, direction, 1.5, 2.0);
+          const price = data[data.length - 1].close;
+          const first = data[Math.max(0, data.length - 5)].close;
+          const change = first > 0 ? ((price - first) / first) * 100 : 0;
+          const atrSeries = atr(data, 14);
+          const atrValue = atrSeries[atrSeries.length - 1] || price * 0.02;
+          const direction: "LONG" | "SHORT" = event.negative ? "SHORT" : "LONG";
+          const levels = calculateAtrStopLoss(price, atrValue, direction, 1.5, 2.0);
 
-        return {
-          coin,
-          price,
-          change,
-          score: confluence?.score ?? 0,
-          direction,
-          stopLoss: levels.stopLossPrice,
-          takeProfit: levels.takeProfitPrice,
-          entryPrice,
-          atr: atrValue,
-          blastReady: true,
-          bbWidth: squeeze.bbWidth,
-          alertReason: "BB squeeze, volume dry-up, and tight 5-candle range",
-        } as SignalCard;
+          nextNewsCards.push({
+            coin,
+            price,
+            change,
+            score: 99,
+            direction,
+            stopLoss: levels.stopLossPrice,
+            takeProfit: levels.takeProfitPrice,
+            entryPrice: price,
+            atr: atrValue,
+            bbWidth: 0,
+            news: true,
+            headline: event.title,
+            alertReason: "Breaking news with volume spike",
+          });
+        } catch {
+          // Ignore individual fetch failures so one bad symbol does not stop the scan.
+        }
       })
     );
 
-    const next = settled
+    const settled = await Promise.allSettled(
+      coins
+        .filter((coin) => !newsSymbols.has(coin.symbol))
+        .map(async (coin) => {
+          const data = await fetchCandles(coin.binanceSymbol, 100, timeframe);
+          if (data.length < 50) return null;
+
+          const squeeze = detectSqueeze(data);
+          if (!squeeze.blastReady) return null;
+
+          const smcData = scanSMC(data);
+          const confluence = evaluateConfluence(data, smcData, null);
+          const price = data[data.length - 1].close;
+          const first = data[Math.max(0, data.length - 25)].close;
+          const change = first > 0 ? ((price - first) / first) * 100 : 0;
+          const atrSeries = atr(data, 14);
+          const atrValue = atrSeries[atrSeries.length - 1] || price * 0.02;
+
+          const direction: "LONG" | "SHORT" =
+            confluence?.setupBias?.includes("Buy") ? "LONG" : "SHORT";
+
+          const entryPrice = direction === "LONG" ? squeeze.squeezeHigh : squeeze.squeezeLow;
+          const levels = calculateAtrStopLoss(entryPrice, atrValue, direction, 1.5, 2.0);
+
+          return {
+            coin,
+            price,
+            change,
+            score: confluence?.score ?? 0,
+            direction,
+            stopLoss: levels.stopLossPrice,
+            takeProfit: levels.takeProfitPrice,
+            entryPrice,
+            atr: atrValue,
+            bbWidth: squeeze.bbWidth,
+            news: false,
+            alertReason: "BB squeeze, volume dry-up, and tight 5-candle range",
+          } as SignalCard;
+        })
+    );
+
+    const nextSqueezeCards = settled
       .map((result) => (result.status === "fulfilled" ? result.value : null))
       .filter((value): value is SignalCard => value !== null)
       .sort((a, b) => a.bbWidth - b.bbWidth);
 
-    setCards(next);
+    setNewsCards(nextNewsCards);
+    setSqueezeCards(nextSqueezeCards);
     setLoading(false);
-  }, [coins, timeframe, cards.length]);
+  }, [coins, timeframe, newsEvents, newsCards.length, squeezeCards.length]);
 
   useEffect(() => {
     void scan();
@@ -156,100 +239,125 @@ export default function SignalCardsGrid({ timeframe, onSelectCoin, onTradeNow }:
     return () => clearInterval(timer);
   }, [scan]);
 
-  return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-4">
-      <div className="flex items-center justify-between gap-3">
+  const renderCard = (card: SignalCard) => (
+    <div
+      key={`${card.news ? "news" : "squeeze"}-${card.coin.binanceSymbol}`}
+      className="rounded-2xl border border-slate-800 bg-slate-900/80 p-3 shadow-lg"
+    >
+      <div className="flex items-start justify-between gap-2">
         <div>
-          <h2 className="text-lg font-bold text-white">Pre-Breakout Squeeze Scanner</h2>
-          <p className="text-xs text-slate-500">Top 100 USDT pairs by volume • auto-refreshing every 5 seconds</p>
+          <button
+            onClick={() => onSelectCoin(card.coin)}
+            className="text-sm font-bold text-white hover:text-cyan-300 transition"
+          >
+            {card.coin.symbol}/USDT
+          </button>
+          <div className="text-xs text-slate-400 font-mono">{formatPrice(card.price)}</div>
         </div>
-        <button
-          onClick={() => void scan()}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-slate-300 transition"
+        <span
+          className={`px-2 py-0.5 rounded-full text-[10px] font-black ${
+            card.direction === "LONG"
+              ? "bg-green-500/20 text-green-400 border border-green-500/40"
+              : "bg-red-500/20 text-red-400 border border-red-500/40"
+          }`}
         >
-          <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
-          Refresh
-        </button>
+          {card.direction}
+        </span>
       </div>
 
-      {loading && cards.length === 0 ? (
-        <div className="flex items-center justify-center py-16 text-slate-500">
-          <RefreshCw className="w-5 h-5 animate-spin mr-2" />
-          Scanning markets...
-        </div>
-      ) : cards.length === 0 ? (
-        <div className="flex items-center justify-center py-16 text-slate-500">
-          No pre-breakout squeezes found right now.
+      {card.news ? (
+        <div className="mt-2 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-500/20 text-red-300 border border-red-500/40">
+          <Newspaper className="w-3 h-3" />
+          🚨 BREAKING NEWS
         </div>
       ) : (
-        <div className="grid grid-cols-2 gap-3">
-          {cards.map((card) => (
-            <div
-              key={card.coin.binanceSymbol}
-              className="rounded-2xl border border-slate-800 bg-slate-900/80 p-3 shadow-lg"
-            >
-              <div className="flex items-start justify-between gap-2">
-                <div>
-                  <button
-                    onClick={() => onSelectCoin(card.coin)}
-                    className="text-sm font-bold text-white hover:text-cyan-300 transition"
-                  >
-                    {card.coin.symbol}/USDT
-                  </button>
-                  <div className="text-xs text-slate-400 font-mono">{formatPrice(card.price)}</div>
-                </div>
-                <span
-                  className={`px-2 py-0.5 rounded-full text-[10px] font-black ${
-                    card.direction === "LONG"
-                      ? "bg-green-500/20 text-green-400 border border-green-500/40"
-                      : "bg-red-500/20 text-red-400 border border-red-500/40"
-                  }`}
-                >
-                  {card.direction}
-                </span>
-              </div>
-
-              <div className="mt-2 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/40">
-                <Rocket className="w-3 h-3" />
-                🚀 Blast Ready
-              </div>
-
-              <div className="mt-2 text-[11px] text-slate-300">
-                Pending Entry:{" "}
-                <span className="font-mono font-bold text-cyan-300">{formatPrice(card.entryPrice)}</span>
-              </div>
-
-              <div className="mt-3 grid grid-cols-2 gap-2 text-[11px]">
-                <div className="rounded-lg bg-slate-950/70 border border-slate-800 p-2">
-                  <div className="text-slate-500">Stop Loss</div>
-                  <div className="font-mono font-bold text-red-400">{formatPrice(card.stopLoss)}</div>
-                </div>
-                <div className="rounded-lg bg-slate-950/70 border border-slate-800 p-2">
-                  <div className="text-slate-500">Take Profit</div>
-                  <div className="font-mono font-bold text-green-400">{formatPrice(card.takeProfit)}</div>
-                </div>
-              </div>
-
-              <div className="mt-3 flex items-center justify-between gap-2">
-                <div className="flex items-center gap-1.5 text-[11px] text-slate-400">
-                  <Zap className="w-3.5 h-3.5 text-cyan-400" />
-                  <span>Score {card.score}/100</span>
-                  <span className={card.change >= 0 ? "text-green-400" : "text-red-400"}>
-                    {card.change >= 0 ? <TrendingUp className="w-3 h-3 inline" /> : <TrendingDown className="w-3 h-3 inline" />}
-                    {Math.abs(card.change).toFixed(2)}%
-                  </span>
-                </div>
-                <button
-                  onClick={() => onTradeNow(card.coin, card.entryPrice, card.atr)}
-                  className="px-3 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-[11px] font-black transition"
-                >
-                  Trade Now
-                </button>
-              </div>
-            </div>
-          ))}
+        <div className="mt-2 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/40">
+          <Rocket className="w-3 h-3" />
+          🚀 Blast Ready
         </div>
       )}
+
+      {card.headline && (
+        <p className="mt-2 text-[11px] text-slate-300 line-clamp-2">{card.headline}</p>
+      )}
+
+      {!card.news && (
+        <div className="mt-2 text-[11px] text-slate-300">
+          Pending Entry:{" "}
+          <span className="font-mono font-bold text-cyan-300">{formatPrice(card.entryPrice)}</span>
+        </div>
+      )}
+
+      <div className="mt-3 grid grid-cols-2 gap-2 text-[11px]">
+        <div className="rounded-lg bg-slate-950/70 border border-slate-800 p-2">
+          <div className="text-slate-500">Stop Loss</div>
+          <div className="font-mono font-bold text-red-400">{formatPrice(card.stopLoss)}</div>
+        </div>
+        <div className="rounded-lg bg-slate-950/70 border border-slate-800 p-2">
+          <div className="text-slate-500">Take Profit</div>
+          <div className="font-mono font-bold text-green-400">{formatPrice(card.takeProfit)}</div>
+        </div>
+      </div>
+
+      <div className="mt-3 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5 text-[11px] text-slate-400">
+          <Zap className="w-3.5 h-3.5 text-cyan-400" />
+          <span>Score {card.score}/100</span>
+          <span className={card.change >= 0 ? "text-green-400" : "text-red-400"}>
+            {card.change >= 0 ? <TrendingUp className="w-3 h-3 inline" /> : <TrendingDown className="w-3 h-3 inline" />}
+            {Math.abs(card.change).toFixed(2)}%
+          </span>
+        </div>
+        <button
+          onClick={() => onTradeNow(card.coin, card.entryPrice, card.atr)}
+          className="px-3 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-[11px] font-black transition"
+        >
+          Trade Now
+        </button>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6">
+      {newsCards.length > 0 && (
+        <section className="space-y-3">
+          <div>
+            <h2 className="text-lg font-bold text-white">🔥 Trending / News Alerts</h2>
+            <p className="text-xs text-slate-500">Breaking news with live volume spikes</p>
+          </div>
+          <div className="grid grid-cols-2 gap-3">{newsCards.map(renderCard)}</div>
+        </section>
+      )}
+
+      <section className="space-y-3">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-bold text-white">Pre-Breakout Squeeze Scanner</h2>
+            <p className="text-xs text-slate-500">Top 100 USDT pairs by volume • auto-refreshing every 5 seconds</p>
+          </div>
+          <button
+            onClick={() => void scan()}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-slate-300 transition"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
+            Refresh
+          </button>
+        </div>
+
+        {loading && newsCards.length === 0 && squeezeCards.length === 0 ? (
+          <div className="flex items-center justify-center py-16 text-slate-500">
+            <RefreshCw className="w-5 h-5 animate-spin mr-2" />
+            Scanning markets...
+          </div>
+        ) : squeezeCards.length === 0 ? (
+          <div className="flex items-center justify-center py-16 text-slate-500">
+            No pre-breakout squeezes found right now.
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 gap-3">{squeezeCards.map(renderCard)}</div>
+        )}
+      </section>
     </div>
   );
 }

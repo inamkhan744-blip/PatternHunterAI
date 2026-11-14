@@ -193,7 +193,10 @@ function Sparkline({ values }: { values: number[] }) {
 }
 
 export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectCoin, onTradeNow, watchlistSymbols, onToggleWatch }: Props) {
-  const [selectedTimeframe, setSelectedTimeframe] = useState<Timeframe>(initialTimeframe);
+  const [selectedTimeframe, setSelectedTimeframe] = useState<Timeframe>(() => {
+    const stored = localStorage.getItem("scanner_timeframe");
+    return stored && TIMEFRAMES.includes(stored as Timeframe) ? (stored as Timeframe) : initialTimeframe;
+  });
   const [coins, setCoins] = useState<Coin[]>([]);
   const [newsEvents, setNewsEvents] = useState<NewsEvent[]>([]);
   const [newsCards, setNewsCards] = useState<SignalCard[]>([]);
@@ -201,14 +204,31 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
   const [loading, setLoading] = useState(true);
   const [marketError, setMarketError] = useState<string | null>(null);
   const [newsError, setNewsError] = useState<string | null>(null);
-  const [filter, setFilter] = useState<"all" | "long" | "short" | "blast">("all");
-  const [sort, setSort] = useState<"squeeze" | "volume" | "score">("squeeze");
+  const [filter, setFilter] = useState<"all" | "long" | "short" | "blast">(() => {
+    const stored = localStorage.getItem("scanner_filter");
+    return stored === "all" || stored === "long" || stored === "short" || stored === "blast" ? stored : "all";
+  });
+  const [sort, setSort] = useState<"squeeze" | "volume" | "score">(() => {
+    const stored = localStorage.getItem("scanner_sort");
+    return stored === "squeeze" || stored === "volume" || stored === "score" ? stored : "squeeze";
+  });
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [watchedSymbols, setWatchedSymbols] = useState<Set<string>>(new Set(watchlistSymbols || []));
   const [visibleCount, setVisibleCount] = useState(20);
   const [toast, setToast] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [thresholds, setThresholds] = useState<Thresholds>(DEFAULT_THRESHOLDS);
+  const [thresholds, setThresholds] = useState<Thresholds>(() => {
+    const squeezeWidth = Number(localStorage.getItem("scanner_squeeze_width"));
+    const volumeSpikeMultiplier = Number(localStorage.getItem("scanner_volume_spike_multiplier"));
+    const tightness = Number(localStorage.getItem("scanner_tightness"));
+    const volumeDryUp = Number(localStorage.getItem("scanner_volume_dry_up"));
+    return {
+      squeezeWidth: Number.isFinite(squeezeWidth) && squeezeWidth > 0 ? squeezeWidth : DEFAULT_THRESHOLDS.squeezeWidth,
+      volumeSpikeMultiplier: Number.isFinite(volumeSpikeMultiplier) && volumeSpikeMultiplier > 0 ? volumeSpikeMultiplier : DEFAULT_THRESHOLDS.volumeSpikeMultiplier,
+      tightness: Number.isFinite(tightness) && tightness > 0 ? tightness : DEFAULT_THRESHOLDS.tightness,
+      volumeDryUp: Number.isFinite(volumeDryUp) && volumeDryUp > 0 ? volumeDryUp : DEFAULT_THRESHOLDS.volumeDryUp,
+    };
+  });
   const [marketCaps, setMarketCaps] = useState<Record<string, number>>({});
   const [volumes24h, setVolumes24h] = useState<Record<string, number>>({});
 
@@ -237,6 +257,22 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
     const timer = setTimeout(() => setToast(null), 2500);
     return () => clearTimeout(timer);
   }, [toast]);
+
+  useEffect(() => {
+    localStorage.setItem("scanner_timeframe", selectedTimeframe);
+  }, [selectedTimeframe]);
+  useEffect(() => {
+    localStorage.setItem("scanner_filter", filter);
+  }, [filter]);
+  useEffect(() => {
+    localStorage.setItem("scanner_sort", sort);
+  }, [sort]);
+  useEffect(() => {
+    localStorage.setItem("scanner_squeeze_width", thresholds.squeezeWidth.toString());
+    localStorage.setItem("scanner_volume_spike_multiplier", thresholds.volumeSpikeMultiplier.toString());
+    localStorage.setItem("scanner_tightness", thresholds.tightness.toString());
+    localStorage.setItem("scanner_volume_dry_up", thresholds.volumeDryUp.toString());
+  }, [thresholds]);
 
   useEffect(() => {
     if (!settingsOpen) return;
@@ -276,10 +312,6 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
       isMountedRef.current = false;
     };
   }, []);
-
-  useEffect(() => {
-    setSelectedTimeframe(initialTimeframe);
-  }, [initialTimeframe]);
 
   const loadCoins = useCallback(async () => {
     if (!isMountedRef.current) return;
@@ -748,6 +780,26 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
                     className="mt-1 w-full rounded-lg bg-slate-800 border border-slate-700 px-3 py-1.5 text-xs text-slate-200"
                   />
                 </div>
+                <button
+                  onClick={() => {
+                    setThresholds(DEFAULT_THRESHOLDS);
+                    setSelectedTimeframe(initialTimeframe);
+                    setFilter("all");
+                    setSort("squeeze");
+                    [
+                      "scanner_timeframe",
+                      "scanner_filter",
+                      "scanner_sort",
+                      "scanner_squeeze_width",
+                      "scanner_volume_spike_multiplier",
+                      "scanner_tightness",
+                      "scanner_volume_dry_up",
+                    ].forEach((key) => localStorage.removeItem(key));
+                  }}
+                  className="w-full px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-slate-300 transition"
+                >
+                  Reset Defaults
+                </button>
               </div>
             )}
           </div>

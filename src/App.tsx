@@ -45,7 +45,7 @@ import CandlestickChart from "./components/CandlestickChart";
 import PatternPanel from "./components/PatternPanel";
 import ProModal from "./components/ProModal";
 import ScanPanel from "./components/ScanPanel";
-import MarketScanner from "./components/MarketScanner";
+import SignalCardsGrid from "./components/SignalCardsGrid";
 import MarketTicker from "./components/MarketTicker";
 import Watchlist from "./components/Watchlist";
 import SignalHistory from "./components/SignalHistory";
@@ -240,6 +240,7 @@ export default function App() {
   const [watchSymbols, setWatchSymbols] = useState<Set<string>>(new Set());
   const [historyRefresh, setHistoryRefresh] = useState(0);
   const [autoTradeOpen, setAutoTradeOpen] = useState(false);
+  const [autoTradeCoin, setAutoTradeCoin] = useState<{ symbol: string; price: number; atr: number } | null>(null);
   const [currentAtr, setCurrentAtr] = useState<number>(0);
   const [swarmOpen, setSwarmOpen] = useState(false);
 
@@ -2743,11 +2744,13 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
           )}
 
           {activeTab === "scanner" && (
-            <MarketScanner
+            <SignalCardsGrid
               timeframe={timeframe}
               onSelectCoin={selectCoinFromTab}
-              watchlistSymbols={watchSymbols}
-              onToggleWatch={toggleWatch}
+              onTradeNow={(coin, price, atr) => {
+                setAutoTradeCoin({ symbol: coin.binanceSymbol, price, atr });
+                setAutoTradeOpen(true);
+              }}
               isPro={effectiveIsPro || isAdmin}
             />
           )}
@@ -2906,10 +2909,13 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
       {systemSettings.enableAutopilot && (
         <AutoTradeModal
           open={autoTradeOpen}
-          onClose={() => setAutoTradeOpen(false)}
-          currentSymbol={selectedCoin.binanceSymbol}
-          currentPrice={lastPrice}
-          currentAtr={currentAtr || ((lastPrice ?? 100) * 0.02)}
+          onClose={() => {
+            setAutoTradeOpen(false);
+            setAutoTradeCoin(null);
+          }}
+          currentSymbol={autoTradeCoin?.symbol ?? selectedCoin.binanceSymbol}
+          currentPrice={autoTradeCoin?.price ?? lastPrice}
+          currentAtr={autoTradeCoin?.atr ?? currentAtr ?? ((lastPrice ?? 100) * 0.02)}
         />
       )}
       <SwarmTerminal

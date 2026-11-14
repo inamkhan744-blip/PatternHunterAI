@@ -178,8 +178,8 @@ BEGIN
       RETURN jsonb_build_object('ok', false, 'error', 'minScore must be a number.');
     END IF;
     num := (p_raw ->> 'minScore')::numeric;
-    IF num < 85 OR num > 100 THEN
-      RETURN jsonb_build_object('ok', false, 'error', 'minScore must be between 85 and 100.');
+    IF num < 80 OR num > 100 THEN
+      RETURN jsonb_build_object('ok', false, 'error', 'minScore must be between 80 and 100.');
     END IF;
     out := out || jsonb_build_object('minScore', round(num)::int);
   END IF;

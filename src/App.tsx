@@ -917,20 +917,14 @@ export default function App() {
         return;
       }
 
-      // Required confluence scales with volatility: high-ATR setups need a higher score.
-      const requiredScore = autoTradeEngine.getRequiredConfluenceScore(
-        candidate.price,
-        candidate.atr
-      ).requiredScore;
+      // The minimum confluence score is user-configurable (default 85).
+      const requiredScore = cfg.minConfluenceScore ?? 85;
 
       // `>=` is intentional: a signal that scores exactly the required threshold
       // is tradable. Using `<=` here silently discarded every 85/85 setup.
       if (candidate.score < requiredScore) {
-        const thresholdNote =
-          requiredScore > 85 ? " (raised threshold: high-volatility ATR regime)" : "";
         liveWorkerLogStore.addLog(
-          `Skipping: Score ${candidate.score}/100 is below the required ${requiredScore}${thresholdNote}. ` +
-            `A score of exactly ${requiredScore} qualifies.`,
+          `Signal Found (Score ${candidate.score}/${requiredScore}) - Skipping`,
           "info",
           { symbol: candidate.symbol, score: candidate.score, requiredScore }
         );

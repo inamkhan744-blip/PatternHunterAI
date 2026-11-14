@@ -44,6 +44,7 @@ export interface AutoTradeConfig {
   paperTradingEnabled: boolean; // Paper mode virtual trading
   maxDailyLossPercent: number; // Max daily loss % (default 3%) before tripping circuit breaker
   allowAiFallback: boolean; // Allow trades if Gemini AI fails (local heuristic fallback)
+  minConfluenceScore: number; // Minimum Auto-Pilot confluence score (80-100)
 }
 
 export interface ManagedTrade {
@@ -126,6 +127,7 @@ export const DEFAULT_CONFIG: AutoTradeConfig = {
   paperTradingEnabled: false,
   maxDailyLossPercent: 3.0,
   allowAiFallback: true,
+  minConfluenceScore: 85,
 };
 
 // Base URLs
@@ -823,7 +825,7 @@ export class BinanceAutoTradeEngine {
     score: number;
     reason: string;
   }> {
-    const minScore = params.minScore ?? 85;
+    const minScore = params.minScore ?? this.config.minConfluenceScore ?? 85;
     const fallbackDirection: TradeDirection = params.patternDirection === "bearish" ? "SHORT" : "LONG";
 
     if (!this.config.autoPilotEnabled || this.autoPilotState === "PAUSED") {

@@ -206,6 +206,7 @@ export default function AutoTradeModal({
         maxOpenTrades: config.maxOpenTrades,
         tradeDirectionMode: config.tradeDirectionMode,
         paperTrading: config.paperTradingEnabled,
+        minScore: config.minConfluenceScore ?? 85,
       });
     } catch (err) {
       setApSaving(false);
@@ -711,6 +712,34 @@ export default function AutoTradeModal({
                   <span className="font-bold text-amber-400">{config.maxDailyLossPercent || 3}% Breaker</span>
                 </div>
               </div>
+            </div>
+
+            {/* Minimum Confluence Score */}
+            <div className="p-4 rounded-xl bg-[#0d121f] border border-cyan-500/30 flex items-center justify-between gap-3">
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-bold text-cyan-300 uppercase tracking-wider">
+                    Minimum Confluence Score
+                  </span>
+                  <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/40">
+                    {config.minConfluenceScore ?? 85}
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-400 font-sans mt-0.5">
+                  Auto-Pilot only executes when the AI confluence score meets or exceeds this value.
+                </p>
+              </div>
+              <select
+                value={config.minConfluenceScore ?? 85}
+                onChange={(e) => handleConfigChange({ minConfluenceScore: Number(e.target.value) })}
+                className="bg-slate-950 border border-cyan-500/40 rounded-lg px-2.5 py-1 text-cyan-300 font-bold outline-none focus:border-cyan-400"
+              >
+                {[80, 85, 90, 95, 100].map((score) => (
+                  <option key={score} value={score}>
+                    {score}
+                  </option>
+                ))}
+              </select>
             </div>
 
             {/* Paper Trading Mode Toggle, Max Daily Loss %, and AI Fallback Mode Settings */}

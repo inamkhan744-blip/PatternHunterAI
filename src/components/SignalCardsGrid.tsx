@@ -199,7 +199,7 @@ function Sparkline({ values }: { values: number[] }) {
   );
 }
 
-export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectCoin, onTradeNow, watchlistSymbols, onToggleWatch, onOneClickTrade, activeTrades, onManagePosition }: Props) {
+export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectCoin, watchlistSymbols, onToggleWatch, onOneClickTrade, activeTrades, onManagePosition }: Props) {
   const [selectedTimeframe, setSelectedTimeframe] = useState<Timeframe>(() => {
     const stored = localStorage.getItem("scanner_timeframe");
     return stored && TIMEFRAMES.includes(stored as Timeframe) ? (stored as Timeframe) : initialTimeframe;
@@ -225,7 +225,6 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
   const [toast, setToast] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [tradeSettingsOpen, setTradeSettingsOpen] = useState(false);
-  const [pendingTrade, setPendingTrade] = useState<{ card: SignalCard; settings: ScannerExecutionSettings } | null>(null);
   const [managingSymbol, setManagingSymbol] = useState<string | null>(null);
   const [thresholds, setThresholds] = useState<Thresholds>(() => {
     const squeezeWidth = Number(localStorage.getItem("scanner_squeeze_width"));
@@ -553,22 +552,20 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
     setVisibleCount(20);
   }, [filter, sort, selectedTimeframe, coins]);
 
-  const executeOneClick = async (card: SignalCard, settings: ScannerExecutionSettings) => {
+  const handleDirectTrade = async (card: SignalCard) => {
+    const confirmed = window.confirm(
+      `Execute ${card.direction} on ${card.coin.symbol} at ${formatPrice(card.entryPrice)}?`
+    );
+    if (!confirmed) return;
+    const settings = loadScannerExecutionSettings();
     try {
       await onOneClickTrade?.(card, settings);
+      setToast(`Trade executed: ${card.coin.symbol}`);
     } catch (error) {
-      console.error("[Scanner] 1-click trade failed:", error);
+      console.error("[Scanner] direct trade failed:", error);
+      setToast(`Trade failed: ${card.coin.symbol}`);
     }
     if (settings.soundOnExecution) playBeep();
-  };
-
-  const handleOneClickTrade = (card: SignalCard) => {
-    const settings = loadScannerExecutionSettings();
-    if (settings.confirmBeforeTrade) {
-      setPendingTrade({ card, settings });
-    } else {
-      void executeOneClick(card, settings);
-    }
   };
 
   const handleToggleWatch = useCallback((coin: Coin) => {
@@ -773,17 +770,17 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
                 <button
                   onClick={(event) => {
                     event.stopPropagation();
-                    handleOneClickTrade(card);
+                    setTradeSettingsOpen(true);
                   }}
-                  className="px-2.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-[11px] font-black transition"
-                  title="1-Click Trade"
+                  className="px-2.5 py-1.5 rounded-lg bg-orange-500 hover:bg-orange-400 text-slate-950 text-[11px] font-black transition"
+                  title="Trade Execution Settings"
                 >
-                  ⚡
+                  ⚙️
                 </button>
                 <button
                   onClick={(event) => {
                     event.stopPropagation();
-                    onTradeNow(card.coin, card.entryPrice, card.atr);
+                    void handleDirectTrade(card);
                   }}
                   className="px-3 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-[11px] font-black transition"
                 >
@@ -1044,41 +1041,6 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
 
       <ScannerTradeSettings open={tradeSettingsOpen} onClose={() => setTradeSettingsOpen(false)} />
 
-      {pendingTrade && (
-        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <div className="w-full max-w-md rounded-2xl bg-slate-900 border border-slate-800 shadow-2xl p-5 space-y-3">
-            <h3 className="text-sm font-bold text-white">Confirm 1-Click Trade</h3>
-            <p className="text-xs text-slate-300">
-              Execute {pendingTrade.card.direction} {pendingTrade.card.coin.symbol}/USDT?
-            </p>
-            <div className="text-xs text-slate-400 space-y-1">
-              <div>Entry: {formatPrice(pendingTrade.card.entryPrice)}</div>
-              <div>SL: {formatPrice(pendingTrade.card.stopLoss)}</div>
-              <div>TP: {formatPrice(pendingTrade.card.takeProfit)}</div>
-              <div>Leverage: {pendingTrade.settings.leverage}x</div>
-              <div>Risk: {pendingTrade.settings.riskPercent}%</div>
-            </div>
-            <div className="flex justify-end gap-2 pt-2">
-              <button
-                onClick={() => setPendingTrade(null)}
-                className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-300"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => {
-                  const trade = pendingTrade;
-                  setPendingTrade(null);
-                  void executeOneClick(trade.card, trade.settings);
-                }}
-                className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-xs font-bold text-slate-950"
-              >
-                Confirm
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {managingSymbol && (() => {
         const trade = (activeTrades || []).find((t) => t.symbol === managingSymbol);

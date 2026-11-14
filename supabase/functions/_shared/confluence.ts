@@ -22,10 +22,13 @@ export type ServerBias = "Strong Buy" | "Strong Sell" | "Neutral";
 
 export interface ConfluenceScore {
   score: number;
+  requiredScore: number;
   canExecute: boolean;
   bias: ServerBias;
+  trend: "Bullish" | "Bearish" | "Neutral";
   price: number;
   atr: number;
+  atrPercent: number;
   rsi: number | null;
   adx: number | null;
   volumeRatio: number | null;
@@ -34,6 +37,10 @@ export interface ConfluenceScore {
 
 export interface ConfluenceOptions {
   minScore?: number;
+  /** Raise the threshold automatically when ATR is unusually high. */
+  volatilityScaling?: boolean;
+  /** Optional hard trend-strength gate. */
+  minAdx?: number;
   /** Tolerance for "price is inside the zone", as a fraction of price. */
   zoneTolerance?: number;
 }
@@ -232,13 +239,16 @@ export function evaluateServerConfluence(
   htf4h: Candle[],
   options: ConfluenceOptions = {}
 ): ConfluenceScore {
-  const minScore = options.minScore ?? 85;
+  const baseMinScore = options.minScore ?? 85;
   const empty: ConfluenceScore = {
     score: 0,
+    requiredScore: baseMinScore,
     canExecute: false,
     bias: "Neutral",
+    trend: "Neutral",
     price: 0,
     atr: 0,
+    atrPercent: 0,
     rsi: null,
     adx: null,
     volumeRatio: null,
@@ -305,17 +315,29 @@ export function evaluateServerConfluence(
   }
 
   const atr = atrSeries(candles, 14) ?? 0;
+  const atrPercent = price > 0 ? (atr / price) * 100 : 0;
+  const requiredScore = options.volatilityScaling && atrPercent >= 2 ? Math.max(baseMinScore, 95) : baseMinScore;
+  const adxPass = options.minAdx === undefined || (adx !== null && adx >= options.minAdx);
+  if (options.minAdx !== undefined && !adxPass) {
+    reasons.push(`ADX ${adx?.toFixed(1) ?? "N/A"} is below the required ${options.minAdx}`);
+  }
+  if (options.volatilityScaling && atrPercent >= 2) {
+    reasons.push(`High-volatility ATR ${atrPercent.toFixed(2)}% raised the threshold to ${requiredScore}`);
+  }
 
   let bias: ServerBias = "Neutral";
-  if (score >= minScore && trend === "Bullish") bias = "Strong Buy";
-  else if (score >= minScore && trend === "Bearish") bias = "Strong Sell";
+  if (score >= requiredScore && trend === "Bullish") bias = "Strong Buy";
+  else if (score >= requiredScore && trend === "Bearish") bias = "Strong Sell";
 
   return {
     score,
-    canExecute: score >= minScore && bias !== "Neutral" && atr > 0,
+    requiredScore,
+    canExecute: score >= requiredScore && bias !== "Neutral" && atr > 0 && adxPass,
     bias,
+    trend,
     price,
     atr,
+    atrPercent: Number(atrPercent.toFixed(2)),
     rsi: rsiValue,
     adx,
     volumeRatio,

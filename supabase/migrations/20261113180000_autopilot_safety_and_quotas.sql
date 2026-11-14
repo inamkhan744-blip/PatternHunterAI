@@ -184,12 +184,92 @@ BEGIN
     out := out || jsonb_build_object('minScore', round(num)::int);
   END IF;
 
+  -- maxDailyLossPercent: server-side daily circuit breaker.
+  IF p_raw ? 'maxDailyLossPercent' THEN
+    IF jsonb_typeof(p_raw -> 'maxDailyLossPercent') <> 'number' THEN
+      RETURN jsonb_build_object('ok', false, 'error', 'maxDailyLossPercent must be a number.');
+    END IF;
+    num := (p_raw ->> 'maxDailyLossPercent')::numeric;
+    IF num < 1 OR num > 10 THEN
+      RETURN jsonb_build_object('ok', false, 'error', 'maxDailyLossPercent must be between 1 and 10.');
+    END IF;
+    out := out || jsonb_build_object('maxDailyLossPercent', num);
+  END IF;
+
   -- paperTrading is deliberately strict: only a real boolean can select live.
   IF p_raw ? 'paperTrading' THEN
     IF jsonb_typeof(p_raw -> 'paperTrading') <> 'boolean' THEN
       RETURN jsonb_build_object('ok', false, 'error', 'paperTrading must be a boolean.');
     END IF;
     out := out || jsonb_build_object('paperTrading', (p_raw ->> 'paperTrading')::boolean);
+  END IF;
+
+  -- Boolean Auto-Pilot edge filters.
+  FOREACH text_value IN ARRAY ARRAY['volatilityScaling', 'adaptiveSizing', 'avoidWeekends', 'correlationFilter'] LOOP
+    IF p_raw ? text_value THEN
+      IF jsonb_typeof(p_raw -> text_value) <> 'boolean' THEN
+        RETURN jsonb_build_object('ok', false, 'error', text_value || ' must be a boolean.');
+      END IF;
+      out := out || jsonb_build_object(text_value, (p_raw ->> text_value)::boolean);
+    END IF;
+  END LOOP;
+
+  -- minAdx
+  IF p_raw ? 'minAdx' THEN
+    IF jsonb_typeof(p_raw -> 'minAdx') <> 'number' THEN
+      RETURN jsonb_build_object('ok', false, 'error', 'minAdx must be a number.');
+    END IF;
+    num := (p_raw ->> 'minAdx')::numeric;
+    IF num < 0 OR num > 50 THEN
+      RETURN jsonb_build_object('ok', false, 'error', 'minAdx must be between 0 and 50.');
+    END IF;
+    out := out || jsonb_build_object('minAdx', round(num)::int);
+  END IF;
+
+  -- sessionUtcStart / sessionUtcEnd
+  IF p_raw ? 'sessionUtcStart' THEN
+    IF jsonb_typeof(p_raw -> 'sessionUtcStart') <> 'number' THEN
+      RETURN jsonb_build_object('ok', false, 'error', 'sessionUtcStart must be a number.');
+    END IF;
+    num := (p_raw ->> 'sessionUtcStart')::numeric;
+    IF num < 0 OR num > 23 THEN
+      RETURN jsonb_build_object('ok', false, 'error', 'sessionUtcStart must be between 0 and 23.');
+    END IF;
+    out := out || jsonb_build_object('sessionUtcStart', round(num)::int);
+  END IF;
+  IF p_raw ? 'sessionUtcEnd' THEN
+    IF jsonb_typeof(p_raw -> 'sessionUtcEnd') <> 'number' THEN
+      RETURN jsonb_build_object('ok', false, 'error', 'sessionUtcEnd must be a number.');
+    END IF;
+    num := (p_raw ->> 'sessionUtcEnd')::numeric;
+    IF num < 1 OR num > 24 THEN
+      RETURN jsonb_build_object('ok', false, 'error', 'sessionUtcEnd must be between 1 and 24.');
+    END IF;
+    out := out || jsonb_build_object('sessionUtcEnd', round(num)::int);
+  END IF;
+
+  -- maxConsecutiveLosses
+  IF p_raw ? 'maxConsecutiveLosses' THEN
+    IF jsonb_typeof(p_raw -> 'maxConsecutiveLosses') <> 'number' THEN
+      RETURN jsonb_build_object('ok', false, 'error', 'maxConsecutiveLosses must be a number.');
+    END IF;
+    num := (p_raw ->> 'maxConsecutiveLosses')::numeric;
+    IF num < 0 OR num > 10 THEN
+      RETURN jsonb_build_object('ok', false, 'error', 'maxConsecutiveLosses must be between 0 and 10.');
+    END IF;
+    out := out || jsonb_build_object('maxConsecutiveLosses', round(num)::int);
+  END IF;
+
+  -- lossCooldownMinutes
+  IF p_raw ? 'lossCooldownMinutes' THEN
+    IF jsonb_typeof(p_raw -> 'lossCooldownMinutes') <> 'number' THEN
+      RETURN jsonb_build_object('ok', false, 'error', 'lossCooldownMinutes must be a number.');
+    END IF;
+    num := (p_raw ->> 'lossCooldownMinutes')::numeric;
+    IF num < 0 OR num > 1440 THEN
+      RETURN jsonb_build_object('ok', false, 'error', 'lossCooldownMinutes must be between 0 and 1440.');
+    END IF;
+    out := out || jsonb_build_object('lossCooldownMinutes', round(num)::int);
   END IF;
 
   RETURN jsonb_build_object('ok', true, 'config', out);

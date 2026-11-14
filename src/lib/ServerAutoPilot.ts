@@ -23,7 +23,17 @@ export interface ServerAutoPilotConfig {
   maxOpenTrades?: number;
   tradeDirectionMode?: "BOTH" | "LONG_ONLY" | "SHORT_ONLY";
   minScore?: number;
+  maxDailyLossPercent?: number;
   paperTrading?: boolean;
+  volatilityScaling?: boolean;
+  adaptiveSizing?: boolean;
+  minAdx?: number;
+  avoidWeekends?: boolean;
+  sessionUtcStart?: number;
+  sessionUtcEnd?: number;
+  maxConsecutiveLosses?: number;
+  lossCooldownMinutes?: number;
+  correlationFilter?: boolean;
 }
 
 export interface ServerAutoPilotState {

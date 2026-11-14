@@ -917,8 +917,11 @@ export default function App() {
         return;
       }
 
-      // The minimum confluence score is user-configurable (default 85).
-      const requiredScore = cfg.minConfluenceScore ?? 85;
+      // User minimum (default 85), optionally raised for high-volatility ATR.
+      const requiredScore = autoTradeEngine.getRequiredConfluenceScore(
+        candidate.price,
+        candidate.atr
+      ).requiredScore;
 
       // `>=` is intentional: a signal that scores exactly the required threshold
       // is tradable. Using `<=` here silently discarded every 85/85 setup.
@@ -932,6 +935,8 @@ export default function App() {
       }
 
       // Duplicate protection is scoped to the symbol: other symbols remain tradable.
+      // The minimum confluence gate above is the user's configured floor; high-ATR
+      // setups may require the optional volatility-scaled threshold.
       // Browser Auto-Pilot is a legacy fallback and is PAPER ONLY. Real-money
       // execution belongs exclusively to the server worker, which persists
       // order ids and reconciles brackets; running both paths double-traded.

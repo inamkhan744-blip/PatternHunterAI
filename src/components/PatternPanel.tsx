@@ -11,7 +11,6 @@ import {
   Check,
   Target,
   Shield,
-  Zap,
 } from "lucide-react";
 import { useState } from "react";
 import type { Coin, DetectedPattern, Timeframe, PatternWithConfidence } from "../types";
@@ -272,30 +271,25 @@ export default function PatternPanel({
                 </button>
               </div>
 
-              {/* Fortress Auto-Trade Execution Entry Button */}
-              <button
-                onClick={() => {
-                  if (fomoLocked) {
-                    alert("🚨 Auto-Trade execution disabled: Anti-FOMO Lock active.");
-                    return;
-                  }
-                  if (onOpenAutoTrade) {
-                    onOpenAutoTrade();
-                  }
-                }}
-                disabled={fomoLocked}
-                className={`w-full flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl text-xs font-bold transition-all shadow-lg ${
-                  fomoLocked
-                    ? "bg-red-500/20 text-red-400 border border-red-500/40 cursor-not-allowed"
-                    : "bg-gradient-to-r from-cyan-500 via-blue-600 to-indigo-600 hover:from-cyan-400 hover:to-blue-500 text-slate-950 font-black tracking-wide shadow-cyan-950/50"
-                }`}
-              >
-                <Zap className="w-4 h-4 fill-slate-950" />
-                Fortress Auto-Trade (Spot & Futures)
-              </button>
             </div>
           </div>
         )}
+
+        <button
+          onClick={() => {
+            if (fomoLocked) {
+              alert("🚨 Auto-Trade execution disabled: Anti-FOMO Lock active.");
+              return;
+            }
+            if (onOpenAutoTrade) {
+              onOpenAutoTrade();
+            }
+          }}
+          disabled={fomoLocked}
+          className="w-full flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl text-sm font-bold transition-all shadow-lg shadow-blue-500/50 bg-gradient-to-r from-blue-600 to-purple-600 text-white hover:from-blue-500 hover:to-purple-500 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          ⚙️ Auto-Pilot Settings & Trade Execution
+        </button>
 
         <RiskCalculator
           entryPrice={entryPrice ?? price}

@@ -1808,6 +1808,9 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
         ? "Status: Server Auto-Pilot armed — running 24/7 in the cloud"
         : "Status: Auto-Pilot Idle"
     );
+    if (nextState) {
+      setAutoTradeOpen(true);
+    }
   }, [effectiveIsPro, isAdmin, candles, serverAutoPilot, setServerAutoPilot, timeframe]);
 
   // Reflect the authoritative server flag in the header, even after a reload.

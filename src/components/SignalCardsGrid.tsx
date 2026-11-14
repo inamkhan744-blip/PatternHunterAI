@@ -527,7 +527,7 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
             onSelectCoin(card.coin);
           }
         }}
-        className="rounded-2xl border border-slate-800 bg-slate-900/80 p-3 shadow-lg cursor-pointer transition hover:border-cyan-500/60 hover:scale-[1.01] focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-400"
+        className="rounded-2xl border border-slate-800 bg-slate-900/80 p-2 sm:p-3 shadow-lg cursor-pointer transition hover:border-cyan-500/60 hover:scale-[1.01] focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-400"
       >
         <div className="flex items-start justify-between gap-2">
           <div>
@@ -656,7 +656,7 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
   };
 
   const skeletonCards = Array.from({ length: 6 }, (_, index) => (
-    <div key={`skeleton-${index}`} className="rounded-2xl border border-slate-800 bg-slate-900/80 p-3 shadow-lg animate-pulse">
+    <div key={`skeleton-${index}`} className="rounded-2xl border border-slate-800 bg-slate-900/80 p-2 sm:p-3 shadow-lg animate-pulse">
       <div className="h-4 w-24 rounded bg-slate-800" />
       <div className="mt-3 h-3 w-32 rounded bg-slate-800" />
       <div className="mt-4 h-6 w-full rounded bg-slate-800" />
@@ -840,7 +840,7 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
             <h2 className="text-lg font-bold text-white">🔥 Trending / News Alerts</h2>
             <p className="text-xs text-slate-500">Breaking news with live volume spikes</p>
           </div>
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">{filteredNewsCards.map(renderCard)}</div>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-2">{filteredNewsCards.map(renderCard)}</div>
         </section>
       )}
 
@@ -851,14 +851,14 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
         </div>
 
         {loading && newsCards.length === 0 && squeezeCards.length === 0 ? (
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">{skeletonCards}</div>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-2">{skeletonCards}</div>
         ) : filteredSqueezeCards.length === 0 && !marketError ? (
           <div className="flex items-center justify-center py-16 text-slate-500">
             No matching setups found right now.
           </div>
         ) : (
           <>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">{visibleSqueezeCards.map(renderCard)}</div>
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-2">{visibleSqueezeCards.map(renderCard)}</div>
             {visibleCount < filteredSqueezeCards.length && (
               <div className="flex justify-center">
                 <button

@@ -2083,7 +2083,7 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
       <div className="flex-1 flex flex-col min-w-0">
         {/* Mobile header */}
         <header className="lg:hidden border-b border-slate-800 bg-slate-950/80 backdrop-blur-xl sticky top-0 z-40 max-w-full overflow-hidden">
-          <div className="px-3 sm:px-4 py-2.5 flex flex-wrap items-center justify-between gap-x-2 gap-y-1.5 max-w-full">
+          <div className="px-2 sm:px-4 py-1.5 flex flex-wrap items-center justify-between gap-x-2 gap-y-1.5 max-w-full">
             <div className="flex items-center gap-2 shrink-0">
               <button
                 onClick={() => setIsDrawerOpen(true)}
@@ -2640,7 +2640,7 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
               {/* Main Chart and Optional Pattern Panel Grid */}
               <div className={`grid grid-cols-1 ${patternPanelOpen ? "lg:grid-cols-3" : "grid-cols-1"} gap-4`}>
                 {/* Chart - min-height 500px or 60vh */}
-                <div className={`${patternPanelOpen ? "lg:col-span-2" : "col-span-1"} rounded-2xl bg-slate-900 border border-slate-800 overflow-hidden flex flex-col min-h-[500px] h-[60vh] lg:h-[65vh] shadow-xl`}>
+                <div className={`${patternPanelOpen ? "lg:col-span-2" : "col-span-1"} rounded-2xl bg-slate-900 border border-slate-800 overflow-hidden flex flex-col min-h-[500px] ${patternPanelOpen ? "h-[60vh] lg:h-[65vh]" : "h-[85vh] lg:h-[80vh]"} shadow-xl`}>
                   <div className="px-5 py-3 border-b border-slate-800 flex items-center justify-between">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-sm font-semibold text-white">
@@ -2881,7 +2881,7 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
       </div>
 
       {/* Bottom navigation (mobile) */}
-      <nav className="lg:hidden fixed bottom-0 inset-x-0 z-50 bg-slate-950/95 backdrop-blur-xl border-t border-slate-800">
+      <nav className="lg:hidden fixed bottom-4 left-1/2 -translate-x-1/2 z-50 w-[94%] max-w-md rounded-full bg-slate-950/80 backdrop-blur-xl border border-slate-800 shadow-2xl">
         <div className="flex items-center justify-around px-2 py-2">
           {MOBILE_TABS.map((tab) => {
             const Icon = tab.icon;

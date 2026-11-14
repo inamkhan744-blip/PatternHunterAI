@@ -34,6 +34,7 @@ export interface ServerAutoPilotConfig {
   maxConsecutiveLosses?: number;
   lossCooldownMinutes?: number;
   correlationFilter?: boolean;
+  rangeScalperEnabled?: boolean;
 }
 
 export interface ServerAutoPilotState {

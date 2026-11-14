@@ -224,6 +224,7 @@ export default function AutoTradeModal({
         maxConsecutiveLosses: config.maxConsecutiveLosses,
         lossCooldownMinutes: config.lossCooldownMinutes,
         correlationFilter: config.correlationFilter,
+        rangeScalperEnabled: config.rangeScalperEnabled,
       });
     } catch (err) {
       setApSaving(false);
@@ -767,6 +768,22 @@ export default function AutoTradeModal({
                 </span>
                 <span className="text-[10px] text-slate-500">Win-rate guards</span>
               </div>
+              <button
+                onClick={() =>
+                  handleConfigChange({ rangeScalperEnabled: !config.rangeScalperEnabled })
+                }
+                className={`w-full px-3 py-2 rounded-lg border text-left text-[11px] font-bold transition ${
+                  config.rangeScalperEnabled
+                    ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/40"
+                    : "bg-slate-900 text-slate-400 border-slate-700"
+                }`}
+              >
+                Enable Range Scalper on Weekends/Sideways:{" "}
+                {config.rangeScalperEnabled ? "ON" : "OFF"}
+                <span className="block font-normal text-slate-500 mt-0.5">
+                  Uses Bollinger Bands + RSI at range extremes instead of the trend confluence gate.
+                </span>
+              </button>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[11px]">
                 {EDGE_FILTERS.map(({ key, label }) => (
                   <button

@@ -205,7 +205,7 @@ BEGIN
   END IF;
 
   -- Boolean Auto-Pilot edge filters.
-  FOREACH text_value IN ARRAY ARRAY['volatilityScaling', 'adaptiveSizing', 'avoidWeekends', 'correlationFilter'] LOOP
+  FOREACH text_value IN ARRAY ARRAY['volatilityScaling', 'adaptiveSizing', 'avoidWeekends', 'correlationFilter', 'rangeScalperEnabled'] LOOP
     IF p_raw ? text_value THEN
       IF jsonb_typeof(p_raw -> text_value) <> 'boolean' THEN
         RETURN jsonb_build_object('ok', false, 'error', text_value || ' must be a boolean.');

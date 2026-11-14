@@ -47,7 +47,7 @@ export interface ConfluenceOptions {
 
 const MIN_CANDLES = 60;
 
-function sma(values: number[], period: number): number | null {
+export function sma(values: number[], period: number): number | null {
   if (values.length < period) return null;
   const slice = values.slice(-period);
   return slice.reduce((a, b) => a + b, 0) / period;
@@ -61,7 +61,7 @@ function emaLast(values: number[], period: number): number | null {
   return ema;
 }
 
-function rsiSeries(values: number[], period = 14): (number | null)[] {
+export function rsiSeries(values: number[], period = 14): (number | null)[] {
   const out: (number | null)[] = new Array(values.length).fill(null);
   if (values.length <= period) return out;
 
@@ -114,7 +114,7 @@ function macdHistogram(values: number[]): number[] {
   return histogram;
 }
 
-function atrSeries(candles: Candle[], period = 14): number | null {
+export function atrSeries(candles: Candle[], period = 14): number | null {
   if (candles.length <= period) return null;
   const trs: number[] = [];
   for (let i = 1; i < candles.length; i++) {
@@ -128,7 +128,7 @@ function atrSeries(candles: Candle[], period = 14): number | null {
   return atr || null;
 }
 
-function adxLast(candles: Candle[], period = 14): number | null {
+export function adxLast(candles: Candle[], period = 14): number | null {
   if (candles.length < period * 2) return null;
   const tr: number[] = [];
   const plusDM: number[] = [];

@@ -46,12 +46,21 @@ export async function fetchMarketStats(symbol: string): Promise<MarketStats | nu
   }
 }
 
+let topPairsCache: { data: Coin[]; timestamp: number } | null = null;
+let volumes24hCache: { data: Record<string, number>; timestamp: number } | null = null;
+let marketCapsCache: { data: Record<string, number>; timestamp: number } | null = null;
+
 export async function fetchTopUsdtPairs(limit = 100): Promise<Coin[]> {
+  const now = Date.now();
+  if (topPairsCache && now - topPairsCache.timestamp < 5 * 60 * 1000) {
+    return topPairsCache.data.slice(0, limit);
+  }
+
   try {
     const res = await fetch(TICKER_API);
     if (!res.ok) throw new Error(`Ticker fetch failed (${res.status})`);
     const data = await res.json() as Array<{ symbol: string; quoteVolume: string }>;
-    return data
+    const result = data
       .filter(
         (item) =>
           item.symbol.endsWith("USDT") &&
@@ -61,13 +70,60 @@ export async function fetchTopUsdtPairs(limit = 100): Promise<Coin[]> {
           !item.symbol.endsWith("BEARUSDT")
       )
       .sort((a, b) => parseFloat(b.quoteVolume) - parseFloat(a.quoteVolume))
-      .slice(0, limit)
       .map((item) => ({
         symbol: item.symbol.replace("USDT", ""),
         label: item.symbol.replace("USDT", ""),
         binanceSymbol: item.symbol,
       }));
+    topPairsCache = { data: result, timestamp: Date.now() };
+    return result.slice(0, limit);
   } catch {
     return [];
+  }
+}
+
+export async function fetch24hQuoteVolumes(): Promise<Record<string, number>> {
+  const now = Date.now();
+  if (volumes24hCache && now - volumes24hCache.timestamp < 5 * 60 * 1000) {
+    return volumes24hCache.data;
+  }
+
+  try {
+    const res = await fetch(TICKER_API);
+    if (!res.ok) throw new Error(`Ticker fetch failed (${res.status})`);
+    const data = await res.json() as Array<{ symbol: string; quoteVolume: string }>;
+    const result: Record<string, number> = {};
+    for (const item of data) {
+      if (item.symbol.endsWith("USDT")) {
+        result[item.symbol.replace("USDT", "")] = parseFloat(item.quoteVolume) || 0;
+      }
+    }
+    volumes24hCache = { data: result, timestamp: now };
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+export async function fetchMarketCaps(): Promise<Record<string, number>> {
+  const now = Date.now();
+  if (marketCapsCache && now - marketCapsCache.timestamp < 10 * 60 * 1000) {
+    return marketCapsCache.data;
+  }
+
+  try {
+    const res = await fetch("https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page=1");
+    if (!res.ok) throw new Error(`Market cap fetch failed (${res.status})`);
+    const data = await res.json() as Array<{ symbol: string; market_cap: number | null }>;
+    const result: Record<string, number> = {};
+    for (const item of data) {
+      if (item.symbol && item.market_cap) {
+        result[item.symbol.toUpperCase()] = item.market_cap;
+      }
+    }
+    marketCapsCache = { data: result, timestamp: now };
+    return result;
+  } catch {
+    return {};
   }
 }

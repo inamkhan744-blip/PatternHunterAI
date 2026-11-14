@@ -51,6 +51,8 @@ export interface SignalCard {
   newsUrl?: string;
   publishedAt?: string;
   alertReason: string;
+  signalAgeMs?: number;
+  firstSeenAt?: number;
 }
 
 interface Props {
@@ -60,6 +62,8 @@ interface Props {
   watchlistSymbols?: Set<string>;
   onToggleWatch?: (coin: Coin) => void;
   onOneClickTrade?: (card: SignalCard, settings: ScannerExecutionSettings) => void | Promise<void>;
+  activeTrades?: Array<{ symbol: string; direction?: string; entryPrice?: number; quantity?: number }>;
+  onManagePosition?: (symbol: string) => void;
 }
 
 const ALL_KNOWN_COINS = [...COINS, ...PRO_COINS];
@@ -195,7 +199,7 @@ function Sparkline({ values }: { values: number[] }) {
   );
 }
 
-export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectCoin, onTradeNow, watchlistSymbols, onToggleWatch, onOneClickTrade }: Props) {
+export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectCoin, onTradeNow, watchlistSymbols, onToggleWatch, onOneClickTrade, activeTrades, onManagePosition }: Props) {
   const [selectedTimeframe, setSelectedTimeframe] = useState<Timeframe>(() => {
     const stored = localStorage.getItem("scanner_timeframe");
     return stored && TIMEFRAMES.includes(stored as Timeframe) ? (stored as Timeframe) : initialTimeframe;
@@ -222,6 +226,7 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [tradeSettingsOpen, setTradeSettingsOpen] = useState(false);
   const [pendingTrade, setPendingTrade] = useState<{ card: SignalCard; settings: ScannerExecutionSettings } | null>(null);
+  const [managingSymbol, setManagingSymbol] = useState<string | null>(null);
   const [thresholds, setThresholds] = useState<Thresholds>(() => {
     const squeezeWidth = Number(localStorage.getItem("scanner_squeeze_width"));
     const volumeSpikeMultiplier = Number(localStorage.getItem("scanner_volume_spike_multiplier"));
@@ -238,6 +243,7 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
   const [volumes24h, setVolumes24h] = useState<Record<string, number>>({});
 
   const audioContextRef = useRef<AudioContext | null>(null);
+  const signalCacheRef = useRef<Map<string, { card: SignalCard; firstSeenAt: number }>>(new Map());
   const previousKeysRef = useRef<Set<string>>(new Set());
   const hasScannedRef = useRef(false);
   const isMountedRef = useRef(true);
@@ -498,8 +504,42 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
     previousKeysRef.current = nextKeys;
 
     if (!isMountedRef.current) return;
+
+    // --- Signal persistence: keep squeeze signals alive for 5 minutes -------
+    // so a setup that flickers on a single candle is still actionable.
+    const now = Date.now();
+    const cache = signalCacheRef.current;
+    for (const card of nextSqueezeCards) {
+      const key = card.coin.binanceSymbol;
+      const existing = cache.get(key);
+      if (!existing) {
+        cache.set(key, { card, firstSeenAt: now });
+      } else {
+        cache.set(key, { card: { ...card, firstSeenAt: existing.firstSeenAt }, firstSeenAt: existing.firstSeenAt });
+      }
+    }
+    for (const [key, entry] of cache) {
+      const age = now - entry.firstSeenAt;
+      const price = entry.card.price;
+      const tp = entry.card.takeProfit;
+      const sl = entry.card.stopLoss;
+      const direction = entry.card.direction;
+      const hitTarget =
+        direction === "LONG"
+          ? price >= tp || price <= sl
+          : price <= tp || price >= sl;
+      if (age > 5 * 60 * 1000 || hitTarget) {
+        cache.delete(key);
+      }
+    }
+    const persistedSqueezeCards = [...cache.values()].map(({ card, firstSeenAt }) => ({
+      ...card,
+      firstSeenAt,
+      signalAgeMs: now - firstSeenAt,
+    }));
+
     setNewsCards(nextNewsCards);
-    setSqueezeCards(nextSqueezeCards);
+    setSqueezeCards(persistedSqueezeCards);
     setLoading(false);
   }, [coins, selectedTimeframe, newsEvents, thresholds, volumes24h, marketCaps, playBeep]);
 
@@ -569,6 +609,8 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
 
   const renderCard = (card: SignalCard) => {
     const watched = watchedSymbols.has(card.coin.binanceSymbol);
+    const activeTrade = (activeTrades || []).find((trade) => trade.symbol === card.coin.binanceSymbol);
+    const isLongTrade = activeTrade?.direction?.toUpperCase() !== "SHORT";
     return (
       <div
         key={`${card.news ? "news" : "squeeze"}-${card.coin.binanceSymbol}`}
@@ -635,6 +677,24 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
           </div>
         )}
 
+        {activeTrade && (
+          <div
+            className={`mt-2 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+              isLongTrade
+                ? "bg-green-500/20 text-green-400 border-green-500/40"
+                : "bg-red-500/20 text-red-400 border-red-500/40"
+            }`}
+          >
+            {isLongTrade ? "🟢" : "🔴"} IN TRADE
+          </div>
+        )}
+
+        {!card.news && typeof card.signalAgeMs === "number" && (
+          <div className="mt-1 text-[10px] text-slate-500">
+            Signal Age: {Math.max(1, Math.round(card.signalAgeMs / 60000))}m
+          </div>
+        )}
+
         {card.headline && (
           <p className="mt-2 text-[11px] text-slate-300 line-clamp-2">{card.headline}</p>
         )}
@@ -697,25 +757,40 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
             </span>
           </div>
           <div className="flex items-center gap-1.5">
-            <button
-              onClick={(event) => {
-                event.stopPropagation();
-                handleOneClickTrade(card);
-              }}
-              className="px-2.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-[11px] font-black transition"
-              title="1-Click Trade"
-            >
-              ⚡
-            </button>
-            <button
-              onClick={(event) => {
-                event.stopPropagation();
-                onTradeNow(card.coin, card.entryPrice, card.atr);
-              }}
-              className="px-3 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-[11px] font-black transition"
-            >
-              Trade Now
-            </button>
+            {activeTrade ? (
+              <button
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setManagingSymbol(card.coin.binanceSymbol);
+                  onManagePosition?.(card.coin.binanceSymbol);
+                }}
+                className="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-[11px] font-black transition"
+              >
+                Manage Position
+              </button>
+            ) : (
+              <>
+                <button
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    handleOneClickTrade(card);
+                  }}
+                  className="px-2.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-[11px] font-black transition"
+                  title="1-Click Trade"
+                >
+                  ⚡
+                </button>
+                <button
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onTradeNow(card.coin, card.entryPrice, card.atr);
+                  }}
+                  className="px-3 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-[11px] font-black transition"
+                >
+                  Trade Now
+                </button>
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -1004,6 +1079,44 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
           </div>
         </div>
       )}
+
+      {managingSymbol && (() => {
+        const trade = (activeTrades || []).find((t) => t.symbol === managingSymbol);
+        const card = [...squeezeCards, ...newsCards].find((c) => c.coin.binanceSymbol === managingSymbol);
+        const currentPrice = card?.price ?? 0;
+        const entryPrice = trade?.entryPrice ?? 0;
+        const quantity = trade?.quantity ?? 0;
+        const pnl = trade
+          ? (trade.direction === "SHORT"
+              ? (entryPrice - currentPrice) * quantity
+              : (currentPrice - entryPrice) * quantity)
+          : 0;
+        return (
+          <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 backdrop-blur-sm">
+            <div className="w-full max-w-md rounded-2xl bg-slate-900 border border-slate-800 shadow-2xl p-5 space-y-3">
+              <h3 className="text-sm font-bold text-white">Manage Position — {managingSymbol}</h3>
+              {trade ? (
+                <div className="text-xs text-slate-300 space-y-1">
+                  <div>Direction: {trade.direction || "LONG"}</div>
+                  <div>Entry: {formatPrice(trade.entryPrice ?? 0)}</div>
+                  <div>Current: {formatPrice(currentPrice)}</div>
+                  <div className={pnl >= 0 ? "text-green-400" : "text-red-400"}>Unrealized PnL: {pnl.toFixed(2)}</div>
+                </div>
+              ) : (
+                <p className="text-xs text-slate-400">No active trade found.</p>
+              )}
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  onClick={() => setManagingSymbol(null)}
+                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-300"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {toast && (
         <div className="fixed bottom-4 left-1/2 z-50 -translate-x-1/2 rounded-lg bg-slate-800 border border-slate-700 px-4 py-2 text-xs text-slate-200 shadow-xl">

@@ -2810,6 +2810,8 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
                 setAutoTradeOpen(true);
               }}
               onOneClickTrade={handleOneClickTrade}
+              activeTrades={tradeManager.getActiveTrades()}
+              onManagePosition={() => setActiveTab("positions")}
               watchlistSymbols={watchSymbols}
               onToggleWatch={toggleWatch}
             />

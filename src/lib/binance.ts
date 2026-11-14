@@ -1,4 +1,4 @@
-import type { Candle, MarketStats, Timeframe } from "../types";
+import type { Candle, MarketStats, Timeframe, Coin } from "../types";
 
 const BINANCE_API = "https://api.binance.com/api/v3/klines";
 const TICKER_API = "https://api.binance.com/api/v3/ticker/24hr";
@@ -43,5 +43,24 @@ export async function fetchMarketStats(symbol: string): Promise<MarketStats | nu
     };
   } catch {
     return null;
+  }
+}
+
+export async function fetchTopUsdtPairs(limit = 100): Promise<Coin[]> {
+  try {
+    const res = await fetch(TICKER_API);
+    if (!res.ok) throw new Error(`Ticker fetch failed (${res.status})`);
+    const data = await res.json() as Array<{ symbol: string; quoteVolume: string }>;
+    return data
+      .filter((item) => item.symbol.endsWith("USDT") && !item.symbol.includes("UP") && !item.symbol.includes("DOWN"))
+      .sort((a, b) => parseFloat(b.quoteVolume) - parseFloat(a.quoteVolume))
+      .slice(0, limit)
+      .map((item) => ({
+        symbol: item.symbol.replace("USDT", ""),
+        label: item.symbol.replace("USDT", ""),
+        binanceSymbol: item.symbol,
+      }));
+  } catch {
+    return [];
   }
 }

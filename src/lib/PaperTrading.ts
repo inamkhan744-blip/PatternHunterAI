@@ -116,6 +116,8 @@ export class PaperTradingEngine {
     marketType?: MarketType;
     leverage?: number;
     riskPercent?: number;
+    atrStopMultiplier?: number;
+    atrRiskRewardRatio?: number;
   }): { success: boolean; trade?: PaperTrade; error?: string } {
     // Check if an active open trade already exists for this symbol (Execution Lock)
     const existingOpen = this.account.trades.find((t) => t.symbol === params.symbol && t.status === "OPEN");
@@ -142,7 +144,9 @@ export class PaperTradingEngine {
     const { stopLossPrice, takeProfitPrice } = calculateAtrStopLoss(
       params.entryPrice,
       params.atrValue,
-      direction
+      direction,
+      params.atrStopMultiplier,
+      params.atrRiskRewardRatio
     );
 
     // Check virtual margin

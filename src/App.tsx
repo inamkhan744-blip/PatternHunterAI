@@ -58,7 +58,7 @@ import AntiFOMOModal from "./components/AntiFOMOModal";
 import { COINS, PRO_COINS } from "./constants";
 import { fetchCandles, fetchMarketStats } from "./lib/binance";
 import { detectPattern, detectAllPatterns, formatPrice } from "./lib/patterns";
-import { rsi, sma, atr } from "./lib/indicators";
+import { rsi, sma, atr, bollingerBands } from "./lib/indicators";
 import AutoTradeModal from "./components/AutoTradeModal";
 import { parseAnalysisPrices, getFallbackPrices } from "./lib/fallback";
 import { supabase } from "./lib/supabase";
@@ -188,6 +188,10 @@ interface AutoPilotCandidate {
   fearGreed: number | null;
   dataTimestamp: number;
   score: number;
+  adx: number | null;
+  bbLower: number | null;
+  bbMiddle: number | null;
+  bbUpper: number | null;
   candleKey: number;
 }
 
@@ -917,21 +921,81 @@ export default function App() {
         return;
       }
 
-      // User minimum (default 85), optionally raised for high-volatility ATR.
-      const requiredScore = autoTradeEngine.getRequiredConfluenceScore(
-        candidate.price,
-        candidate.atr
-      ).requiredScore;
+      const isWeekend = [0, 6].includes(new Date().getUTCDay());
+      const isSideways = candidate.adx !== null && candidate.adx < 25;
+      const rangeMode = cfg.rangeScalperEnabled === true && (isWeekend || isSideways);
+      let signal: {
+        proceed: boolean;
+        direction: "LONG" | "SHORT";
+        score: number;
+        reason: string;
+      };
 
-      // `>=` is intentional: a signal that scores exactly the required threshold
-      // is tradable. Using `<=` here silently discarded every 85/85 setup.
-      if (candidate.score < requiredScore) {
+      if (rangeMode) {
+        signal = autoTradeEngine.evaluateRangeSetup({
+          price: candidate.price,
+          rsi: candidate.rsi,
+          atr: candidate.atr,
+          adx: candidate.adx,
+          bbLower: candidate.bbLower,
+          bbMiddle: candidate.bbMiddle,
+          bbUpper: candidate.bbUpper,
+        });
+        if (!signal.proceed) {
+          liveWorkerLogStore.addLog(`Range Mode: ${signal.reason}`, "info", {
+            symbol: candidate.symbol,
+            rsi: candidate.rsi,
+            adx: candidate.adx,
+          });
+          return;
+        }
         liveWorkerLogStore.addLog(
-          `Signal Found (Score ${candidate.score}/${requiredScore}) - Skipping`,
+          isSideways
+            ? "Range Mode Active: ADX < 25. Executing RSI Scalp."
+            : "Range Mode Active: Weekend. Executing RSI Scalp.",
           "info",
-          { symbol: candidate.symbol, score: candidate.score, requiredScore }
+          { symbol: candidate.symbol, score: signal.score, rsi: candidate.rsi, adx: candidate.adx }
         );
-        return;
+      } else {
+        // User minimum (default 85), optionally raised for high-volatility ATR.
+        const requiredScore = autoTradeEngine.getRequiredConfluenceScore(
+          candidate.price,
+          candidate.atr
+        ).requiredScore;
+
+        // `>=` is intentional: a signal that scores exactly the required threshold
+        // is tradable. Using `<=` here silently discarded every 85/85 setup.
+        if (candidate.score < requiredScore) {
+          liveWorkerLogStore.addLog(
+            `Signal Found (Score ${candidate.score}/${requiredScore}) - Skipping`,
+            "info",
+            { symbol: candidate.symbol, score: candidate.score, requiredScore }
+          );
+          return;
+        }
+
+        signal = await autoTradeEngine.evaluateAutoPilotSignal({
+          symbol: candidate.symbol,
+          price: candidate.price,
+          rsi: candidate.rsi,
+          trend: candidate.trend,
+          patternName: candidate.patternName,
+          patternDirection: candidate.patternDirection,
+          fearGreed: candidate.fearGreed,
+          atrValue: candidate.atr,
+          dataTimestamp: candidate.dataTimestamp,
+          minScore: requiredScore,
+        });
+
+        if (!signal.proceed) {
+          liveWorkerLogStore.addLog(
+            `Skipping: ${signal.reason || "AI verdict rejected the setup"} ` +
+              `(confluence ${signal.score}/100, required ${requiredScore})`,
+            "info",
+            { symbol: candidate.symbol, score: signal.score, requiredScore }
+          );
+          return;
+        }
       }
 
       // Duplicate protection is scoped to the symbol: other symbols remain tradable.
@@ -971,30 +1035,6 @@ export default function App() {
       autoPilotInFlight.current.add(inFlightKey);
 
       try {
-        // Real AI verdict only. If the AI layer is down the engine pauses itself.
-        const signal = await autoTradeEngine.evaluateAutoPilotSignal({
-          symbol: candidate.symbol,
-          price: candidate.price,
-          rsi: candidate.rsi,
-          trend: candidate.trend,
-          patternName: candidate.patternName,
-          patternDirection: candidate.patternDirection,
-          fearGreed: candidate.fearGreed,
-          atrValue: candidate.atr,
-          dataTimestamp: candidate.dataTimestamp,
-          minScore: requiredScore,
-        });
-
-        if (!signal.proceed) {
-          liveWorkerLogStore.addLog(
-            `Skipping: ${signal.reason || "AI verdict rejected the setup"} ` +
-              `(confluence ${signal.score}/100, required ${requiredScore})`,
-            "info",
-            { symbol: candidate.symbol, score: signal.score, requiredScore }
-          );
-          return;
-        }
-
         const direction = signal.direction;
         const directionMode = cfg.tradeDirectionMode || "BOTH";
         if (directionMode === "LONG_ONLY" && direction === "SHORT") {
@@ -1040,9 +1080,9 @@ export default function App() {
         lastProcessedCandleTimestamp.current = candidate.candleKey;
 
         liveWorkerLogStore.addLog(
-          `Executing ${direction} on ${candidate.symbol} (Score ${signal.score}/85)`,
+          `Executing ${direction} on ${candidate.symbol} (Score ${signal.score}${rangeMode ? " — Range Scalp" : "/85"})`,
           "success",
-          { symbol: candidate.symbol, direction, score: signal.score }
+          { symbol: candidate.symbol, direction, score: signal.score, rangeMode }
         );
 
           const pResult = paperTradingEngine.executeOrder({
@@ -1053,6 +1093,8 @@ export default function App() {
             marketType: cfg.marketType,
             leverage: cfg.leverage,
             riskPercent: cfg.riskPercent,
+            atrStopMultiplier: rangeMode ? 1 : undefined,
+            atrRiskRewardRatio: rangeMode ? 1.5 : undefined,
           });
 
           if (pResult.success && pResult.trade) {
@@ -1137,14 +1179,22 @@ export default function App() {
           const atrVal = atrSeries[atrSeries.length - 1];
           if (!atrVal || atrVal <= 0) continue;
 
-          const lastClosePrice = data[data.length - 1].close;
-          const requiredScore = autoTradeEngine.getRequiredConfluenceScore(
-            lastClosePrice,
-            atrVal
-          ).requiredScore;
-          if (conf.score < requiredScore) continue;
-
           const closes = data.map((c) => c.close);
+          const bands = bollingerBands(closes, 20, 2);
+          const lastBandIndex = bands.middle.length - 1;
+          const isWeekend = [0, 6].includes(new Date().getUTCDay());
+          const isSideways = conf.adxValue !== null && conf.adxValue < 25;
+          const rangeMode = cfg.rangeScalperEnabled === true && (isWeekend || isSideways);
+
+          if (!rangeMode) {
+            const lastClosePrice = data[data.length - 1].close;
+            const requiredScore = autoTradeEngine.getRequiredConfluenceScore(
+              lastClosePrice,
+              atrVal
+            ).requiredScore;
+            if (conf.score < requiredScore) continue;
+          }
+
           const rsiSeries = rsi(closes, 14);
           const lastRsi = rsiSeries[rsiSeries.length - 1];
 
@@ -1177,6 +1227,10 @@ export default function App() {
             fearGreed: null,
             dataTimestamp: Date.now(),
             score: conf.score,
+            adx: conf.adxValue,
+            bbLower: bands.lower[lastBandIndex] ?? null,
+            bbMiddle: bands.middle[lastBandIndex] ?? null,
+            bbUpper: bands.upper[lastBandIndex] ?? null,
             candleKey: lastCandle.time,
           });
         } catch {
@@ -1323,6 +1377,8 @@ export default function App() {
 
       const smcData = scanSMC(candles);
       const confluence = evaluateConfluence(candles, smcData, htfTrendState);
+      const liveBands = bollingerBands(candles.map((c) => c.close), 20, 2);
+      const lastBandIndex = liveBands.middle.length - 1;
 
       void attemptAutoPilotEntry({
         symbol: selectedCoin.binanceSymbol,
@@ -1336,6 +1392,10 @@ export default function App() {
         fearGreed: fearGreedValue,
         dataTimestamp: Date.now(),
         score: confluence?.score ?? 0,
+        adx: confluence?.adxValue ?? null,
+        bbLower: liveBands.lower[lastBandIndex] ?? null,
+        bbMiddle: liveBands.middle[lastBandIndex] ?? null,
+        bbUpper: liveBands.upper[lastBandIndex] ?? null,
         candleKey: latestCandle.time,
       });
     });

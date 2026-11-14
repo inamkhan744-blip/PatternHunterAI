@@ -42,6 +42,7 @@ import {
   type MarketTarget,
 } from "../_shared/binance.ts";
 import { evaluateServerConfluence } from "../_shared/confluence.ts";
+import { evaluateRangeSetup } from "../_shared/range.ts";
 
 const MAX_USERS_PER_RUN = 25;
 const RUN_COOLDOWN_MS = 55_000;
@@ -69,6 +70,7 @@ interface PilotConfig {
   tradeDirectionMode: DirectionMode;
   minScore: number;
   maxDailyLossPercent: number;
+  rangeScalperEnabled: boolean;
   paperTrading: boolean;
   volatilityScaling: boolean;
   adaptiveSizing: boolean;
@@ -137,6 +139,7 @@ function normalizeConfig(raw: Record<string, unknown> | null): PilotConfig {
     tradeDirectionMode: (["BOTH", "LONG_ONLY", "SHORT_ONLY"].includes(mode) ? mode : "BOTH") as DirectionMode,
     minScore: Math.max(MIN_CONFLUENCE_SCORE, Math.round(asNumber(config.minScore, MIN_CONFLUENCE_SCORE, 0, 100))),
     maxDailyLossPercent: asNumber(config.maxDailyLossPercent, 3, 1, 10),
+    rangeScalperEnabled: config.rangeScalperEnabled === true,
     // Safety default: anything that is not an explicit boolean false runs paper.
     // This prevents a legacy/empty config from silently enabling live trading.
     paperTrading: config.paperTrading === false ? false : true,
@@ -359,9 +362,11 @@ async function executeOnBinance(
     price: number;
     atr: number;
     score: number;
+    stopMultiplier: number;
+    takeProfitMultiplier: number;
   }
 ): Promise<ExecutionResult> {
-  const { symbol, direction, config, price, atr, score } = params;
+  const { symbol, direction, config, price, atr, score, stopMultiplier, takeProfitMultiplier } = params;
   const target: MarketTarget = config.marketType === "Futures" ? "futures" : "spot";
   const balance = await accountBalance(apiKey, apiSecret, target);
   if (balance <= 0) {
@@ -372,12 +377,12 @@ async function executeOnBinance(
     ? Math.min(2, Math.max(0.25, config.riskPercent * scoreRiskMultiplier(score, config.minScore)))
     : config.riskPercent;
   const riskAmount = (balance * effectiveRiskPercent) / 100;
-  const stopDistance = atr * ATR_STOP_MULTIPLIER;
+  const stopDistance = atr * stopMultiplier;
   if (stopDistance <= 0) return { ok: false, error: "ATR unavailable for position sizing." };
 
   const stopLoss = direction === "LONG" ? price - stopDistance : price + stopDistance;
   const takeProfit =
-    direction === "LONG" ? price + atr * ATR_TAKE_PROFIT_MULTIPLIER : price - atr * ATR_TAKE_PROFIT_MULTIPLIER;
+    direction === "LONG" ? price + atr * takeProfitMultiplier : price - atr * takeProfitMultiplier;
 
   if (target === "futures") {
     const rawQty = riskAmount / stopDistance;
@@ -876,7 +881,8 @@ async function runForUser(
     await saveRun({ last_error: null });
     return { user_id: userId, status: "skipped", reason };
   }
-  if (config.avoidWeekends && (nowDate.getUTCDay() === 0 || nowDate.getUTCDay() === 6)) {
+  const isWeekend = nowDate.getUTCDay() === 0 || nowDate.getUTCDay() === 6;
+  if (config.avoidWeekends && isWeekend && !config.rangeScalperEnabled) {
     const reason = "Weekend guard active: no new Auto-Pilot entries.";
     await logEvent(supabase, userId, "info", reason);
     await saveRun({ last_error: null });
@@ -982,6 +988,10 @@ async function runForUser(
     price: number;
     atr: number;
     candle: Candle;
+    rangeMode: boolean;
+    stopMultiplier: number;
+    takeProfitMultiplier: number;
+    reason: string;
   }
 
   const candidates: Candidate[] = [];
@@ -1005,14 +1015,48 @@ async function runForUser(
       const lastSeen = candleCursors[symbol] ?? cursorFallback;
       if (lastSeen && lastClosed.time <= lastSeen) continue;
 
-      const signal = evaluateServerConfluence(closed, htf1h.slice(0, -1), htf4h.slice(0, -1), {
-        minScore: config.minScore,
-        volatilityScaling: config.volatilityScaling,
-        minAdx: config.minAdx,
-      });
-      if (!signal.canExecute) continue;
+      const rangeSetup = config.rangeScalperEnabled ? evaluateRangeSetup(closed) : null;
+      const rangeAdx = rangeSetup?.adx ?? null;
+      const sidewaysRange = rangeAdx !== null && rangeAdx < 25;
+      const useRangeMode = config.rangeScalperEnabled && (isWeekend || sidewaysRange);
 
-      const direction: Direction = signal.bias === "Strong Buy" ? "LONG" : "SHORT";
+      let direction: Direction | null = null;
+      let score = 0;
+      let requiredScore = 0;
+      let price = 0;
+      let atr = 0;
+      let rangeMode = false;
+      let stopMultiplier = ATR_STOP_MULTIPLIER;
+      let takeProfitMultiplier = ATR_TAKE_PROFIT_MULTIPLIER;
+      let reason = "";
+
+      if (useRangeMode) {
+        if (!rangeSetup?.canExecute || !rangeSetup.direction) continue;
+        direction = rangeSetup.direction;
+        score = rangeSetup.score;
+        requiredScore = 60;
+        price = rangeSetup.price;
+        atr = rangeSetup.atr;
+        rangeMode = true;
+        stopMultiplier = rangeSetup.stopMultiplier;
+        takeProfitMultiplier = rangeSetup.takeProfitMultiplier;
+        reason = rangeSetup.reason;
+      } else {
+        const signal = evaluateServerConfluence(closed, htf1h.slice(0, -1), htf4h.slice(0, -1), {
+          minScore: config.minScore,
+          volatilityScaling: config.volatilityScaling,
+          minAdx: config.minAdx,
+        });
+        if (!signal.canExecute) continue;
+        direction = signal.bias === "Strong Buy" ? "LONG" : "SHORT";
+        score = signal.score;
+        requiredScore = signal.requiredScore;
+        price = signal.price;
+        atr = signal.atr;
+        reason = signal.reasons.join("; ");
+      }
+
+      if (!direction) continue;
       if (config.marketType === "Spot" && direction === "SHORT") continue;
       if (config.tradeDirectionMode === "LONG_ONLY" && direction === "SHORT") continue;
       if (config.tradeDirectionMode === "SHORT_ONLY" && direction === "LONG") continue;
@@ -1023,14 +1067,31 @@ async function runForUser(
         if (candidates.some((c) => baseAsset(c.symbol) === base)) continue;
       }
 
+      if (rangeMode) {
+        await logEvent(
+          supabase,
+          userId,
+          "info",
+          sidewaysRange
+            ? "Range Mode Active: ADX < 25. Executing RSI Scalp."
+            : `Range Mode Active: Weekend (ADX ${rangeAdx?.toFixed(1) ?? "N/A"}). Executing RSI Scalp.`,
+          symbol,
+          { score, price, rsi: rangeSetup?.rsi, bbLower: rangeSetup?.bbLower, bbUpper: rangeSetup?.bbUpper }
+        );
+      }
+
       candidates.push({
         symbol,
-        score: signal.score,
-        requiredScore: signal.requiredScore,
+        score,
+        requiredScore,
         direction,
-        price: signal.price,
-        atr: signal.atr,
+        price,
+        atr,
         candle: lastClosed,
+        rangeMode,
+        stopMultiplier,
+        takeProfitMultiplier,
+        reason,
       });
     } catch (err) {
       await logEvent(
@@ -1079,7 +1140,7 @@ async function runForUser(
     }
 
     const leverage = config.marketType === "Futures" ? config.leverage : 1;
-    const stopDistance = candidate.atr * ATR_STOP_MULTIPLIER;
+    const stopDistance = candidate.atr * candidate.stopMultiplier;
     if (!(stopDistance > 0)) {
       lastError = "ATR unavailable for position sizing.";
       continue;
@@ -1089,8 +1150,8 @@ async function runForUser(
       candidate.direction === "LONG" ? livePrice - stopDistance : livePrice + stopDistance;
     const takeProfit =
       candidate.direction === "LONG"
-        ? livePrice + candidate.atr * ATR_TAKE_PROFIT_MULTIPLIER
-        : livePrice - candidate.atr * ATR_TAKE_PROFIT_MULTIPLIER;
+        ? livePrice + candidate.atr * candidate.takeProfitMultiplier
+        : livePrice - candidate.atr * candidate.takeProfitMultiplier;
     const tradeId = `SRV-${crypto.randomUUID()}`;
     const clientOrderId = `${config.paperTrading ? "paper" : "live"}-${crypto.randomUUID()}`;
 
@@ -1156,6 +1217,8 @@ async function runForUser(
       price: livePrice,
       atr: candidate.atr,
       score: candidate.score,
+      stopMultiplier: candidate.stopMultiplier,
+      takeProfitMultiplier: candidate.takeProfitMultiplier,
     });
 
     if (!result.ok) {

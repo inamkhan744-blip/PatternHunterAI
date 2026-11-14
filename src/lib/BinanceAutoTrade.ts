@@ -54,6 +54,7 @@ export interface AutoTradeConfig {
   maxConsecutiveLosses: number; // Pause after this many losses
   lossCooldownMinutes: number; // Cooldown after loss streak
   correlationFilter: boolean; // Avoid same-base symbols
+  rangeScalperEnabled: boolean; // Bollinger/RSI scalps on weekends and low-ADX ranges
 }
 
 export interface ManagedTrade {
@@ -146,6 +147,7 @@ export const DEFAULT_CONFIG: AutoTradeConfig = {
   maxConsecutiveLosses: 3,
   lossCooldownMinutes: 60,
   correlationFilter: true,
+  rangeScalperEnabled: false,
 };
 
 // Base URLs
@@ -909,6 +911,88 @@ export class BinanceAutoTradeEngine {
       direction,
       score: verdict.confluenceScore,
       reason: verdict.verdictReason,
+    };
+  }
+
+  /**
+   * Mean-reversion setup used by Range Scalper Mode when ADX is low or the
+   * market is in a weekend range. This deliberately bypasses the trend
+   * confluence gate: it buys the lower band and sells the upper band.
+   */
+  public evaluateRangeSetup(params: {
+    price: number;
+    rsi: number | null;
+    atr: number;
+    adx: number | null;
+    bbLower: number | null;
+    bbMiddle: number | null;
+    bbUpper: number | null;
+  }): {
+    proceed: boolean;
+    direction: TradeDirection;
+    score: number;
+    reason: string;
+    stopMultiplier: number;
+    takeProfitMultiplier: number;
+  } {
+    const fallback: TradeDirection = "LONG";
+    const { price, rsi, atr, adx, bbLower, bbMiddle, bbUpper } = params;
+    if (
+      !(price > 0) ||
+      !(atr > 0) ||
+      rsi === null ||
+      bbLower === null ||
+      bbMiddle === null ||
+      bbUpper === null
+    ) {
+      return {
+        proceed: false,
+        direction: fallback,
+        score: 0,
+        reason: "Range indicators unavailable",
+        stopMultiplier: 1,
+        takeProfitMultiplier: 1.5,
+      };
+    }
+
+    const tolerance = Math.max(atr * 0.25, (bbUpper - bbLower) * 0.1);
+    const lowerTouch = price <= bbLower + tolerance;
+    const upperTouch = price >= bbUpper - tolerance;
+    let direction: TradeDirection | null = null;
+    let reason = "Price is not at a range extreme";
+
+    if (lowerTouch && rsi < 35) {
+      direction = "LONG";
+      reason = `Price near lower Bollinger Band with RSI ${rsi.toFixed(1)} < 35`;
+    } else if (upperTouch && rsi > 65) {
+      direction = "SHORT";
+      reason = `Price near upper Bollinger Band with RSI ${rsi.toFixed(1)} > 65`;
+    }
+
+    if (!direction) {
+      return {
+        proceed: false,
+        direction: fallback,
+        score: 0,
+        reason,
+        stopMultiplier: 1,
+        takeProfitMultiplier: 1.5,
+      };
+    }
+
+    const rsiExtreme = direction === "LONG" ? 35 - rsi : rsi - 65;
+    const bandDistance = direction === "LONG" ? price - bbLower : bbUpper - price;
+    const bandBonus = Math.max(0, 1 - Math.abs(bandDistance) / Math.max(tolerance, 0.000001)) * 10;
+    const score = Math.round(Math.min(100, Math.max(60, 70 + rsiExtreme * 1.5 + bandBonus)));
+    const target = bbMiddle;
+
+    return {
+      proceed: true,
+      direction,
+      score,
+      reason: `${reason}. Target middle band ${target.toFixed(2)}; ADX ${adx?.toFixed(1) ?? "N/A"}.`,
+      stopMultiplier: 1,
+      takeProfitMultiplier: 1.5,
     };
   }
 

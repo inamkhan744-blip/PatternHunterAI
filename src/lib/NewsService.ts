@@ -4,6 +4,7 @@ export interface NewsEvent {
   id: string;
   title: string;
   url: string;
+  source?: string;
   symbols: string[];
   publishedAt: string;
   negative: boolean;
@@ -129,6 +130,7 @@ export async function fetchLatestNews(): Promise<NewsEvent[]> {
           id: article.link || String(index),
           title: article.title,
           url: article.link,
+          source: article.source,
           symbols: extractSymbols(text),
           publishedAt: article.pubDate,
           negative: isNegative(article.title, article.description || ""),

@@ -231,10 +231,7 @@ export default function SniperChecklistModal({
           <button
             disabled={!canExecute || fomoLocked}
             onClick={() => {
-              if (fomoLocked) {
-                alert("🚨 Trade execution disabled: Anti-FOMO Lock active.");
-                return;
-              }
+              if (fomoLocked) return;
               if (canExecute) {
                 if (onExecuteTrade) onExecuteTrade();
                 onClose();

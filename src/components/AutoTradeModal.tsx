@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from "react";
+import ConfirmActionModal from "./ui/ConfirmActionModal";
 import {
   Shield,
   Zap,
@@ -93,6 +94,7 @@ export default function AutoTradeModal({
   const [accountBalance, setAccountBalance] = useState<number>(10000);
   const [, setBalanceLoading] = useState(false);
   const [disclaimerOpen, setDisclaimerOpen] = useState(false);
+  const [killSwitchOpen, setKillSwitchOpen] = useState(false);
   const [executing, setExecuting] = useState(false);
   const [statusMessage, setStatusMessage] = useState<{ type: "success" | "error" | "info" | "warning"; text: string } | null>(null);
   const [emergencyLoading, setEmergencyLoading] = useState(false);
@@ -423,10 +425,12 @@ export default function AutoTradeModal({
     }
   };
 
-  const handleEmergencyStop = async () => {
-    if (!confirm("🚨 ACTIVATE KILL SWITCH? This will immediately cancel ALL open orders on Binance Spot and Futures and close all active positions!")) {
-      return;
-    }
+  const handleEmergencyStop = () => {
+    setKillSwitchOpen(true);
+  };
+
+  const confirmEmergencyStop = async () => {
+    setKillSwitchOpen(false);
     setEmergencyLoading(true);
     try {
       const res = await autoTradeEngine.emergencyStop();
@@ -1558,6 +1562,16 @@ export default function AutoTradeModal({
         </div>
       </div>
 
+      <ConfirmActionModal
+        isOpen={killSwitchOpen}
+        title="Activate Kill Switch"
+        message="This will immediately cancel ALL open orders on Binance Spot and Futures and close all active positions!"
+        variant="danger"
+        confirmText="Activate"
+        cancelText="Cancel"
+        onConfirm={confirmEmergencyStop}
+        onCancel={() => setKillSwitchOpen(false)}
+      />
       <RiskDisclaimerModal
         open={disclaimerOpen}
         onClose={() => setDisclaimerOpen(false)}

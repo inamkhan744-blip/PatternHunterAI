@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import ConfirmActionModal from "./ui/ConfirmActionModal";
 import {
   X,
   Settings as SettingsIcon,
@@ -118,6 +119,12 @@ export default function SettingsModal({
 
   // Multi-Exchange tab state
   const [selectedExchange, setSelectedExchange] = useState<ExchangeId>(() => getActiveExchange());
+  const [confirmState, setConfirmState] = useState<{
+    title: string;
+    message: string;
+    variant: "danger" | "success" | "neutral";
+    onConfirm: () => void;
+  } | null>(null);
   const [exchangeKey, setExchangeKey] = useState<string>("");
   const [exchangeSecret, setExchangeSecret] = useState<string>("");
   const [exchangePassphrase, setExchangePassphrase] = useState<string>("");
@@ -383,22 +390,25 @@ export default function SettingsModal({
     setTimeout(() => setCopiedPayload(false), 2000);
   };
 
-    const handleRegenerateWebhookToken = async () => {
-    const confirmed = window.confirm(
-      "Regenerate the webhook token? Existing TradingView alerts will stop working until you update them."
-    );
-    if (!confirmed) return;
-
-    try {
-      await webhookService.regenerateToken();
-      setWebhookUrl(webhookService.getWebhookUrl());
-      setToast({ type: "success", message: "New server-issued webhook token generated!" });
-    } catch (err) {
-      setToast({
-        type: "error",
-        message: err instanceof Error ? err.message : "Failed to rotate the webhook token.",
-      });
-    }
+    const handleRegenerateWebhookToken = () => {
+    setConfirmState({
+      title: "Regenerate Webhook Token",
+      message: "Regenerate the webhook token? Existing TradingView alerts will stop working until you update them.",
+      variant: "danger",
+      onConfirm: async () => {
+        try {
+          await webhookService.regenerateToken();
+          setWebhookUrl(webhookService.getWebhookUrl());
+          setToast({ type: "success", message: "New server-issued webhook token generated!" });
+        } catch (err) {
+          setToast({
+            type: "error",
+            message: err instanceof Error ? err.message : "Failed to rotate the webhook token.",
+          });
+        }
+        setConfirmState(null);
+      },
+    });
   };
 
   const handleSimulateWebhook = () => {
@@ -425,18 +435,23 @@ export default function SettingsModal({
 
   if (!open) return null;
 
-  const handleDeleteStoredCredentials = async () => {
-    if (!window.confirm("Delete the stored Binance API credentials? Live trading will stop until new keys are saved.")) {
-      return;
-    }
-    try {
-      await deleteExchangeCredentials("binance");
-      clearCredentialCache();
-      setCredentialStatus(getCachedCredentialStatus());
-      setToast({ type: "success", message: "Stored Binance credentials deleted from the server vault." });
-    } catch (err) {
-      setToast({ type: "error", message: err instanceof Error ? err.message : "Failed to delete stored credentials." });
-    }
+  const handleDeleteStoredCredentials = () => {
+    setConfirmState({
+      title: "Delete Stored Credentials",
+      message: "Delete the stored Binance API credentials? Live trading will stop until new keys are saved.",
+      variant: "danger",
+      onConfirm: async () => {
+        try {
+          await deleteExchangeCredentials("binance");
+          clearCredentialCache();
+          setCredentialStatus(getCachedCredentialStatus());
+          setToast({ type: "success", message: "Stored Binance credentials deleted from the server vault." });
+        } catch (err) {
+          setToast({ type: "error", message: err instanceof Error ? err.message : "Failed to delete stored credentials." });
+        }
+        setConfirmState(null);
+      },
+    });
   };
 
   const handleSaveApiConfiguration = async (e?: React.FormEvent) => {
@@ -1387,6 +1402,18 @@ export default function SettingsModal({
           </button>
         </div>
       </div>
+      {confirmState && (
+        <ConfirmActionModal
+          isOpen={!!confirmState}
+          title={confirmState.title}
+          message={confirmState.message}
+          variant={confirmState.variant}
+          confirmText="Confirm"
+          cancelText="Cancel"
+          onConfirm={confirmState.onConfirm}
+          onCancel={() => setConfirmState(null)}
+        />
+      )}
     </div>
   );
 }

@@ -1,4 +1,5 @@
 import { useState, useCallback } from "react";
+import ConfirmActionModal from "./ui/ConfirmActionModal";
 import { Cpu, Play, Activity, Plus, Trash2, Sliders } from "lucide-react";
 import { fetchCandles } from "../lib/binance";
 import { rsi, sma, ema } from "../lib/indicators";
@@ -140,6 +141,7 @@ export default function StrategyBuilder({ selectedCoin, timeframe }: Props) {
   const [strategy, setStrategy] = useState<StrategyConfig>(PRESETS[0].config);
   const [loading, setLoading] = useState(false);
   const [backtestResult, setBacktestResult] = useState<StrategyBacktestSummary | null>(null);
+  const [infoModal, setInfoModal] = useState<{ title: string; message: string } | null>(null);
 
   const addRule = () => {
     const newRule: StrategyRule = {
@@ -175,7 +177,7 @@ export default function StrategyBuilder({ selectedCoin, timeframe }: Props) {
     try {
       const candles = await fetchCandles(selectedCoin.binanceSymbol, 500, timeframe);
       if (candles.length < 210) {
-        alert("Not enough historical candle data to simulate this strategy (need at least 210 candles).");
+        setInfoModal({ title: "Insufficient Data", message: "Not enough historical candle data to simulate this strategy (need at least 210 candles)." });
         setLoading(false);
         return;
       }
@@ -357,7 +359,7 @@ export default function StrategyBuilder({ selectedCoin, timeframe }: Props) {
       });
     } catch (e) {
       console.error("Backtest simulation failed:", e);
-      alert("Error occurred during strategy backtest execution.");
+      setInfoModal({ title: "Backtest Error", message: "Error occurred during strategy backtest execution." });
     } finally {
       setLoading(false);
     }
@@ -721,6 +723,18 @@ export default function StrategyBuilder({ selectedCoin, timeframe }: Props) {
           </div>
         </div>
       )}
+    {infoModal && (
+      <ConfirmActionModal
+        isOpen={!!infoModal}
+        title={infoModal.title}
+        message={infoModal.message}
+        variant="neutral"
+        confirmText="OK"
+        cancelText=""
+        onConfirm={() => setInfoModal(null)}
+        onCancel={() => setInfoModal(null)}
+      />
+    )}
     </div>
   );
 }

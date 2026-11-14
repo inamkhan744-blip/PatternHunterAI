@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import ConfirmActionModal from "./ui/ConfirmActionModal";
 import {
   BookOpen,
   Plus,
@@ -25,6 +26,7 @@ export default function TradingJournal() {
   void _loading;
   const [showAddModal, setShowAddModal] = useState(false);
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
 
   const [coinSymbol, setCoinSymbol] = useState("BTC");
   const [direction, setDirection] = useState<"long" | "short">("long");
@@ -137,15 +139,21 @@ export default function TradingJournal() {
     }
   };
 
-  const handleDelete = async (id: string) => {
-    if (!confirm("Delete this journal entry? This cannot be undone.")) return;
+  const handleDelete = (id: string) => {
+    setPendingDeleteId(id);
+  };
+
+  const confirmDelete = async () => {
+    if (!pendingDeleteId) return;
+    const id = pendingDeleteId;
     const { error } = await supabase.from("journal_entries").delete().eq("id", id);
     if (error) {
       setMessage({ type: "error", text: `Could not delete the entry: ${error.message}` });
-      return;
+    } else {
+      setMessage({ type: "success", text: "Journal entry deleted." });
+      fetchJournalData();
     }
-    setMessage({ type: "success", text: "Journal entry deleted." });
-    fetchJournalData();
+    setPendingDeleteId(null);
   };
 
   return (
@@ -437,6 +445,18 @@ export default function TradingJournal() {
           </div>
         </div>
       )}
+    {pendingDeleteId && (
+      <ConfirmActionModal
+        isOpen={!!pendingDeleteId}
+        title="Delete Journal Entry"
+        message="Delete this journal entry? This cannot be undone."
+        variant="danger"
+        confirmText="Delete"
+        cancelText="Cancel"
+        onConfirm={confirmDelete}
+        onCancel={() => setPendingDeleteId(null)}
+      />
+    )}
     </div>
   );
 }

@@ -45,6 +45,15 @@ export interface AutoTradeConfig {
   maxDailyLossPercent: number; // Max daily loss % (default 3%) before tripping circuit breaker
   allowAiFallback: boolean; // Allow trades if Gemini AI fails (local heuristic fallback)
   minConfluenceScore: number; // Minimum Auto-Pilot confluence score (80-100)
+  volatilityScaling: boolean; // Raise score threshold in high-ATR regimes
+  adaptiveSizing: boolean; // Scale risk by confluence score
+  minAdx: number; // Minimum ADX for trend regime
+  avoidWeekends: boolean; // Skip Saturday/Sunday UTC
+  sessionUtcStart: number; // UTC hour start (0-23)
+  sessionUtcEnd: number; // UTC hour end (1-24)
+  maxConsecutiveLosses: number; // Pause after this many losses
+  lossCooldownMinutes: number; // Cooldown after loss streak
+  correlationFilter: boolean; // Avoid same-base symbols
 }
 
 export interface ManagedTrade {
@@ -128,6 +137,15 @@ export const DEFAULT_CONFIG: AutoTradeConfig = {
   maxDailyLossPercent: 3.0,
   allowAiFallback: true,
   minConfluenceScore: 85,
+  volatilityScaling: true,
+  adaptiveSizing: true,
+  minAdx: 25,
+  avoidWeekends: true,
+  sessionUtcStart: 0,
+  sessionUtcEnd: 24,
+  maxConsecutiveLosses: 3,
+  lossCooldownMinutes: 60,
+  correlationFilter: true,
 };
 
 // Base URLs
@@ -1056,9 +1074,12 @@ export class BinanceAutoTradeEngine {
     isHighVolatility: boolean;
   } {
     const atrPercent = entryPrice > 0 ? (atrValue / entryPrice) * 100 : 0;
-    // If ATR > 2.0% of price, market is high volatility: dynamically scale required score to 95+
+    // If ATR > 2.0% of price, market is high volatility: optionally scale the
+    // user's minimum up to 95+.
     const isHighVolatility = atrPercent >= 2.0;
-    const requiredScore = isHighVolatility ? 95 : 85;
+    const baseScore = this.config.minConfluenceScore ?? 85;
+    const requiredScore =
+      this.config.volatilityScaling && isHighVolatility ? Math.max(baseScore, 95) : baseScore;
 
     return {
       requiredScore,

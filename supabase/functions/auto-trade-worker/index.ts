@@ -68,7 +68,17 @@ interface PilotConfig {
   maxOpenTrades: number;
   tradeDirectionMode: DirectionMode;
   minScore: number;
+  maxDailyLossPercent: number;
   paperTrading: boolean;
+  volatilityScaling: boolean;
+  adaptiveSizing: boolean;
+  minAdx: number;
+  avoidWeekends: boolean;
+  sessionUtcStart: number;
+  sessionUtcEnd: number;
+  maxConsecutiveLosses: number;
+  lossCooldownMinutes: number;
+  correlationFilter: boolean;
 }
 
 interface ProfileRow {
@@ -126,10 +136,91 @@ function normalizeConfig(raw: Record<string, unknown> | null): PilotConfig {
     maxOpenTrades: Math.round(asNumber(config.maxOpenTrades, 2, 1, 5)),
     tradeDirectionMode: (["BOTH", "LONG_ONLY", "SHORT_ONLY"].includes(mode) ? mode : "BOTH") as DirectionMode,
     minScore: Math.max(MIN_CONFLUENCE_SCORE, Math.round(asNumber(config.minScore, MIN_CONFLUENCE_SCORE, 0, 100))),
+    maxDailyLossPercent: asNumber(config.maxDailyLossPercent, 3, 1, 10),
     // Safety default: anything that is not an explicit boolean false runs paper.
     // This prevents a legacy/empty config from silently enabling live trading.
     paperTrading: config.paperTrading === false ? false : true,
+    volatilityScaling: config.volatilityScaling !== false,
+    adaptiveSizing: config.adaptiveSizing !== false,
+    minAdx: Math.round(asNumber(config.minAdx, 25, 0, 50)),
+    avoidWeekends: config.avoidWeekends !== false,
+    sessionUtcStart: Math.round(asNumber(config.sessionUtcStart, 0, 0, 23)),
+    sessionUtcEnd: Math.round(asNumber(config.sessionUtcEnd, 24, 1, 24)),
+    maxConsecutiveLosses: Math.round(asNumber(config.maxConsecutiveLosses, 3, 0, 10)),
+    lossCooldownMinutes: Math.round(asNumber(config.lossCooldownMinutes, 60, 0, 1440)),
+    correlationFilter: config.correlationFilter !== false,
   };
+}
+
+function isWithinTradingSession(now: Date, startHour: number, endHour: number): boolean {
+  const hour = now.getUTCHours();
+  if (startHour === 0 && endHour === 24) return true;
+  if (startHour < endHour) return hour >= startHour && hour < endHour;
+  // Overnight window, e.g. 22 -> 06.
+  return hour >= startHour || hour < endHour;
+}
+
+/** Base asset used to stop over-concentrating in one correlated coin family. */
+function baseAsset(symbol: string): string {
+  const normalized = symbol.toUpperCase();
+  const quotes = ["USDT", "USDC", "FDUSD", "BUSD", "BTC", "ETH", "BNB"];
+  for (const quote of quotes) {
+    if (normalized.endsWith(quote) && normalized.length > quote.length) {
+      return normalized.slice(0, -quote.length);
+    }
+  }
+  return normalized;
+}
+
+/** Higher-confluence setups may use slightly more risk, capped by normalizeConfig. */
+function scoreRiskMultiplier(score: number, minScore: number): number {
+  const excess = Math.max(0, score - minScore);
+  return Math.min(1.25, 0.75 + (excess / 20) * 0.5);
+}
+
+async function todayRealizedPnl(
+  supabase: ReturnType<typeof adminClient>,
+  userId: string,
+  isPaper: boolean
+): Promise<number> {
+  const startOfDay = new Date();
+  startOfDay.setUTCHours(0, 0, 0, 0);
+  const { data } = await supabase
+    .from("trades")
+    .select("pnl")
+    .eq("user_id", userId)
+    .eq("is_paper", isPaper)
+    .eq("status", "CLOSED")
+    .gte("closed_at", startOfDay.toISOString())
+    .limit(1000);
+  return (data ?? []).reduce((sum, row) => sum + Number(row.pnl ?? 0), 0);
+}
+
+async function recentLossStreak(
+  supabase: ReturnType<typeof adminClient>,
+  userId: string,
+  isPaper: boolean
+): Promise<{ losses: number; lastLossAt: number | null }> {
+  const { data } = await supabase
+    .from("trades")
+    .select("pnl, closed_at")
+    .eq("user_id", userId)
+    .eq("is_paper", isPaper)
+    .eq("status", "CLOSED")
+    .order("closed_at", { ascending: false })
+    .limit(10);
+
+  let losses = 0;
+  let lastLossAt: number | null = null;
+  for (const row of data ?? []) {
+    if (Number(row.pnl ?? 0) >= 0) break;
+    losses += 1;
+    if (lastLossAt === null && row.closed_at) {
+      const parsed = Date.parse(String(row.closed_at));
+      if (Number.isFinite(parsed)) lastLossAt = parsed;
+    }
+  }
+  return { losses, lastLossAt };
 }
 
 async function loadGlobalFlags(
@@ -267,16 +358,20 @@ async function executeOnBinance(
     config: PilotConfig;
     price: number;
     atr: number;
+    score: number;
   }
 ): Promise<ExecutionResult> {
-  const { symbol, direction, config, price, atr } = params;
+  const { symbol, direction, config, price, atr, score } = params;
   const target: MarketTarget = config.marketType === "Futures" ? "futures" : "spot";
   const balance = await accountBalance(apiKey, apiSecret, target);
   if (balance <= 0) {
     return { ok: false, error: "No available USDT balance on Binance." };
   }
 
-  const riskAmount = (balance * config.riskPercent) / 100;
+  const effectiveRiskPercent = config.adaptiveSizing
+    ? Math.min(2, Math.max(0.25, config.riskPercent * scoreRiskMultiplier(score, config.minScore)))
+    : config.riskPercent;
+  const riskAmount = (balance * effectiveRiskPercent) / 100;
   const stopDistance = atr * ATR_STOP_MULTIPLIER;
   if (stopDistance <= 0) return { ok: false, error: "ATR unavailable for position sizing." };
 
@@ -381,9 +476,13 @@ async function executeOnBinance(
     };
   }
 
-  // Spot: spend quote currency, then protect with an OCO (best effort — a failed
-  // OCO is reported in the event log but does not hide a filled entry).
-  const quoteAmount = floorTo(Math.min(riskAmount, balance * 0.95), 2);
+  // Spot: size from the same ATR risk distance as Futures, then protect with an
+  // OCO (best effort — a failed OCO is reported but does not hide a filled entry).
+  const spotQuantity = floorTo(
+    Math.min(riskAmount / stopDistance, (balance * 0.95) / price),
+    6
+  );
+  const quoteAmount = floorTo(spotQuantity * price, 2);
   if (!(quoteAmount > 0)) return { ok: false, error: "Computed order amount is zero." };
 
   const entry = await binanceSigned(apiKey, apiSecret, {
@@ -769,6 +868,36 @@ async function runForUser(
     );
   };
 
+  // Session and loss-streak guards run before any exchange request.
+  const nowDate = new Date(now);
+  if (!isWithinTradingSession(nowDate, config.sessionUtcStart, config.sessionUtcEnd)) {
+    const reason = `Outside trading session (${config.sessionUtcStart}:00-${config.sessionUtcEnd}:00 UTC).`;
+    await logEvent(supabase, userId, "info", reason);
+    await saveRun({ last_error: null });
+    return { user_id: userId, status: "skipped", reason };
+  }
+  if (config.avoidWeekends && (nowDate.getUTCDay() === 0 || nowDate.getUTCDay() === 6)) {
+    const reason = "Weekend guard active: no new Auto-Pilot entries.";
+    await logEvent(supabase, userId, "info", reason);
+    await saveRun({ last_error: null });
+    return { user_id: userId, status: "skipped", reason };
+  }
+
+  if (config.maxConsecutiveLosses > 0) {
+    const streak = await recentLossStreak(supabase, userId, config.paperTrading);
+    if (streak.losses >= config.maxConsecutiveLosses) {
+      const elapsedMinutes = streak.lastLossAt === null ? Infinity : (now - streak.lastLossAt) / 60_000;
+      if (elapsedMinutes < config.lossCooldownMinutes) {
+        const reason = `Loss-streak guard: ${streak.losses} consecutive losses; ${Math.ceil(
+          config.lossCooldownMinutes - elapsedMinutes
+        )}m cooldown remaining.`;
+        await logEvent(supabase, userId, "warn", reason);
+        await saveRun({ last_error: reason });
+        return { user_id: userId, status: "skipped", reason };
+      }
+    }
+  }
+
   // Per-symbol candle cursors. A single shared cursor meant one entry on BTC hid
   // every other symbol until the next candle, so maxOpenTrades > 1 never filled.
   const candleCursors: Record<string, number> = {};
@@ -824,9 +953,31 @@ async function runForUser(
 
   const paperBalance = config.paperTrading ? await paperAccountBalance(supabase, userId) : 0;
 
+  // Daily loss circuit breaker. The UI advertises this shield, so the server
+  // must enforce it before any new entry, not only in the browser engine.
+  let equity = paperBalance;
+  if (!config.paperTrading && credentials) {
+    equity = await accountBalance(
+      credentials.apiKey,
+      credentials.apiSecret,
+      config.marketType === "Futures" ? "futures" : "spot"
+    );
+  }
+  if (equity > 0) {
+    const realisedToday = await todayRealizedPnl(supabase, userId, config.paperTrading);
+    const lossLimit = (equity * config.maxDailyLossPercent) / 100;
+    if (realisedToday <= -lossLimit) {
+      const reason = `Daily loss breaker: realised ${realisedToday.toFixed(2)} USDT, limit ${lossLimit.toFixed(2)} USDT.`;
+      await logEvent(supabase, userId, "warn", reason);
+      await saveRun({ last_error: reason });
+      return { user_id: userId, status: "skipped", reason };
+    }
+  }
+
   interface Candidate {
     symbol: string;
     score: number;
+    requiredScore: number;
     direction: Direction;
     price: number;
     atr: number;
@@ -856,6 +1007,8 @@ async function runForUser(
 
       const signal = evaluateServerConfluence(closed, htf1h.slice(0, -1), htf4h.slice(0, -1), {
         minScore: config.minScore,
+        volatilityScaling: config.volatilityScaling,
+        minAdx: config.minAdx,
       });
       if (!signal.canExecute) continue;
 
@@ -864,9 +1017,16 @@ async function runForUser(
       if (config.tradeDirectionMode === "LONG_ONLY" && direction === "SHORT") continue;
       if (config.tradeDirectionMode === "SHORT_ONLY" && direction === "LONG") continue;
 
+      if (config.correlationFilter) {
+        const base = baseAsset(symbol);
+        if (openTrades.some((t) => baseAsset(t.symbol) === base)) continue;
+        if (candidates.some((c) => baseAsset(c.symbol) === base)) continue;
+      }
+
       candidates.push({
         symbol,
         score: signal.score,
+        requiredScore: signal.requiredScore,
         direction,
         price: signal.price,
         atr: signal.atr,
@@ -935,7 +1095,10 @@ async function runForUser(
     const clientOrderId = `${config.paperTrading ? "paper" : "live"}-${crypto.randomUUID()}`;
 
     if (config.paperTrading) {
-      const riskAmount = (paperBalance * config.riskPercent) / 100;
+      const effectiveRiskPercent = config.adaptiveSizing
+        ? Math.min(2, Math.max(0.25, config.riskPercent * scoreRiskMultiplier(candidate.score, config.minScore)))
+        : config.riskPercent;
+      const riskAmount = (paperBalance * effectiveRiskPercent) / 100;
       const maxNotional = paperBalance * leverage * 0.95;
       const quantity = floorTo(
         Math.min(riskAmount / stopDistance, maxNotional / livePrice),
@@ -974,9 +1137,9 @@ async function runForUser(
         supabase,
         userId,
         "success",
-        `Paper Auto-Pilot entry ${candidate.direction} ${candidate.symbol} qty ${quantity} (score ${candidate.score}).`,
+        `Paper Auto-Pilot entry ${candidate.direction} ${candidate.symbol} qty ${quantity} (score ${candidate.score}/${candidate.requiredScore}).`,
         candidate.symbol,
-        { score: candidate.score, price: livePrice, quantity, stopLoss, takeProfit }
+        { score: candidate.score, requiredScore: candidate.requiredScore, price: livePrice, quantity, stopLoss, takeProfit }
       );
       continue;
     }
@@ -992,6 +1155,7 @@ async function runForUser(
       config,
       price: livePrice,
       atr: candidate.atr,
+      score: candidate.score,
     });
 
     if (!result.ok) {
@@ -1059,10 +1223,11 @@ async function runForUser(
       supabase,
       userId,
       "success",
-      `Executed ${candidate.direction} ${candidate.symbol} at ${result.entryPrice?.toFixed(2)} (confluence ${candidate.score}/100).`,
+      `Executed ${candidate.direction} ${candidate.symbol} at ${result.entryPrice?.toFixed(2)} (confluence ${candidate.score}/${candidate.requiredScore}).`,
       candidate.symbol,
       {
         score: candidate.score,
+        requiredScore: candidate.requiredScore,
         quantity: result.quantity,
         stopLoss: result.stopLoss,
         takeProfit: result.takeProfit,

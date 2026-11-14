@@ -57,6 +57,13 @@ import {
 } from "../lib/TelegramService";
 import { liveWorkerLogStore, type WorkerLog } from "../lib/LiveWorkerLogStore";
 
+const EDGE_FILTERS = [
+  { key: "volatilityScaling", label: "Volatility Scaling" },
+  { key: "adaptiveSizing", label: "Adaptive Sizing" },
+  { key: "correlationFilter", label: "Correlation Filter" },
+  { key: "avoidWeekends", label: "Avoid Weekends" },
+] as const;
+
 interface Props {
   open: boolean;
   onClose: () => void;
@@ -207,6 +214,16 @@ export default function AutoTradeModal({
         tradeDirectionMode: config.tradeDirectionMode,
         paperTrading: config.paperTradingEnabled,
         minScore: config.minConfluenceScore ?? 85,
+        maxDailyLossPercent: config.maxDailyLossPercent || 3,
+        volatilityScaling: config.volatilityScaling,
+        adaptiveSizing: config.adaptiveSizing,
+        minAdx: config.minAdx,
+        avoidWeekends: config.avoidWeekends,
+        sessionUtcStart: config.sessionUtcStart,
+        sessionUtcEnd: config.sessionUtcEnd,
+        maxConsecutiveLosses: config.maxConsecutiveLosses,
+        lossCooldownMinutes: config.lossCooldownMinutes,
+        correlationFilter: config.correlationFilter,
       });
     } catch (err) {
       setApSaving(false);
@@ -740,6 +757,88 @@ export default function AutoTradeModal({
                   </option>
                 ))}
               </select>
+            </div>
+
+            {/* Auto-Pilot Edge Filters */}
+            <div className="p-4 rounded-xl bg-[#0d121f] border border-cyan-500/30 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-cyan-300 uppercase tracking-wider">
+                  Auto-Pilot Edge Filters
+                </span>
+                <span className="text-[10px] text-slate-500">Win-rate guards</span>
+              </div>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[11px]">
+                {EDGE_FILTERS.map(({ key, label }) => (
+                  <button
+                    key={key}
+                    onClick={() => handleConfigChange({ [key]: !config[key] })}
+                    className={`px-2 py-1.5 rounded-lg border font-bold transition ${
+                      config[key]
+                        ? "bg-cyan-500/20 text-cyan-300 border-cyan-500/40"
+                        : "bg-slate-900 text-slate-400 border-slate-700"
+                    }`}
+                  >
+                    {label}: {config[key] ? "ON" : "OFF"}
+                  </button>
+                ))}
+              </div>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-[11px]">
+                <label className="flex flex-col gap-1 text-slate-400">
+                  Min ADX
+                  <input
+                    type="number"
+                    min={0}
+                    max={50}
+                    value={config.minAdx ?? 25}
+                    onChange={(e) => handleConfigChange({ minAdx: Number(e.target.value) })}
+                    className="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-slate-200"
+                  />
+                </label>
+                <label className="flex flex-col gap-1 text-slate-400">
+                  Session Start (UTC)
+                  <input
+                    type="number"
+                    min={0}
+                    max={23}
+                    value={config.sessionUtcStart ?? 0}
+                    onChange={(e) => handleConfigChange({ sessionUtcStart: Number(e.target.value) })}
+                    className="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-slate-200"
+                  />
+                </label>
+                <label className="flex flex-col gap-1 text-slate-400">
+                  Session End (UTC)
+                  <input
+                    type="number"
+                    min={1}
+                    max={24}
+                    value={config.sessionUtcEnd ?? 24}
+                    onChange={(e) => handleConfigChange({ sessionUtcEnd: Number(e.target.value) })}
+                    className="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-slate-200"
+                  />
+                </label>
+                <label className="flex flex-col gap-1 text-slate-400">
+                  Max Consec. Losses
+                  <input
+                    type="number"
+                    min={0}
+                    max={10}
+                    value={config.maxConsecutiveLosses ?? 3}
+                    onChange={(e) => handleConfigChange({ maxConsecutiveLosses: Number(e.target.value) })}
+                    className="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-slate-200"
+                  />
+                </label>
+                <label className="flex flex-col gap-1 text-slate-400">
+                  Loss Cooldown (min)
+                  <input
+                    type="number"
+                    min={0}
+                    max={1440}
+                    value={config.lossCooldownMinutes ?? 60}
+                    onChange={(e) => handleConfigChange({ lossCooldownMinutes: Number(e.target.value) })}
+                    className="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-slate-200"
+                  />
+                </label>
+              </div>
             </div>
 
             {/* Paper Trading Mode Toggle, Max Daily Loss %, and AI Fallback Mode Settings */}

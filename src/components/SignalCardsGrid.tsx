@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useState } from "react";
-import { Zap, RefreshCw, TrendingUp, TrendingDown, Rocket, Newspaper } from "lucide-react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { Zap, RefreshCw, TrendingUp, TrendingDown, Rocket, Newspaper, Star } from "lucide-react";
 import { fetchTopUsdtPairs, fetchCandles } from "../lib/binance";
 import { fetchLatestNews } from "../lib/NewsService";
 import type { NewsEvent } from "../lib/NewsService";
@@ -31,9 +31,11 @@ interface SignalCard {
   takeProfit: number;
   entryPrice: number;
   atr: number;
+  volume: number;
   bbWidth: number;
   news: boolean;
   headline?: string;
+  publishedAt?: string;
   alertReason: string;
 }
 
@@ -41,9 +43,12 @@ interface Props {
   timeframe: Timeframe;
   onSelectCoin: (coin: Coin) => void;
   onTradeNow: (coin: Coin, price: number, atr: number) => void;
+  watchlistSymbols?: Set<string>;
+  onToggleWatch?: (coin: Coin) => void;
 }
 
 const ALL_KNOWN_COINS = [...COINS, ...PRO_COINS];
+const TIMEFRAMES: Timeframe[] = ["1m", "5m", "15m", "1h"];
 
 function findCoin(symbol: string): Coin {
   return (
@@ -96,12 +101,44 @@ function detectSqueeze(candles: { high: number; low: number; close: number; volu
   };
 }
 
-export default function SignalCardsGrid({ timeframe, onSelectCoin, onTradeNow }: Props) {
+export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectCoin, onTradeNow, watchlistSymbols, onToggleWatch }: Props) {
+  const [selectedTimeframe, setSelectedTimeframe] = useState<Timeframe>(initialTimeframe);
   const [coins, setCoins] = useState<Coin[]>([]);
   const [newsEvents, setNewsEvents] = useState<NewsEvent[]>([]);
   const [newsCards, setNewsCards] = useState<SignalCard[]>([]);
   const [squeezeCards, setSqueezeCards] = useState<SignalCard[]>([]);
   const [loading, setLoading] = useState(true);
+  const [filter, setFilter] = useState<"all" | "long" | "short" | "blast">("all");
+  const [sort, setSort] = useState<"squeeze" | "volume" | "score">("squeeze");
+
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const previousKeysRef = useRef<Set<string>>(new Set());
+  const hasScannedRef = useRef(false);
+
+  const playBeep = useCallback(() => {
+    try {
+      const AudioContextClass =
+        window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!AudioContextClass) return;
+      const context = audioContextRef.current || new AudioContextClass();
+      audioContextRef.current = context;
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      oscillator.type = "sine";
+      oscillator.frequency.value = 880;
+      gain.gain.value = 0.06;
+      oscillator.connect(gain);
+      gain.connect(context.destination);
+      oscillator.start();
+      oscillator.stop(context.currentTime + 0.14);
+    } catch {
+      // Audio is an enhancement only; ignore browser restrictions.
+    }
+  }, []);
+
+  useEffect(() => {
+    setSelectedTimeframe(initialTimeframe);
+  }, [initialTimeframe]);
 
   useEffect(() => {
     let active = true;
@@ -144,7 +181,7 @@ export default function SignalCardsGrid({ timeframe, onSelectCoin, onTradeNow }:
         if (!symbol) return;
         const coin = findCoin(symbol);
         try {
-          const data = await fetchCandles(coin.binanceSymbol, 30, timeframe);
+          const data = await fetchCandles(coin.binanceSymbol, 30, selectedTimeframe);
           if (data.length < 21) return;
 
           const volumes = data.map((candle) => candle.volume);
@@ -171,9 +208,11 @@ export default function SignalCardsGrid({ timeframe, onSelectCoin, onTradeNow }:
             takeProfit: levels.takeProfitPrice,
             entryPrice: price,
             atr: atrValue,
+            volume: currentVolume,
             bbWidth: 0,
             news: true,
             headline: event.title,
+            publishedAt: event.publishedAt,
             alertReason: "Breaking news with volume spike",
           });
         } catch {
@@ -186,7 +225,7 @@ export default function SignalCardsGrid({ timeframe, onSelectCoin, onTradeNow }:
       coins
         .filter((coin) => !newsSymbols.has(coin.symbol))
         .map(async (coin) => {
-          const data = await fetchCandles(coin.binanceSymbol, 100, timeframe);
+          const data = await fetchCandles(coin.binanceSymbol, 100, selectedTimeframe);
           if (data.length < 50) return null;
 
           const squeeze = detectSqueeze(data);
@@ -199,6 +238,8 @@ export default function SignalCardsGrid({ timeframe, onSelectCoin, onTradeNow }:
           const change = first > 0 ? ((price - first) / first) * 100 : 0;
           const atrSeries = atr(data, 14);
           const atrValue = atrSeries[atrSeries.length - 1] || price * 0.02;
+          const volumes = data.map((candle) => candle.volume);
+          const currentVolume = volumes[volumes.length - 1];
 
           const direction: "LONG" | "SHORT" =
             confluence?.setupBias?.includes("Buy") ? "LONG" : "SHORT";
@@ -216,6 +257,7 @@ export default function SignalCardsGrid({ timeframe, onSelectCoin, onTradeNow }:
             takeProfit: levels.takeProfitPrice,
             entryPrice,
             atr: atrValue,
+            volume: currentVolume,
             bbWidth: squeeze.bbWidth,
             news: false,
             alertReason: "BB squeeze, volume dry-up, and tight 5-candle range",
@@ -228,10 +270,17 @@ export default function SignalCardsGrid({ timeframe, onSelectCoin, onTradeNow }:
       .filter((value): value is SignalCard => value !== null)
       .sort((a, b) => a.bbWidth - b.bbWidth);
 
+    const nextKeys = new Set([...nextNewsCards, ...nextSqueezeCards].map((card) => `${card.news ? "news" : "squeeze"}-${card.coin.binanceSymbol}`));
+    if (hasScannedRef.current && [...nextKeys].some((key) => !previousKeysRef.current.has(key))) {
+      playBeep();
+    }
+    hasScannedRef.current = true;
+    previousKeysRef.current = nextKeys;
+
     setNewsCards(nextNewsCards);
     setSqueezeCards(nextSqueezeCards);
     setLoading(false);
-  }, [coins, timeframe, newsEvents, newsCards.length, squeezeCards.length]);
+  }, [coins, selectedTimeframe, newsEvents, newsCards.length, squeezeCards.length, playBeep]);
 
   useEffect(() => {
     void scan();
@@ -239,103 +288,146 @@ export default function SignalCardsGrid({ timeframe, onSelectCoin, onTradeNow }:
     return () => clearInterval(timer);
   }, [scan]);
 
-  const renderCard = (card: SignalCard) => (
-    <div
-      key={`${card.news ? "news" : "squeeze"}-${card.coin.binanceSymbol}`}
-      className="rounded-2xl border border-slate-800 bg-slate-900/80 p-3 shadow-lg"
-    >
-      <div className="flex items-start justify-between gap-2">
-        <div>
-          <button
-            onClick={() => onSelectCoin(card.coin)}
-            className="text-sm font-bold text-white hover:text-cyan-300 transition"
-          >
-            {card.coin.symbol}/USDT
-          </button>
-          <div className="text-xs text-slate-400 font-mono">{formatPrice(card.price)}</div>
-        </div>
-        <span
-          className={`px-2 py-0.5 rounded-full text-[10px] font-black ${
-            card.direction === "LONG"
-              ? "bg-green-500/20 text-green-400 border border-green-500/40"
-              : "bg-red-500/20 text-red-400 border border-red-500/40"
-          }`}
-        >
-          {card.direction}
-        </span>
-      </div>
+  const filteredNewsCards = newsCards.filter((card) => {
+    if (filter === "long") return card.direction === "LONG";
+    if (filter === "short") return card.direction === "SHORT";
+    if (filter === "blast") return false;
+    return true;
+  });
 
-      {card.news ? (
-        <div className="mt-2 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-500/20 text-red-300 border border-red-500/40">
-          <Newspaper className="w-3 h-3" />
-          🚨 BREAKING NEWS
-        </div>
-      ) : (
-        <div className="mt-2 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/40">
-          <Rocket className="w-3 h-3" />
-          🚀 Blast Ready
-        </div>
-      )}
+  const sortSqueezeCards = (cards: SignalCard[]) => {
+    const next = [...cards];
+    if (sort === "volume") next.sort((a, b) => b.volume - a.volume);
+    else if (sort === "score") next.sort((a, b) => b.score - a.score);
+    else next.sort((a, b) => a.bbWidth - b.bbWidth);
+    return next;
+  };
 
-      {card.headline && (
-        <p className="mt-2 text-[11px] text-slate-300 line-clamp-2">{card.headline}</p>
-      )}
-
-      {!card.news && (
-        <div className="mt-2 text-[11px] text-slate-300">
-          Pending Entry:{" "}
-          <span className="font-mono font-bold text-cyan-300">{formatPrice(card.entryPrice)}</span>
-        </div>
-      )}
-
-      <div className="mt-3 grid grid-cols-2 gap-2 text-[11px]">
-        <div className="rounded-lg bg-slate-950/70 border border-slate-800 p-2">
-          <div className="text-slate-500">Stop Loss</div>
-          <div className="font-mono font-bold text-red-400">{formatPrice(card.stopLoss)}</div>
-        </div>
-        <div className="rounded-lg bg-slate-950/70 border border-slate-800 p-2">
-          <div className="text-slate-500">Take Profit</div>
-          <div className="font-mono font-bold text-green-400">{formatPrice(card.takeProfit)}</div>
-        </div>
-      </div>
-
-      <div className="mt-3 flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1.5 text-[11px] text-slate-400">
-          <Zap className="w-3.5 h-3.5 text-cyan-400" />
-          <span>Score {card.score}/100</span>
-          <span className={card.change >= 0 ? "text-green-400" : "text-red-400"}>
-            {card.change >= 0 ? <TrendingUp className="w-3 h-3 inline" /> : <TrendingDown className="w-3 h-3 inline" />}
-            {Math.abs(card.change).toFixed(2)}%
-          </span>
-        </div>
-        <button
-          onClick={() => onTradeNow(card.coin, card.entryPrice, card.atr)}
-          className="px-3 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-[11px] font-black transition"
-        >
-          Trade Now
-        </button>
-      </div>
-    </div>
+  const filteredSqueezeCards = sortSqueezeCards(
+    squeezeCards.filter((card) => {
+      if (filter === "long") return card.direction === "LONG";
+      if (filter === "short") return card.direction === "SHORT";
+      if (filter === "blast") return true;
+      return true;
+    })
   );
+
+  const renderCard = (card: SignalCard) => {
+    const watched = watchlistSymbols?.has(card.coin.binanceSymbol) ?? false;
+    return (
+      <div
+        key={`${card.news ? "news" : "squeeze"}-${card.coin.binanceSymbol}`}
+        className="rounded-2xl border border-slate-800 bg-slate-900/80 p-3 shadow-lg"
+      >
+        <div className="flex items-start justify-between gap-2">
+          <div>
+            <button
+              onClick={() => onSelectCoin(card.coin)}
+              className="text-sm font-bold text-white hover:text-cyan-300 transition"
+            >
+              {card.coin.symbol}/USDT
+            </button>
+            <div className="text-xs text-slate-400 font-mono">{formatPrice(card.price)}</div>
+          </div>
+          <div className="flex items-center gap-2">
+            {onToggleWatch && (
+              <button
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onToggleWatch(card.coin);
+                }}
+                className="text-slate-500 hover:text-yellow-400 transition"
+                title={watched ? "Remove from watchlist" : "Add to watchlist"}
+              >
+                <Star className={`w-4 h-4 ${watched ? "fill-yellow-400 text-yellow-400" : ""}`} />
+              </button>
+            )}
+            <span
+              className={`px-2 py-0.5 rounded-full text-[10px] font-black ${
+                card.direction === "LONG"
+                  ? "bg-green-500/20 text-green-400 border border-green-500/40"
+                  : "bg-red-500/20 text-red-400 border border-red-500/40"
+              }`}
+            >
+              {card.direction}
+            </span>
+          </div>
+        </div>
+
+        {card.news ? (
+          <div className="mt-2 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-500/20 text-red-300 border border-red-500/40">
+            <Newspaper className="w-3 h-3" />
+            🚨 BREAKING NEWS
+          </div>
+        ) : (
+          <div className="mt-2 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/40">
+            <Rocket className="w-3 h-3" />
+            🚀 Blast Ready
+          </div>
+        )}
+
+        {card.headline && (
+          <p className="mt-2 text-[11px] text-slate-300 line-clamp-2">{card.headline}</p>
+        )}
+
+        {!card.news && (
+          <div className="mt-2 text-[11px] text-slate-300">
+            Pending Entry:{" "}
+            <span className="font-mono font-bold text-cyan-300">{formatPrice(card.entryPrice)}</span>
+          </div>
+        )}
+
+        <div className="mt-3 grid grid-cols-2 gap-2 text-[11px]">
+          <div className="rounded-lg bg-slate-950/70 border border-slate-800 p-2">
+            <div className="text-slate-500">Stop Loss</div>
+            <div className="font-mono font-bold text-red-400">{formatPrice(card.stopLoss)}</div>
+          </div>
+          <div className="rounded-lg bg-slate-950/70 border border-slate-800 p-2">
+            <div className="text-slate-500">Take Profit</div>
+            <div className="font-mono font-bold text-green-400">{formatPrice(card.takeProfit)}</div>
+          </div>
+        </div>
+
+        <div className="mt-3 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-1.5 text-[11px] text-slate-400">
+            <Zap className="w-3.5 h-3.5 text-cyan-400" />
+            <span>Score {card.score}/100</span>
+            <span className={card.change >= 0 ? "text-green-400" : "text-red-400"}>
+              {card.change >= 0 ? <TrendingUp className="w-3 h-3 inline" /> : <TrendingDown className="w-3 h-3 inline" />}
+              {Math.abs(card.change).toFixed(2)}%
+            </span>
+          </div>
+          <button
+            onClick={() => onTradeNow(card.coin, card.entryPrice, card.atr)}
+            className="px-3 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-[11px] font-black transition"
+          >
+            Trade Now
+          </button>
+        </div>
+      </div>
+    );
+  };
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6">
-      {newsCards.length > 0 && (
-        <section className="space-y-3">
-          <div>
-            <h2 className="text-lg font-bold text-white">🔥 Trending / News Alerts</h2>
-            <p className="text-xs text-slate-500">Breaking news with live volume spikes</p>
-          </div>
-          <div className="grid grid-cols-2 gap-3">{newsCards.map(renderCard)}</div>
-        </section>
-      )}
-
-      <section className="space-y-3">
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <h2 className="text-lg font-bold text-white">Pre-Breakout Squeeze Scanner</h2>
-            <p className="text-xs text-slate-500">Top 100 USDT pairs by volume • auto-refreshing every 5 seconds</p>
-          </div>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <h2 className="text-lg font-bold text-white">Professional Scanner Radar</h2>
+          <p className="text-xs text-slate-500">Hybrid news, squeeze, filter, sort, and watchlist controls</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="text-xs text-slate-400">Timeframe</label>
+          <select
+            value={selectedTimeframe}
+            onChange={(event) => setSelectedTimeframe(event.target.value as Timeframe)}
+            className="rounded-lg bg-slate-800 border border-slate-700 px-3 py-1.5 text-xs text-slate-200"
+          >
+            {TIMEFRAMES.map((item) => (
+              <option key={item} value={item}>
+                {item}
+              </option>
+            ))}
+          </select>
           <button
             onClick={() => void scan()}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-slate-300 transition"
@@ -344,18 +436,71 @@ export default function SignalCardsGrid({ timeframe, onSelectCoin, onTradeNow }:
             Refresh
           </button>
         </div>
+      </div>
+
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex flex-wrap gap-2">
+          {(["all", "long", "short", "blast"] as const).map((item) => (
+            <button
+              key={item}
+              onClick={() => setFilter(item)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition ${
+                filter === item
+                  ? "bg-cyan-500 text-slate-950"
+                  : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+              }`}
+            >
+              {item === "all"
+                ? "All"
+                : item === "long"
+                ? "Long Only"
+                : item === "short"
+                ? "Short Only"
+                : "Blast Ready"}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="text-xs text-slate-400">Sort</label>
+          <select
+            value={sort}
+            onChange={(event) => setSort(event.target.value as "squeeze" | "volume" | "score")}
+            className="rounded-lg bg-slate-800 border border-slate-700 px-3 py-1.5 text-xs text-slate-200"
+          >
+            <option value="squeeze">Tightest Squeeze</option>
+            <option value="volume">Highest Volume</option>
+            <option value="score">Highest Score</option>
+          </select>
+        </div>
+      </div>
+
+      {filteredNewsCards.length > 0 && filter !== "blast" && (
+        <section className="space-y-3">
+          <div>
+            <h2 className="text-lg font-bold text-white">🔥 Trending / News Alerts</h2>
+            <p className="text-xs text-slate-500">Breaking news with live volume spikes</p>
+          </div>
+          <div className="grid grid-cols-2 gap-3">{filteredNewsCards.map(renderCard)}</div>
+        </section>
+      )}
+
+      <section className="space-y-3">
+        <div>
+          <h2 className="text-lg font-bold text-white">Pre-Breakout Squeeze Scanner</h2>
+          <p className="text-xs text-slate-500">Top 100 USDT pairs by volume • auto-refreshing every 5 seconds</p>
+        </div>
 
         {loading && newsCards.length === 0 && squeezeCards.length === 0 ? (
           <div className="flex items-center justify-center py-16 text-slate-500">
             <RefreshCw className="w-5 h-5 animate-spin mr-2" />
             Scanning markets...
           </div>
-        ) : squeezeCards.length === 0 ? (
+        ) : filteredSqueezeCards.length === 0 ? (
           <div className="flex items-center justify-center py-16 text-slate-500">
-            No pre-breakout squeezes found right now.
+            No matching setups found right now.
           </div>
         ) : (
-          <div className="grid grid-cols-2 gap-3">{squeezeCards.map(renderCard)}</div>
+          <div className="grid grid-cols-2 gap-3">{filteredSqueezeCards.map(renderCard)}</div>
         )}
       </section>
     </div>

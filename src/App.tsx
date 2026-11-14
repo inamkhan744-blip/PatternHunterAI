@@ -2751,6 +2751,8 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
                 setAutoTradeCoin({ symbol: coin.binanceSymbol, price, atr });
                 setAutoTradeOpen(true);
               }}
+              watchlistSymbols={watchSymbols}
+              onToggleWatch={toggleWatch}
             />
           )}
 

@@ -6,6 +6,7 @@ import type { NewsEvent } from "../lib/NewsService";
 import { evaluateConfluence } from "../lib/ConfluenceEngine";
 import ScannerTradeSettings, { loadScannerExecutionSettings } from "./ScannerTradeSettings";
 import type { ScannerExecutionSettings } from "./ScannerTradeSettings";
+import TradeConfirmModal from "./TradeConfirmModal";
 import { scanSMC } from "../lib/SMCScanner";
 import { atr, bollingerBands } from "../lib/indicators";
 import { calculateAtrStopLoss } from "../lib/BinanceAutoTrade";
@@ -226,6 +227,7 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [tradeSettingsOpen, setTradeSettingsOpen] = useState(false);
   const [managingSymbol, setManagingSymbol] = useState<string | null>(null);
+  const [confirmCard, setConfirmCard] = useState<SignalCard | null>(null);
   const [thresholds, setThresholds] = useState<Thresholds>(() => {
     const squeezeWidth = Number(localStorage.getItem("scanner_squeeze_width"));
     const volumeSpikeMultiplier = Number(localStorage.getItem("scanner_volume_spike_multiplier"));
@@ -552,20 +554,22 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
     setVisibleCount(20);
   }, [filter, sort, selectedTimeframe, coins]);
 
-  const handleDirectTrade = async (card: SignalCard) => {
-    const confirmed = window.confirm(
-      `Execute ${card.direction} on ${card.coin.symbol} at ${formatPrice(card.entryPrice)}?`
-    );
-    if (!confirmed) return;
+  const handleDirectTrade = (card: SignalCard) => {
+    setConfirmCard(card);
+  };
+
+  const handleConfirmTrade = async () => {
+    if (!confirmCard) return;
     const settings = loadScannerExecutionSettings();
     try {
-      await onOneClickTrade?.(card, settings);
-      setToast(`Trade executed: ${card.coin.symbol}`);
+      await onOneClickTrade?.(confirmCard, settings);
+      setToast(`Trade executed: ${confirmCard.coin.symbol}`);
     } catch (error) {
       console.error("[Scanner] direct trade failed:", error);
-      setToast(`Trade failed: ${card.coin.symbol}`);
+      setToast(`Trade failed: ${confirmCard.coin.symbol}`);
     }
     if (settings.soundOnExecution) playBeep();
+    setConfirmCard(null);
   };
 
   const handleToggleWatch = useCallback((coin: Coin) => {
@@ -1040,6 +1044,16 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
       </section>
 
       <ScannerTradeSettings open={tradeSettingsOpen} onClose={() => setTradeSettingsOpen(false)} />
+
+      {confirmCard && (
+        <TradeConfirmModal
+          isOpen={!!confirmCard}
+          onClose={() => setConfirmCard(null)}
+          onConfirm={handleConfirmTrade}
+          cardData={confirmCard}
+          settings={loadScannerExecutionSettings()}
+        />
+      )}
 
 
       {managingSymbol && (() => {

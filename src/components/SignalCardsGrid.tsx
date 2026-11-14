@@ -4,6 +4,8 @@ import { fetchTopUsdtPairs, fetchCandles, fetch24hQuoteVolumes, fetchMarketCaps 
 import { fetchLatestNews } from "../lib/NewsService";
 import type { NewsEvent } from "../lib/NewsService";
 import { evaluateConfluence } from "../lib/ConfluenceEngine";
+import ScannerTradeSettings, { loadScannerExecutionSettings } from "./ScannerTradeSettings";
+import type { ScannerExecutionSettings } from "./ScannerTradeSettings";
 import { scanSMC } from "../lib/SMCScanner";
 import { atr, bollingerBands } from "../lib/indicators";
 import { calculateAtrStopLoss } from "../lib/BinanceAutoTrade";
@@ -28,7 +30,7 @@ interface SqueezeResult {
   squeezeLow: number;
 }
 
-interface SignalCard {
+export interface SignalCard {
   coin: Coin;
   price: number;
   change: number;
@@ -57,6 +59,7 @@ interface Props {
   onTradeNow: (coin: Coin, price: number, atr: number) => void;
   watchlistSymbols?: Set<string>;
   onToggleWatch?: (coin: Coin) => void;
+  onOneClickTrade?: (card: SignalCard, settings: ScannerExecutionSettings) => void | Promise<void>;
 }
 
 const ALL_KNOWN_COINS = [...COINS, ...PRO_COINS];
@@ -192,7 +195,7 @@ function Sparkline({ values }: { values: number[] }) {
   );
 }
 
-export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectCoin, onTradeNow, watchlistSymbols, onToggleWatch }: Props) {
+export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectCoin, onTradeNow, watchlistSymbols, onToggleWatch, onOneClickTrade }: Props) {
   const [selectedTimeframe, setSelectedTimeframe] = useState<Timeframe>(() => {
     const stored = localStorage.getItem("scanner_timeframe");
     return stored && TIMEFRAMES.includes(stored as Timeframe) ? (stored as Timeframe) : initialTimeframe;
@@ -217,6 +220,8 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
   const [visibleCount, setVisibleCount] = useState(20);
   const [toast, setToast] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [tradeSettingsOpen, setTradeSettingsOpen] = useState(false);
+  const [pendingTrade, setPendingTrade] = useState<{ card: SignalCard; settings: ScannerExecutionSettings } | null>(null);
   const [thresholds, setThresholds] = useState<Thresholds>(() => {
     const squeezeWidth = Number(localStorage.getItem("scanner_squeeze_width"));
     const volumeSpikeMultiplier = Number(localStorage.getItem("scanner_volume_spike_multiplier"));
@@ -508,6 +513,24 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
     setVisibleCount(20);
   }, [filter, sort, selectedTimeframe, coins]);
 
+  const executeOneClick = async (card: SignalCard, settings: ScannerExecutionSettings) => {
+    try {
+      await onOneClickTrade?.(card, settings);
+    } catch (error) {
+      console.error("[Scanner] 1-click trade failed:", error);
+    }
+    if (settings.soundOnExecution) playBeep();
+  };
+
+  const handleOneClickTrade = (card: SignalCard) => {
+    const settings = loadScannerExecutionSettings();
+    if (settings.confirmBeforeTrade) {
+      setPendingTrade({ card, settings });
+    } else {
+      void executeOneClick(card, settings);
+    }
+  };
+
   const handleToggleWatch = useCallback((coin: Coin) => {
     setWatchedSymbols((previous) => {
       const next = new Set(previous);
@@ -673,15 +696,27 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
               {Math.abs(card.change).toFixed(2)}%
             </span>
           </div>
-          <button
-            onClick={(event) => {
-              event.stopPropagation();
-              onTradeNow(card.coin, card.entryPrice, card.atr);
-            }}
-            className="px-3 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-[11px] font-black transition"
-          >
-            Trade Now
-          </button>
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={(event) => {
+                event.stopPropagation();
+                handleOneClickTrade(card);
+              }}
+              className="px-2.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-[11px] font-black transition"
+              title="1-Click Trade"
+            >
+              ⚡
+            </button>
+            <button
+              onClick={(event) => {
+                event.stopPropagation();
+                onTradeNow(card.coin, card.entryPrice, card.atr);
+              }}
+              className="px-3 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-[11px] font-black transition"
+            >
+              Trade Now
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -721,6 +756,13 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
               </option>
             ))}
           </select>
+          <button
+            onClick={() => setTradeSettingsOpen(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-slate-300 transition"
+            title="Trade Execution Settings"
+          >
+            <Zap className="w-3.5 h-3.5 text-cyan-400" />
+          </button>
           <div className="relative" ref={settingsRef}>
             <button
               onClick={() => setSettingsOpen((value) => !value)}
@@ -924,6 +966,44 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
           </>
         )}
       </section>
+
+      <ScannerTradeSettings open={tradeSettingsOpen} onClose={() => setTradeSettingsOpen(false)} />
+
+      {pendingTrade && (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-2xl bg-slate-900 border border-slate-800 shadow-2xl p-5 space-y-3">
+            <h3 className="text-sm font-bold text-white">Confirm 1-Click Trade</h3>
+            <p className="text-xs text-slate-300">
+              Execute {pendingTrade.card.direction} {pendingTrade.card.coin.symbol}/USDT?
+            </p>
+            <div className="text-xs text-slate-400 space-y-1">
+              <div>Entry: {formatPrice(pendingTrade.card.entryPrice)}</div>
+              <div>SL: {formatPrice(pendingTrade.card.stopLoss)}</div>
+              <div>TP: {formatPrice(pendingTrade.card.takeProfit)}</div>
+              <div>Leverage: {pendingTrade.settings.leverage}x</div>
+              <div>Risk: {pendingTrade.settings.riskPercent}%</div>
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                onClick={() => setPendingTrade(null)}
+                className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-300"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  const trade = pendingTrade;
+                  setPendingTrade(null);
+                  void executeOneClick(trade.card, trade.settings);
+                }}
+                className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-xs font-bold text-slate-950"
+              >
+                Confirm
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {toast && (
         <div className="fixed bottom-4 left-1/2 z-50 -translate-x-1/2 rounded-lg bg-slate-800 border border-slate-700 px-4 py-2 text-xs text-slate-200 shadow-xl">

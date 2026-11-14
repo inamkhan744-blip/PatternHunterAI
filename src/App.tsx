@@ -105,8 +105,8 @@ import {
 } from "./lib/useTradingViewSignals";
 import { isLiveTradingConfigured, refreshCredentialStatus } from "./lib/CredentialVault";
 import { autoTradeEngine, MAX_SLIPPAGE_PCT } from "./lib/BinanceAutoTrade";
+import { getActiveExchange, getExchangeCredentials, setActiveExchange, SUPPORTED_EXCHANGES, type ExchangeId } from "./lib/MultiExchange";
 import { liveWorkerLogStore } from "./lib/LiveWorkerLogStore";
-import { getActiveExchange, setActiveExchange, SUPPORTED_EXCHANGES, type ExchangeId } from "./lib/MultiExchange";
 import { paperTradingEngine } from "./lib/PaperTrading";
 import { tradeManager } from "./lib/TradeManager";
 import { pushNotificationService } from "./lib/PushNotification";
@@ -114,6 +114,8 @@ import { evaluateConfluence } from "./lib/ConfluenceEngine";
 import { scanSMC, calculateHTFTrend, type HTFTrendResult } from "./lib/SMCScanner";
 import { subscribeTicker } from "./lib/websocket";
 import type { Candle, Coin, DetectedPattern, ScanResult, Timeframe, WatchlistItem, AppTab, MarketStats, PatternWithConfidence } from "./types";
+import type { ScannerExecutionSettings } from "./components/ScannerTradeSettings";
+import type { SignalCard } from "./components/SignalCardsGrid";
 
 const TIMEFRAMES: { value: Timeframe; label: string }[] = [
   { value: "5m", label: "5m" },
@@ -1885,6 +1887,49 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
     );
   }
 
+  const handleOneClickTrade = async (card: SignalCard, settings: ScannerExecutionSettings) => {
+      const exchange = getActiveExchange();
+      const creds = await getExchangeCredentials(exchange);
+      const isLive = Boolean(creds.apiKey?.trim() && creds.apiSecret?.trim());
+      const mode: "REAL" | "PAPER" = isLive ? "REAL" : "PAPER";
+      try {
+        const result = await autoTradeEngine.executeTrade({
+          symbol: card.coin.binanceSymbol,
+          entryPrice: card.entryPrice,
+          atrValue: card.atr && card.atr > 0 ? card.atr : card.entryPrice * 0.02,
+          direction: card.direction,
+          marketType: "Futures",
+          mode,
+          orderType: "MARKET",
+          signalPrice: card.entryPrice,
+          stopLossPrice: card.stopLoss,
+          takeProfitPrice: card.takeProfit,
+          leverageOverride: settings.leverage,
+          riskPercentOverride: settings.riskPercent,
+        });
+        if (result.success && result.trade) {
+          tradeManager.addTrade({
+            symbol: result.trade.symbol,
+            entryPrice: result.trade.entryPrice,
+            currentPrice: card.price,
+            quantity: result.trade.quantity,
+            stopLossPrice: result.trade.stopLossPrice,
+            takeProfitPrice: result.trade.takeProfitPrice,
+            direction: result.trade.direction,
+            marketType: result.trade.marketType,
+            leverage: result.trade.leverage,
+            source: "MANUAL",
+            mode: result.trade.executionMode === "REAL" ? "REAL" : "PAPER",
+            customId: result.trade.id,
+          });
+        } else {
+          console.error("[Scanner 1-click] trade failed:", result.error);
+        }
+      } catch (err) {
+        console.error("[Scanner 1-click] trade failed:", err);
+      }
+    };
+
   return (
     <div className="min-h-screen bg-slate-950 text-white flex flex-col lg:flex-row pb-16 lg:pb-0">
       {/* Auto-Pilot save failure toast (the toggle has already been reverted) */}
@@ -2764,6 +2809,7 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
                 setAutoTradeCoin({ symbol: coin.binanceSymbol, price, atr });
                 setAutoTradeOpen(true);
               }}
+              onOneClickTrade={handleOneClickTrade}
               watchlistSymbols={watchSymbols}
               onToggleWatch={toggleWatch}
             />

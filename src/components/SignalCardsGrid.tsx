@@ -317,12 +317,16 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
     return (
       <div
         key={`${card.news ? "news" : "squeeze"}-${card.coin.binanceSymbol}`}
-        className="rounded-2xl border border-slate-800 bg-slate-900/80 p-3 shadow-lg"
+        onClick={() => onSelectCoin(card.coin)}
+        className="rounded-2xl border border-slate-800 bg-slate-900/80 p-3 shadow-lg cursor-pointer transition hover:border-cyan-500/60 hover:scale-[1.01]"
       >
         <div className="flex items-start justify-between gap-2">
           <div>
             <button
-              onClick={() => onSelectCoin(card.coin)}
+              onClick={(event) => {
+                event.stopPropagation();
+                onSelectCoin(card.coin);
+              }}
               className="text-sm font-bold text-white hover:text-cyan-300 transition"
             >
               {card.coin.symbol}/USDT
@@ -398,7 +402,10 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
             </span>
           </div>
           <button
-            onClick={() => onTradeNow(card.coin, card.entryPrice, card.atr)}
+            onClick={(event) => {
+              event.stopPropagation();
+              onTradeNow(card.coin, card.entryPrice, card.atr);
+            }}
             className="px-3 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-[11px] font-black transition"
           >
             Trade Now

@@ -1722,6 +1722,19 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
     setActiveTab("chart");
   }, []);
 
+  const handleCoinSelectFromScanner = useCallback((symbol: string) => {
+    const coin =
+      [...COINS, ...PRO_COINS].find(
+        (item) => item.symbol === symbol || item.binanceSymbol === symbol
+      ) || {
+        symbol: symbol.replace(/USDT$/i, ""),
+        label: symbol.replace(/USDT$/i, ""),
+        binanceSymbol: /USDT$/i.test(symbol) ? symbol : `${symbol}USDT`,
+      };
+    setSelectedCoin(coin);
+    setActiveTab("chart");
+  }, []);
+
   const showCoinBySymbol = useCallback((symbol: string) => {
     const coin = ALL_COINS.find((c) => c.symbol === symbol.toUpperCase());
     if (coin) {
@@ -2746,7 +2759,7 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
           {activeTab === "scanner" && (
             <SignalCardsGrid
               timeframe={timeframe}
-              onSelectCoin={selectCoinFromTab}
+              onSelectCoin={(coin) => handleCoinSelectFromScanner(coin.binanceSymbol)}
               onTradeNow={(coin, price, atr) => {
                 setAutoTradeCoin({ symbol: coin.binanceSymbol, price, atr });
                 setAutoTradeOpen(true);

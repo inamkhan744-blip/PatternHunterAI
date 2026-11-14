@@ -402,6 +402,13 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
         const data = await fetchCandles(coin.binanceSymbol, 100, selectedTimeframe);
         if (!isMountedRef.current || data.length < 50) return null;
 
+        const latestPrice = data[data.length - 1].close;
+        const recentCloses = data.slice(-20).map((candle) => candle.close);
+        const recentRange = Math.max(...recentCloses) - Math.min(...recentCloses);
+        const recentAverage = recentCloses.reduce((sum, value) => sum + value, 0) / Math.max(1, recentCloses.length);
+        const recentVolatility = recentAverage > 0 ? recentRange / recentAverage : 0;
+        if (latestPrice >= 0.98 && latestPrice <= 1.02 && recentVolatility < 0.005) return null;
+
         const squeeze = detectSqueeze(data, thresholds);
         if (!squeeze.blastReady) return null;
 

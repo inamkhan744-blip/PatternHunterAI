@@ -1893,48 +1893,56 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
     );
   }
 
-  const handleOneClickTrade = async (card: SignalCard, settings: ScannerExecutionSettings) => {
-      const exchange = getActiveExchange();
-      const creds = await getExchangeCredentials(exchange);
-      const isLive = Boolean(creds.apiKey?.trim() && creds.apiSecret?.trim());
-      const mode: "REAL" | "PAPER" = isLive ? "REAL" : "PAPER";
-      try {
-        const result = await autoTradeEngine.executeTrade({
-          symbol: card.coin.binanceSymbol,
-          entryPrice: card.entryPrice,
-          atrValue: card.atr && card.atr > 0 ? card.atr : card.entryPrice * 0.02,
-          direction: card.direction,
-          marketType: "Futures",
-          mode,
-          orderType: "MARKET",
-          signalPrice: card.entryPrice,
-          stopLossPrice: card.stopLoss,
-          takeProfitPrice: card.takeProfit,
-          leverageOverride: settings.leverage,
-          riskPercentOverride: settings.riskPercent,
+  const handleOneClickTrade = async (
+    card: SignalCard,
+    settings: ScannerExecutionSettings
+  ): Promise<{ success: boolean; error?: string }> => {
+    const exchange = getActiveExchange();
+    const creds = await getExchangeCredentials(exchange);
+    const isLive = Boolean(creds.apiKey?.trim() && creds.apiSecret?.trim());
+    const mode: "REAL" | "PAPER" = isLive ? "REAL" : "PAPER";
+    const cfg = autoTradeEngine.getConfig();
+    try {
+      const result = await autoTradeEngine.executeTrade({
+        symbol: card.coin.binanceSymbol,
+        entryPrice: card.entryPrice,
+        atrValue: card.atr && card.atr > 0 ? card.atr : card.entryPrice * 0.02,
+        direction: card.direction,
+        marketType: cfg.marketType,
+        mode,
+        orderType: "MARKET",
+        signalPrice: card.entryPrice,
+        stopLossPrice: card.stopLoss,
+        takeProfitPrice: card.takeProfit,
+        leverageOverride: settings.leverage,
+        riskPercentOverride: settings.riskPercent,
+        maxSlippagePct: 1.0,
+      });
+      if (result.success && result.trade) {
+        tradeManager.addTrade({
+          symbol: result.trade.symbol,
+          entryPrice: result.trade.entryPrice,
+          currentPrice: card.price,
+          quantity: result.trade.quantity,
+          stopLossPrice: result.trade.stopLossPrice,
+          takeProfitPrice: result.trade.takeProfitPrice,
+          direction: result.trade.direction,
+          marketType: result.trade.marketType,
+          leverage: result.trade.leverage,
+          source: "MANUAL",
+          mode: result.trade.executionMode === "REAL" ? "REAL" : "PAPER",
+          customId: result.trade.id,
         });
-        if (result.success && result.trade) {
-          tradeManager.addTrade({
-            symbol: result.trade.symbol,
-            entryPrice: result.trade.entryPrice,
-            currentPrice: card.price,
-            quantity: result.trade.quantity,
-            stopLossPrice: result.trade.stopLossPrice,
-            takeProfitPrice: result.trade.takeProfitPrice,
-            direction: result.trade.direction,
-            marketType: result.trade.marketType,
-            leverage: result.trade.leverage,
-            source: "MANUAL",
-            mode: result.trade.executionMode === "REAL" ? "REAL" : "PAPER",
-            customId: result.trade.id,
-          });
-        } else {
-          console.error("[Scanner 1-click] trade failed:", result.error);
-        }
-      } catch (err) {
-        console.error("[Scanner 1-click] trade failed:", err);
+        return { success: true };
       }
-    };
+      console.error("[Scanner 1-click] trade failed:", result.error);
+      return { success: false, error: result.error };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Unknown execution error";
+      console.error("[Scanner 1-click] trade failed:", err);
+      return { success: false, error: msg };
+    }
+  };
 
   const handleKillSwitch = async () => {
     const stopResult = await autoTradeEngine.emergencyStop();

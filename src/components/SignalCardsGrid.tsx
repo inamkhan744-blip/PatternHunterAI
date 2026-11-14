@@ -63,7 +63,7 @@ interface Props {
   onTradeNow: (coin: Coin, price: number, atr: number) => void;
   watchlistSymbols?: Set<string>;
   onToggleWatch?: (coin: Coin) => void;
-  onOneClickTrade?: (card: SignalCard, settings: ScannerExecutionSettings) => void | Promise<void>;
+  onOneClickTrade?: (card: SignalCard, settings: ScannerExecutionSettings) => Promise<{ success: boolean; error?: string }> | void;
   activeTrades?: Array<{ symbol: string; direction?: string; entryPrice?: number; quantity?: number }>;
   onManagePosition?: (symbol: string) => void;
 }
@@ -613,11 +613,16 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
     if (!confirmCard) return;
     const settings = loadScannerExecutionSettings();
     try {
-      await onOneClickTrade?.(confirmCard, settings);
-      setToast(`Trade executed: ${confirmCard.coin.symbol}`);
+      const result = await onOneClickTrade?.(confirmCard, settings);
+      if (result && typeof result === "object" && "success" in result && !result.success) {
+        setToast(`Trade failed: ${result.error || confirmCard.coin.symbol}`);
+      } else {
+        setToast(`Trade executed: ${confirmCard.coin.symbol}`);
+      }
     } catch (error) {
+      const msg = error instanceof Error ? error.message : "Unknown execution error";
       console.error("[Scanner] direct trade failed:", error);
-      setToast(`Trade failed: ${confirmCard.coin.symbol}`);
+      setToast(`Trade failed: ${msg}`);
     }
     if (settings.soundOnExecution) playBeep();
     setConfirmCard(null);

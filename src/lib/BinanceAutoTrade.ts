@@ -1391,6 +1391,7 @@ export class BinanceAutoTradeEngine {
     takeProfitPrice?: number;
     leverageOverride?: number;
     riskPercentOverride?: number;
+    maxSlippagePct?: number;
     marketType?: MarketType;
     accountBalance?: number;
     /** "PAPER" forces a pure local simulation. Defaults to REAL only when the
@@ -1666,7 +1667,15 @@ export class BinanceAutoTradeEngine {
       }
     }
 
+    // Spot cannot short.
+    if (marketType === "Spot" && direction === "SHORT") {
+      const msg = "You cannot SHORT on Spot. Please switch to Futures API.";
+      liveWorkerLogStore.addLog(msg, "error", { symbol: params.symbol });
+      return { success: false, error: msg };
+    }
+
     // --- Slippage guard: refuse to chase a price that moved after the signal ---
+    const slippageLimit = params.maxSlippagePct ?? MAX_SLIPPAGE_PCT;
     if (params.signalPrice !== undefined) {
       if (!Number.isFinite(params.signalPrice) || params.signalPrice <= 0) {
         const msg = "Trade cancelled due to invalid signal price.";
@@ -1674,8 +1683,8 @@ export class BinanceAutoTradeEngine {
         return { success: false, error: msg };
       }
       const slippagePct = (Math.abs(params.entryPrice - params.signalPrice) / params.signalPrice) * 100;
-      if (slippagePct > MAX_SLIPPAGE_PCT) {
-        const msg = `Trade cancelled due to high slippage. Price moved ${slippagePct.toFixed(3)}% (limit ${MAX_SLIPPAGE_PCT}%).`;
+      if (slippagePct > slippageLimit) {
+        const msg = `Trade cancelled due to high slippage. Price moved ${slippagePct.toFixed(3)}% (limit ${slippageLimit}%).`;
         liveWorkerLogStore.addLog(msg, "warn", {
           symbol: params.symbol,
           signalPrice: params.signalPrice,

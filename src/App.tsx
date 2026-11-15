@@ -237,6 +237,7 @@ export default function App() {
   const [walletBalance, setWalletBalance] = useState<number>(() =>
     isLiveTradingConfigured() ? 0 : paperTradingEngine.getAccount().balance
   );
+  const [isOffline, setIsOffline] = useState<boolean>(() => (typeof navigator !== "undefined" ? !navigator.onLine : false));
   const prevUserRef = useRef(user);
   useEffect(() => {
     localStorage.setItem("app_active_tab", activeTab);
@@ -264,6 +265,17 @@ export default function App() {
     } else {
       setWalletBalance(paperTradingEngine.getAccount().balance);
     }
+  }, []);
+
+  useEffect(() => {
+    const handleOffline = () => setIsOffline(true);
+    const handleOnline = () => setIsOffline(false);
+    window.addEventListener("offline", handleOffline);
+    window.addEventListener("online", handleOnline);
+    return () => {
+      window.removeEventListener("offline", handleOffline);
+      window.removeEventListener("online", handleOnline);
+    };
   }, []);
 
   const [candles, setCandles] = useState<Candle[]>([]);
@@ -1996,6 +2008,13 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
           mode: result.trade.executionMode === "REAL" ? "REAL" : "PAPER",
           customId: result.trade.id,
         });
+        if (mode === "PAPER") {
+          setWalletBalance(paperTradingEngine.getAccount().balance);
+        } else {
+          void autoTradeEngine.fetchAccountBalance().then((res) => {
+            if (res.ok) setWalletBalance(res.freeBalance || res.usdtBalance);
+          });
+        }
         return { success: true };
       }
       console.error("[Scanner 1-click] trade failed:", result.error);
@@ -2029,6 +2048,11 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
           <div className="lg:hidden w-full bg-slate-900/90 border-b border-slate-700 px-3 py-1 text-[10px] font-mono text-cyan-300">
             {isLiveTradingConfigured() ? "Live" : "Paper"} Bal: ${walletBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
           </div>
+          {isOffline && (
+            <div className="w-full bg-red-600/20 border-b border-red-500/40 px-3 py-1 text-[10px] font-mono text-red-300 text-center">
+              Connection lost. Reconnecting...
+            </div>
+          )}
       {/* Auto-Pilot save failure toast (the toggle has already been reverted) */}
       {autoPilotError && (
         <div

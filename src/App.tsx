@@ -2022,6 +2022,7 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
         direction: card.direction,
         marketType: cfg.marketType,
         mode,
+        accountBalance: mode === "PAPER" ? paperTradingEngine.getAccount().balance : undefined,
         orderType: "MARKET",
         signalPrice: card.entryPrice,
         stopLossPrice: card.stopLoss,

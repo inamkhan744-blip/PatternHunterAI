@@ -309,16 +309,16 @@ export default function ActivePositions({ currentSymbol, currentPrice }: Props) 
 
                 // Pre-compute the risk/reward figures shown in the metrics grid.
                 const isLong = trade.direction === "LONG";
-                const live = trade.currentPrice || trade.entryPrice;
+                const entry = trade.entryPrice;
                 const riskDollars = Math.abs(
                   isLong
-                    ? (live - trade.stopLossPrice) * trade.quantity
-                    : (trade.stopLossPrice - live) * trade.quantity
+                    ? (entry - trade.stopLossPrice) * trade.quantity
+                    : (trade.stopLossPrice - entry) * trade.quantity
                 );
                 const rewardDollars = Math.abs(
                   isLong
-                    ? (trade.takeProfitPrice - live) * trade.quantity
-                    : (live - trade.takeProfitPrice) * trade.quantity
+                    ? (trade.takeProfitPrice - entry) * trade.quantity
+                    : (entry - trade.takeProfitPrice) * trade.quantity
                 );
                 const riskRewardRatio = riskDollars > 0 ? rewardDollars / riskDollars : 0;
                 const marginUsed =
@@ -478,7 +478,7 @@ export default function ActivePositions({ currentSymbol, currentPrice }: Props) 
                         <span className="text-[10px] text-slate-500 block uppercase font-sans">
                           Risk (SL)
                         </span>
-                        <span className="font-bold text-[#ff3344] block">
+                        <span className="font-bold text-slate-300 block">
                           ${riskDollars.toFixed(2)}
                         </span>
                       </div>
@@ -487,7 +487,7 @@ export default function ActivePositions({ currentSymbol, currentPrice }: Props) 
                         <span className="text-[10px] text-slate-500 block uppercase font-sans">
                           Reward (TP)
                         </span>
-                        <span className="font-bold text-[#00ff66] block">
+                        <span className="font-bold text-slate-300 block">
                           ${rewardDollars.toFixed(2)}
                         </span>
                       </div>

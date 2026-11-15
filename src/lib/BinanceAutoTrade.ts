@@ -1736,6 +1736,14 @@ export class BinanceAutoTradeEngine {
       };
     }
 
+    // Insufficient margin guard.
+    if (sizing.marginRequired > balance) {
+      return {
+        success: false,
+        error: `Insufficient Margin. Required: $${sizing.marginRequired.toFixed(2)}, Available: $${balance.toFixed(2)}.`,
+      };
+    }
+
     // Futures Liquidation Price & Proximity Warning
     let liquidationPrice: number | undefined;
     if (marketType === "Futures") {

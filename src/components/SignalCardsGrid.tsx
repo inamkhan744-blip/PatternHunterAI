@@ -397,6 +397,7 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
 
     const newsSymbols = new Set(newsEvents.flatMap((event) => event.symbols));
     const nextNewsCards: SignalCard[] = [];
+    try {
 
     // Higher-timeframe (4H) BTC trend filter: only allow signals aligned with BTC.
     let btcBullish = true;
@@ -591,7 +592,13 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
     setNewsCards(nextNewsCards);
     setSqueezeCards(persistedSqueezeCards);
     setLoading(false);
-  }, [coins, selectedTimeframe, newsEvents, thresholds, volumes24h, marketCaps, playBeep]);
+    } catch (err) {
+      if (isMountedRef.current) {
+        showToast(`Scanner error: ${err instanceof Error ? err.message : "unknown"}`);
+        setLoading(false);
+      }
+    }
+  }, [coins, selectedTimeframe, newsEvents, thresholds, volumes24h, marketCaps, playBeep, showToast]);
 
   useEffect(() => {
     void scan();
@@ -608,22 +615,24 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
   };
 
   const handleConfirmTrade = async () => {
-    if (!confirmCard) return;
+    if (!confirmCard) return { success: false, error: "No card selected" };
     const settings = loadScannerExecutionSettings();
     try {
       const result = await onOneClickTrade?.(confirmCard, settings);
       if (result && typeof result === "object" && "success" in result && !result.success) {
         showToast(`Trade failed: ${result.error || confirmCard.coin.symbol}`);
-      } else {
-        showToast(`Trade executed: ${confirmCard.coin.symbol}`);
+        return { success: false, error: result.error };
       }
+      showToast(`Trade executed: ${confirmCard.coin.symbol}`);
+      if (settings.soundOnExecution) playBeep();
+      setConfirmCard(null);
+      return { success: true };
     } catch (error) {
       const msg = error instanceof Error ? error.message : "Unknown execution error";
       console.error("[Scanner] direct trade failed:", error);
       showToast(`Trade failed: ${msg}`);
+      return { success: false, error: msg };
     }
-    if (settings.soundOnExecution) playBeep();
-    setConfirmCard(null);
   };
 
   const handleToggleWatch = useCallback((coin: Coin) => {

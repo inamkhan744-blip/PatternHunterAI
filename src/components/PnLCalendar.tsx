@@ -128,19 +128,6 @@ export default function PnLCalendar() {
     }
   };
 
-  if (dataSource === "LIVE" && closedTrades.length === 0) {
-    return (
-      <div className="max-w-7xl mx-auto w-full px-4 sm:px-6 py-4 font-mono">
-        <div className="flex flex-col items-center justify-center py-20 text-center space-y-3">
-          <p className="text-slate-400 font-medium">No live trades found.</p>
-          <p className="text-sm text-slate-500 max-w-xs">
-            Connect your exchange API to start live trading.
-          </p>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="max-w-7xl mx-auto w-full px-4 sm:px-6 py-4 font-mono space-y-6">
       {/* Header and Source Toggle */}

@@ -343,7 +343,7 @@ export default function Portfolio() {
             className="flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-sm font-medium transition-colors"
           >
             <Wallet className="w-4 h-4" />
-            <span className="hidden sm:inline">Reset Paper Balance</span>
+            <span className="hidden sm:inline">Reset Virtual Balance to $10,000</span>
           </button>
         </div>
       </div>

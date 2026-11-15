@@ -56,7 +56,7 @@ import NewsSentimentRadar from "./components/NewsSentimentRadar";
 import MacroWidget from "./components/MacroWidget";
 import AntiFOMOModal from "./components/AntiFOMOModal";
 import { COINS, PRO_COINS } from "./constants";
-import { fetchCandles, fetchMarketStats } from "./lib/binance";
+import { fetchCandles, fetchMarketStats, fetchTickerPrice } from "./lib/binance";
 import { detectPattern, detectAllPatterns, formatPrice } from "./lib/patterns";
 import { rsi, sma, atr, bollingerBands } from "./lib/indicators";
 import AutoTradeModal from "./components/AutoTradeModal";
@@ -1979,6 +1979,25 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
     const mode: "REAL" | "PAPER" = isLive ? "REAL" : "PAPER";
     const cfg = autoTradeEngine.getConfig();
     try {
+      // Pre-trade price validation: fetch live price and ensure it hasn't
+      // already crossed TP/SL.
+      const liveQuote = await fetchTickerPrice(card.coin.binanceSymbol);
+      const livePrice = liveQuote?.price ?? card.price;
+      if (card.direction === "LONG") {
+        if (livePrice >= card.takeProfit) {
+          return { success: false, error: "Price has already hit Take Profit. Trade cancelled." };
+        }
+        if (livePrice <= card.stopLoss) {
+          return { success: false, error: "Price has already hit Stop Loss. Trade cancelled." };
+        }
+      } else {
+        if (livePrice <= card.takeProfit) {
+          return { success: false, error: "Price has already hit Take Profit. Trade cancelled." };
+        }
+        if (livePrice >= card.stopLoss) {
+          return { success: false, error: "Price has already hit Stop Loss. Trade cancelled." };
+        }
+      }
       const result = await autoTradeEngine.executeTrade({
         symbol: card.coin.binanceSymbol,
         entryPrice: card.entryPrice,

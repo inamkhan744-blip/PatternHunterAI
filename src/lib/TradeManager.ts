@@ -645,6 +645,15 @@ export class TradeManager {
           ? params.entryPrice * 1.06
           : params.entryPrice * 0.94;
 
+    // Pre-trade validation: reject if price already crossed TP/SL.
+    if (direction === "LONG") {
+      if (currentPrice >= tp) return null;
+      if (currentPrice <= sl) return null;
+    } else {
+      if (currentPrice <= tp) return null;
+      if (currentPrice >= sl) return null;
+    }
+
     const pnl = this.calculatePnl(params.entryPrice, currentPrice, params.quantity, direction, leverage, marketType);
     const id = params.customId || `TRD-${Date.now()}-${Math.floor(Math.random() * 100_000)}`;
 

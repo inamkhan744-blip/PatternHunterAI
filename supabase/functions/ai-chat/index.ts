@@ -17,6 +17,7 @@
 import {
   adminClient,
   clampString,
+  corsHeaders,
   enforceRateLimit,
   json,
   preflight,
@@ -191,6 +192,8 @@ async function callOpenAICompatible(
 }
 
 Deno.serve(async (req: Request) => {
+  console.log("Incoming request:", req.method, req.url);
+
   const pre = preflight(req);
   if (pre) return pre;
   if (req.method !== "POST") return json({ ok: false, error: "Method not allowed" }, 405);
@@ -200,12 +203,24 @@ Deno.serve(async (req: Request) => {
   let payload: Record<string, unknown> = {};
   try {
     const parsed = await req.json();
-    payload =
-      parsed && typeof parsed === "object" && !Array.isArray(parsed)
-        ? (parsed as Record<string, unknown>)
-        : {};
-  } catch {
-    payload = {};
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      payload = parsed as Record<string, unknown>;
+    } else {
+      console.error("[ai-chat] Invalid JSON payload type:", typeof parsed, Array.isArray(parsed));
+      return new Response(JSON.stringify({ error: "Invalid JSON body" }), {
+        status: 400,
+        headers: { ...corsHeaders(req), "Content-Type": "application/json" },
+      });
+    }
+  } catch (err) {
+    console.error(
+      "[ai-chat] Invalid JSON body:",
+      err instanceof Error ? err.message : String(err)
+    );
+    return new Response(JSON.stringify({ error: "Invalid JSON body" }), {
+      status: 400,
+      headers: { ...corsHeaders(req), "Content-Type": "application/json" },
+    });
   }
   console.log("Incoming payload:", payload);
 
@@ -232,7 +247,9 @@ Deno.serve(async (req: Request) => {
             .find((entry) => entry?.role === "user")?.content
         : undefined);
     const prompt = clampString(promptCandidate, MAX_PROMPT_CHARS);
-    if (!prompt) return json({ ok: false, error: "AI prompt is empty." }, 400);
+    if (!prompt) {
+      return json({ ok: false, error: "Missing required field: prompt" }, 400);
+    }
     const systemPrompt = clampString(
       body.systemPrompt ?? body.system ?? body.system_prompt,
       MAX_PROMPT_CHARS
@@ -247,8 +264,7 @@ Deno.serve(async (req: Request) => {
       return json({ ok: false, error: "Image data is not valid base64." }, 400);
     }
 
-    const mimeCandidate =
-      body.imageMimeType ?? body.imageMimeType ?? body.mimeType ?? body.mime_type;
+    const mimeCandidate = body.imageMimeType ?? body.mimeType ?? body.mime_type;
     const rawMime = clampString(mimeCandidate, 64).toLowerCase();
     const imageMimeType = rawMime === "image/jpg" ? "image/jpeg" : rawMime || "image/png";
     if (image && !/^image\/(png|jpeg|webp)$/.test(imageMimeType)) {

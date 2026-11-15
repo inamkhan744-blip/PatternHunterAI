@@ -173,11 +173,12 @@ export class TradeManager {
         const parsed = JSON.parse(activeRaw) as ActiveTrade[];
         if (Array.isArray(parsed)) {
           this.activeTrades = parsed
-            .filter((t) => t && typeof t.id === "string" && Number(t.entryPrice) > 0 && t.mode !== "REAL")
+            .filter((t) => t && typeof t.id === "string" && Number(t.entryPrice) > 0)
             .map((t) => ({
               ...t,
-              // No real Binance keys have ever been connected: force all trades to PAPER.
-              mode: "PAPER",
+              // Trust the persisted mode; rows created before the mode flag existed
+              // are legacy paper trades.
+              mode: t.mode === "REAL" ? "REAL" : "PAPER",
               currentPrice: Number(t.currentPrice) > 0 ? t.currentPrice : t.entryPrice,
             }));
         }
@@ -193,7 +194,7 @@ export class TradeManager {
         if (Array.isArray(parsed)) {
           this.tradeHistory = parsed
             .filter((t) => t && typeof t.id === "string")
-            .map((t) => ({ ...t, mode: "PAPER" }));
+            .map((t) => ({ ...t, mode: t.mode === "REAL" ? "REAL" : "PAPER" }));
         }
       }
     } catch {
@@ -201,19 +202,41 @@ export class TradeManager {
     }
   }
 
-  /** Flushes any queued writes immediately (e.g. after regaining connectivity). */
-  public resetAll(): void {
+  /**
+   * Full virtual-account reset: deletes the user's durable trade rows first, then
+   * clears every local cache/queue and the mirrored auto-trade ledger.
+   */
+  public async resetAll(): Promise<void> {
+    if (this.currentUserId) {
+      const { error } = await supabase
+        .from("trades")
+        .delete()
+        .eq("user_id", this.currentUserId);
+      if (error) {
+        throw new Error(`Failed to clear Supabase trades: ${error.message}`);
+      }
+    }
+
     this.activeTrades = [];
     this.tradeHistory = [];
+    this.syncQueue = [];
+    this.lastOpenTradeSyncAt = 0;
+    this.slSyncInFlight.clear();
+
     if (typeof localStorage !== "undefined") {
       try {
         localStorage.removeItem(STORAGE_KEY_ACTIVE_TRADES);
         localStorage.removeItem(STORAGE_KEY_TRADE_HISTORY);
+        localStorage.removeItem(STORAGE_KEY_SYNC_QUEUE);
+        localStorage.removeItem("fortress_trades");
+        localStorage.removeItem("fortress_binance_managed_trades");
       } catch {
         // ignore
       }
     }
-    this.saveState();
+
+    autoTradeEngine.resetAllTrades();
+    this.notify();
   }
 
   public async requestSyncNow(): Promise<void> {
@@ -347,20 +370,9 @@ export class TradeManager {
       }
       if (!data) return;
 
-      // One-time cleanup: no real Binance keys have ever been connected, so force
-      // any live (is_paper = false/null) rows to paper in Supabase.
-      try {
-        await supabase
-          .from("trades")
-          .update({ is_paper: true })
-          .eq("user_id", this.currentUserId)
-          .or("is_paper.is.null,is_paper.eq.false");
-      } catch {
-        // best-effort cleanup
-      }
-
-      const paperRows = (data as SupabaseTradeRow[]).map((row) => ({ ...row, is_paper: true }));
-      this.mergeRemoteTrades(paperRows);
+      // Trust the durable is_paper flag. Forcing it to true here would relabel
+      // genuine live positions as paper on every sync.
+      this.mergeRemoteTrades(data as SupabaseTradeRow[]);
     } catch (err) {
       console.warn("[TradeManager] Unexpected error syncing with Supabase:", err);
     } finally {
@@ -689,6 +701,33 @@ export class TradeManager {
     // Idempotency: the same exchange order must never create two positions.
     if (this.activeTrades.some((t) => t.id === id)) {
       return this.activeTrades.find((t) => t.id === id) ?? null;
+    }
+
+    // Reserve the exact collateral in the single paper ledger. Auto-Pilot may
+    // already have created the mirrored paper trade, so the ledger id doubles as
+    // the idempotency key.
+    if (mode === "PAPER" && !paperTradingEngine.getTradeById(id)) {
+      const reserve = paperTradingEngine.executeOrder({
+        symbol: params.symbol,
+        entryPrice: params.entryPrice,
+        atrValue:
+          params.atrAtEntry && params.atrAtEntry > 0
+            ? params.atrAtEntry
+            : Math.abs(params.entryPrice - sl) || params.entryPrice * 0.015,
+        direction,
+        marketType,
+        leverage,
+        currentPrice,
+        customId: id,
+        quantity: params.quantity,
+        stopLossPrice: sl,
+        takeProfitPrice: tp,
+        skipSymbolLock: true,
+      });
+      if (!reserve.success) {
+        console.warn(`[TradeManager] Paper margin reservation failed for ${params.symbol}: ${reserve.error}`);
+        return null;
+      }
     }
 
     const newTrade: ActiveTrade = {

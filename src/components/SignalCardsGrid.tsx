@@ -65,7 +65,11 @@ interface Props {
   onTradeNow: (coin: Coin, price: number, atr: number) => void;
   watchlistSymbols?: Set<string>;
   onToggleWatch?: (coin: Coin) => void;
-  onOneClickTrade?: (card: SignalCard, settings: ScannerExecutionSettings) => Promise<{ success: boolean; error?: string }> | void;
+  onOneClickTrade?: (
+    card: SignalCard,
+    settings: ScannerExecutionSettings,
+    orderType?: "MARKET" | "LIMIT" | "STOP_MARKET"
+  ) => Promise<{ success: boolean; error?: string }> | void;
   activeTrades?: Array<{ symbol: string; direction?: string; entryPrice?: number; quantity?: number }>;
   onManagePosition?: (symbol: string) => void;
 }
@@ -662,11 +666,11 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
     setConfirmCard(card);
   };
 
-  const handleConfirmTrade = async () => {
+  const handleConfirmTrade = async (orderType: "MARKET" | "LIMIT" | "STOP_MARKET") => {
     if (!confirmCard) return { success: false, error: "No card selected" };
     const settings = loadScannerExecutionSettings();
     try {
-      const result = await onOneClickTrade?.(confirmCard, settings);
+      const result = await onOneClickTrade?.(confirmCard, settings, orderType);
       if (result && typeof result === "object" && "success" in result && !result.success) {
         showToast(`Trade failed: ${result.error || confirmCard.coin.symbol}`);
         return { success: false, error: result.error };

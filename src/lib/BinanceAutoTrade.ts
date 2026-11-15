@@ -83,7 +83,9 @@ export interface ManagedTrade {
   orderId?: string;
   slOrderId?: string;
   tpOrderId?: string;
-  orderType: "LIMIT" | "MARKET";
+  orderType: "LIMIT" | "MARKET" | "STOP_MARKET";
+  /** Round-trip taker fees charged by the unified P/L model. */
+  fees?: number;
   isStuck?: boolean;
   exitReason?: "TP" | "SL" | "MANUAL";
   closedAt?: number;
@@ -109,6 +111,14 @@ export interface LiquidationInfo {
   distancePercent: number;
   isWarning: boolean;
   warningMessage?: string;
+}
+
+export const TAKER_FEE_RATE = 0.0004;
+
+/** Round-trip taker fee used by every paper/live P/L path. */
+export function calculateTradingFees(entryPrice: number, exitPrice: number, quantity: number): number {
+  const notional = Math.max(0, entryPrice * quantity) + Math.max(0, exitPrice * quantity);
+  return Number((notional * TAKER_FEE_RATE).toFixed(2));
 }
 
 const STORAGE_KEY_CONFIG = "fortress_binance_autotrade_config";
@@ -618,6 +628,37 @@ export class BinanceAutoTradeEngine {
     localStorage.setItem(STORAGE_KEY_TRADES, JSON.stringify(this.trades));
   }
 
+  /**
+   * Clears the engine's local ledger and risk counters. Used by the "Reset Virtual
+   * Balance" flow so a fresh account cannot inherit stale simulated positions.
+   */
+  public resetAllTrades(): void {
+    this.trades = [];
+    this.dailyStats = {
+      date: this.todayKey(),
+      startingBalance: 0,
+      realizedPnlToday: 0,
+      tradesOpened: 0,
+    };
+    this.circuitBreaker = { consecutiveLosses: 0, isTripped: false };
+    this.profitVaultTotal = 0;
+    this.postLossCooldownUntil = 0;
+    this.autoPilotCooldownUntil = 0;
+
+    if (typeof localStorage !== "undefined") {
+      try {
+        localStorage.removeItem(STORAGE_KEY_TRADES);
+        localStorage.removeItem(STORAGE_KEY_DAILY_STATS);
+        localStorage.removeItem(STORAGE_KEY_CIRCUIT);
+        localStorage.removeItem(STORAGE_KEY_VAULT);
+        localStorage.removeItem(STORAGE_KEY_POST_LOSS_COOLDOWN);
+        localStorage.removeItem(STORAGE_KEY_AUTOPILOT_COOLDOWN);
+      } catch {
+        // ignore
+      }
+    }
+  }
+
   private computeAdx(
     candles: { high: number; low: number; close: number }[],
     period: number = 14
@@ -1095,7 +1136,9 @@ export class BinanceAutoTradeEngine {
     trade.closePrice = exitPrice;
     trade.closedAt = Date.now();
     trade.exitReason = exitReason;
-    trade.realizedPnl = Number((priceDiff * trade.quantity).toFixed(2));
+    const fees = calculateTradingFees(trade.entryPrice, exitPrice, trade.quantity);
+    trade.fees = fees;
+    trade.realizedPnl = Number((priceDiff * trade.quantity - fees).toFixed(2));
 
     this.startAutoPilotCooldown(AUTOPILOT_COOLDOWN_SECONDS);
     this.recordRealizedPnl(trade.realizedPnl);
@@ -1447,12 +1490,14 @@ export class BinanceAutoTradeEngine {
     manual?: boolean;
     /** Price the signal was generated at, used for the slippage guard. */
     signalPrice?: number;
+    /** Live price used for the pre-trade TP/SL crossing guard. */
+    currentPrice?: number;
     /** Optional ADX value for edge-filter enforcement. */
     adx?: number | null;
-    /** Auto-Pilot uses MARKET for immediate fills; manual entries stay LIMIT. */
-    orderType?: "LIMIT" | "MARKET";
+    /** Auto-Pilot uses MARKET for immediate fills; manual entries can choose LIMIT/STOP. */
+    orderType?: "LIMIT" | "MARKET" | "STOP_MARKET";
   }): Promise<{ success: boolean; trade?: ManagedTrade; error?: string }> {
-    const orderType: "LIMIT" | "MARKET" = params.orderType ?? "LIMIT";
+    const orderType: "LIMIT" | "MARKET" | "STOP_MARKET" = params.orderType ?? "LIMIT";
     const marketType = params.marketType ?? this.config.marketType;
     const direction = params.direction ?? (marketType === "Spot" ? "LONG" : this.config.direction);
 
@@ -1605,6 +1650,42 @@ export class BinanceAutoTradeEngine {
       };
     }
 
+    // Reject an impossible bracket before consuming the user's daily allowance.
+    const preLevels = calculateAtrStopLoss(
+      params.entryPrice,
+      params.atrValue,
+      direction,
+      this.config.atrMultiplier
+    );
+    const preSl =
+      typeof params.stopLossPrice === "number" && params.stopLossPrice > 0
+        ? params.stopLossPrice
+        : preLevels.stopLossPrice;
+    const preTp =
+      typeof params.takeProfitPrice === "number" && params.takeProfitPrice > 0
+        ? params.takeProfitPrice
+        : preLevels.takeProfitPrice;
+    const preGuard =
+      typeof params.currentPrice === "number" && params.currentPrice > 0
+        ? params.currentPrice
+        : params.entryPrice;
+    const bracketValid =
+      direction === "LONG"
+        ? preTp > params.entryPrice && preSl < params.entryPrice
+        : preTp < params.entryPrice && preSl > params.entryPrice;
+    const priceCrossed =
+      direction === "LONG"
+        ? preGuard >= preTp || preGuard <= preSl
+        : preGuard <= preTp || preGuard >= preSl;
+    if (!bracketValid || priceCrossed) {
+      return {
+        success: false,
+        error: !bracketValid
+          ? "Invalid stop-loss/take-profit bracket. Trade cancelled."
+          : "Current price has already crossed the Take Profit or Stop Loss. Trade cancelled.",
+      };
+    }
+
     // Subscription & Daily Limits Check (server-authoritative; consumes one unit)
     const allowance = await checkTradeExecutionAllowance({ consume: true });
     if (!allowance.allowed) {
@@ -1700,6 +1781,35 @@ export class BinanceAutoTradeEngine {
       typeof params.takeProfitPrice === "number" && params.takeProfitPrice > 0
         ? params.takeProfitPrice
         : computedLevels.takeProfitPrice;
+
+    // Hard bracket validation lives here, at the single execution choke point, so
+    // no external caller can bypass it. Also reject entries where price has already
+    // crossed a bracket level.
+    const guardPrice =
+      typeof params.currentPrice === "number" && params.currentPrice > 0
+        ? params.currentPrice
+        : params.entryPrice;
+    if (direction === "LONG") {
+      if (!(takeProfitPrice > params.entryPrice) || !(stopLossPrice < params.entryPrice)) {
+        return { success: false, error: "Invalid stop-loss/take-profit bracket. Trade cancelled." };
+      }
+      if (guardPrice >= takeProfitPrice) {
+        return { success: false, error: "Current price has already passed the Take Profit. Trade cancelled." };
+      }
+      if (guardPrice <= stopLossPrice) {
+        return { success: false, error: "Current price has already hit the Stop Loss. Trade cancelled." };
+      }
+    } else {
+      if (!(takeProfitPrice < params.entryPrice) || !(stopLossPrice > params.entryPrice)) {
+        return { success: false, error: "Invalid stop-loss/take-profit bracket. Trade cancelled." };
+      }
+      if (guardPrice <= takeProfitPrice) {
+        return { success: false, error: "Current price has already passed the Take Profit. Trade cancelled." };
+      }
+      if (guardPrice >= stopLossPrice) {
+        return { success: false, error: "Current price has already hit the Stop Loss. Trade cancelled." };
+      }
+    }
 
     // Balance & Sizing
     let balance: number;
@@ -1803,6 +1913,9 @@ export class BinanceAutoTradeEngine {
       }
 
       const clientOrderId = `ph${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
+      if (orderType === "STOP_MARKET" && marketType !== "Futures") {
+        return { success: false, error: "Stop-Market entries require the Futures market type." };
+      }
       const apiResult = orderType === "MARKET"
         ? await this.placeBinanceMarketOrder({
             symbol: params.symbol,
@@ -1811,14 +1924,22 @@ export class BinanceAutoTradeEngine {
             marketType,
             clientOrderId,
           })
-        : await this.placeBinanceLimitOrder({
-        symbol: params.symbol,
-        side: direction === "LONG" ? "BUY" : "SELL",
-        quantity: sizing.quantity,
-        price: params.entryPrice,
-        marketType,
-        clientOrderId,
-      });
+        : orderType === "STOP_MARKET"
+          ? await this.placeBinanceStopEntryOrder({
+              symbol: params.symbol,
+              side: direction === "LONG" ? "BUY" : "SELL",
+              quantity: sizing.quantity,
+              stopPrice: params.entryPrice,
+              clientOrderId,
+            })
+          : await this.placeBinanceLimitOrder({
+              symbol: params.symbol,
+              side: direction === "LONG" ? "BUY" : "SELL",
+              quantity: sizing.quantity,
+              price: params.entryPrice,
+              marketType,
+              clientOrderId,
+            });
 
       if (!apiResult.orderId) {
         return {
@@ -2031,6 +2152,61 @@ export class BinanceAutoTradeEngine {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         return { error: data?.msg || `Market order failed (HTTP ${res.status})` };
+      }
+      if (!data?.orderId) return { error: "Binance response contained no orderId" };
+      return {
+        orderId: data.orderId,
+        status: typeof data.status === "string" ? data.status : undefined,
+        executedQty: Number(data.executedQty ?? 0),
+      };
+    } catch (e) {
+      return { error: e instanceof Error ? e.message : "Network error" };
+    }
+  }
+
+  /**
+   * STOP_MARKET entry used when the user explicitly selects "Stop" in the
+   * confirmation modal. Futures-only; Spot has no equivalent stop entry order.
+   */
+  private async placeBinanceStopEntryOrder(params: {
+    symbol: string;
+    side: "BUY" | "SELL";
+    quantity: number;
+    stopPrice: number;
+    clientOrderId?: string;
+  }): Promise<{
+    orderId?: string | number;
+    status?: string;
+    executedQty?: number;
+    error?: string;
+  }> {
+    if (!Number.isFinite(params.quantity) || params.quantity <= 0) {
+      return { error: "Invalid order quantity" };
+    }
+    if (!Number.isFinite(params.stopPrice) || params.stopPrice <= 0) {
+      return { error: "Invalid stop price" };
+    }
+
+    const bodyParts = [
+      `symbol=${params.symbol}`,
+      `side=${params.side}`,
+      "type=STOP_MARKET",
+      `stopPrice=${params.stopPrice}`,
+      `quantity=${params.quantity}`,
+      "newOrderRespType=RESULT",
+    ];
+    if (params.clientOrderId) bodyParts.push(`newClientOrderId=${params.clientOrderId}`);
+
+    try {
+      const res = await proxyBinanceFetch({
+        target: "futures",
+        path: "/fapi/v1/order",
+        method: "POST",
+        body: bodyParts.join("&"),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        return { error: data?.msg || `Stop-Market order failed (HTTP ${res.status})` };
       }
       if (!data?.orderId) return { error: "Binance response contained no orderId" };
       return {
@@ -2284,7 +2460,10 @@ export class BinanceAutoTradeEngine {
 
     // NOTE: `quantity` is already the full levered position size (margin * leverage /
     // entry), so multiplying by leverage again would overstate P/L by the leverage factor.
-    const realizedPnl = priceDiff * trade.quantity;
+    // Both entry and exit notional pay the same 0.04% taker fee as the paper ledger.
+    const fees = calculateTradingFees(trade.entryPrice, exitPrice, trade.quantity);
+    const realizedPnl = priceDiff * trade.quantity - fees;
+    trade.fees = fees;
     trade.realizedPnl = Number(realizedPnl.toFixed(2));
 
     // A mandatory pause after ANY close (TP/SL/manual) blocks revenge re-entry.

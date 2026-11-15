@@ -35,6 +35,7 @@ export default function Portfolio({ onBalanceChange }: Props) {
   const [quantity, setQuantity] = useState("");
   const [buyPrice, setBuyPrice] = useState("");
   const [refreshing, setRefreshing] = useState(false);
+  const [resetting, setResetting] = useState(false);
   const [portfolioError, setPortfolioError] = useState<string | null>(null);
 
   const loadHoldings = useCallback(async () => {
@@ -204,6 +205,23 @@ export default function Portfolio({ onBalanceChange }: Props) {
     setTimeout(() => setRebalanceFeedback(null), 5000);
   }, [totalTargetWeight, rebalancePlans]);
 
+  const handleResetVirtualBalance = useCallback(async () => {
+    if (resetting) return;
+    setResetting(true);
+    setPortfolioError(null);
+    try {
+      await tradeManager.resetAll();
+      paperTradingEngine.resetAccount(10000);
+      onBalanceChange?.(10000);
+    } catch (err) {
+      setPortfolioError(
+        `Reset failed: ${err instanceof Error ? err.message : "could not clear trade history"}.`
+      );
+    } finally {
+      setResetting(false);
+    }
+  }, [onBalanceChange, resetting]);
+
   const handleExportTaxPDF = useCallback(() => {
     const allTrades = autoTradeEngine.getAllTrades();
     const closedTrades = allTrades.filter((t) => t.status === "CLOSED");
@@ -344,14 +362,11 @@ export default function Portfolio({ onBalanceChange }: Props) {
             </button>
           )}
           <button
-            onClick={() => {
-              paperTradingEngine.resetAccount(10000);
-              tradeManager.resetAll();
-              onBalanceChange?.(10000);
-            }}
-            className="flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-sm font-medium transition-colors"
+            onClick={() => void handleResetVirtualBalance()}
+            disabled={resetting}
+            className="flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-wait"
           >
-            <Wallet className="w-4 h-4" />
+            {resetting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wallet className="w-4 h-4" />}
             <span className="hidden sm:inline">Reset Virtual Balance to $10,000</span>
           </button>
         </div>

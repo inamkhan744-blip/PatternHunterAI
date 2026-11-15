@@ -12,6 +12,8 @@ import {
 import { dcaBotEngine, type DCABotConfig, type DCABotState } from "../lib/DCABot";
 import { formatPrice } from "../lib/patterns";
 import type { Coin } from "../types";
+import { useAuth } from "../lib/auth";
+import { useSubscription } from "../lib/useSubscription";
 
 interface Props {
   selectedCoin: Coin;
@@ -19,6 +21,8 @@ interface Props {
 }
 
 export default function DCABotUI({ selectedCoin, currentPrice }: Props) {
+  const { user } = useAuth();
+  const { isPro, isAdmin } = useSubscription(user);
   const [botState, setBotState] = useState<DCABotState>(() => dcaBotEngine.getState());
 
   // DCA Parameters Form
@@ -77,6 +81,15 @@ export default function DCABotUI({ selectedCoin, currentPrice }: Props) {
     setSuccessMessage("DCA Bot stopped. Unfilled safety orders cancelled.");
     setTimeout(() => setSuccessMessage(null), 3000);
   };
+
+  if (!isPro && !isAdmin) {
+    return (
+      <div className="p-6 text-center text-slate-400">
+        <p className="font-bold text-white mb-2">Pro Feature</p>
+        <p className="text-sm">Upgrade to Pro to use DCA Bot.</p>
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-7xl mx-auto w-full px-4 sm:px-6 py-4 font-mono space-y-6">

@@ -80,8 +80,9 @@ export function useSubscription(user: User | null): SubscriptionState {
     };
   }, [refresh, user?.id]);
 
-  const isPro = useMemo(() => profileIsPro(profile), [profile]);
-  const isAdmin = useMemo(() => profileIsAdmin(profile), [profile]);
+  const ADMIN_EMAIL = "inamkhan744@gmail.com";
+  const isAdmin = useMemo(() => user?.email === ADMIN_EMAIL || profileIsAdmin(profile), [user, profile]);
+  const isPro = useMemo(() => isAdmin || profileIsPro(profile), [isAdmin, profile]);
   // Admins are never locked out by a ban flag (it would make the platform
   // unadministrable); everyone else sees the blocking screen.
   const isBanned = !isAdmin && profile.banned === true;

@@ -175,7 +175,7 @@ export class TradeManager {
             .filter((t) => t && typeof t.id === "string" && Number(t.entryPrice) > 0)
             .map((t) => ({
               ...t,
-              mode: t.mode === "PAPER" ? "PAPER" : "REAL",
+              mode: t.mode === "REAL" ? "REAL" : "PAPER",
               currentPrice: Number(t.currentPrice) > 0 ? t.currentPrice : t.entryPrice,
             }));
         }
@@ -189,7 +189,9 @@ export class TradeManager {
       if (historyRaw) {
         const parsed = JSON.parse(historyRaw) as ClosedTrade[];
         if (Array.isArray(parsed)) {
-          this.tradeHistory = parsed.filter((t) => t && typeof t.id === "string");
+          this.tradeHistory = parsed
+            .filter((t) => t && typeof t.id === "string")
+            .map((t) => ({ ...t, mode: t.mode === "REAL" ? "REAL" : "PAPER" }));
         }
       }
     } catch {

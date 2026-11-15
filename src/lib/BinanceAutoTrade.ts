@@ -618,6 +618,50 @@ export class BinanceAutoTradeEngine {
     localStorage.setItem(STORAGE_KEY_TRADES, JSON.stringify(this.trades));
   }
 
+  private computeAdx(
+    candles: { high: number; low: number; close: number }[],
+    period: number = 14
+  ): number | null {
+    if (candles.length < period * 2) return null;
+    const tr: number[] = [];
+    const plusDm: number[] = [];
+    const minusDm: number[] = [];
+    for (let i = 1; i < candles.length; i++) {
+      const highDiff = candles[i].high - candles[i - 1].high;
+      const lowDiff = candles[i - 1].low - candles[i].low;
+      tr.push(
+        Math.max(
+          candles[i].high - candles[i].low,
+          Math.abs(candles[i].high - candles[i - 1].close),
+          Math.abs(candles[i].low - candles[i - 1].close)
+        )
+      );
+      plusDm.push(highDiff > lowDiff && highDiff > 0 ? highDiff : 0);
+      minusDm.push(lowDiff > highDiff && lowDiff > 0 ? lowDiff : 0);
+    }
+    // Wilder smoothing
+    let atr = tr.slice(0, period).reduce((a, b) => a + b, 0);
+    let plus = plusDm.slice(0, period).reduce((a, b) => a + b, 0);
+    let minus = minusDm.slice(0, period).reduce((a, b) => a + b, 0);
+    const dx: number[] = [];
+    for (let i = period; i < tr.length; i++) {
+      atr = atr - atr / period + tr[i];
+      plus = plus - plus / period + plusDm[i];
+      minus = minus - minus / period + minusDm[i];
+      const plusDi = atr > 0 ? (plus / atr) * 100 : 0;
+      const minusDi = atr > 0 ? (minus / atr) * 100 : 0;
+      const sum = plusDi + minusDi;
+      const dxVal = sum > 0 ? (Math.abs(plusDi - minusDi) / sum) * 100 : 0;
+      dx.push(dxVal);
+    }
+    if (dx.length < period) return null;
+    let adx = dx.slice(0, period).reduce((a, b) => a + b, 0) / period;
+    for (let i = period; i < dx.length; i++) {
+      adx = (adx * (period - 1) + dx[i]) / period;
+    }
+    return adx;
+  }
+
   public getOpenTrades(): ManagedTrade[] {
     return this.trades.filter((t) => t.status === "OPEN");
   }
@@ -1403,6 +1447,8 @@ export class BinanceAutoTradeEngine {
     manual?: boolean;
     /** Price the signal was generated at, used for the slippage guard. */
     signalPrice?: number;
+    /** Optional ADX value for edge-filter enforcement. */
+    adx?: number | null;
     /** Auto-Pilot uses MARKET for immediate fills; manual entries stay LIMIT. */
     orderType?: "LIMIT" | "MARKET";
   }): Promise<{ success: boolean; trade?: ManagedTrade; error?: string }> {
@@ -1491,6 +1537,39 @@ export class BinanceAutoTradeEngine {
         success: false,
         error: spreadCheck.reason,
       };
+    }
+
+    // 4b. Correlation filter: avoid stacking same-base symbols.
+    if (!params.manual && this.config.correlationFilter) {
+      const base = params.symbol.replace(/USDT|BUSD|USDC/g, "").slice(0, 3);
+      const openTrades = this.getOpenTrades();
+      const correlated = openTrades.some((t) => {
+        const otherBase = t.symbol.replace(/USDT|BUSD|USDC/g, "").slice(0, 3);
+        return otherBase === base;
+      });
+      if (correlated) {
+        const msg = `Trade rejected: Correlation filter (open position already exists on ${base}).`;
+        liveWorkerLogStore.addLog(msg, "warn", { symbol: params.symbol });
+        return { success: false, error: msg };
+      }
+    }
+
+    // 4c. ADX edge filter.
+    if (!params.manual && this.config.minAdx) {
+      let adx = params.adx;
+      if (adx === undefined) {
+        try {
+          const candles = await fetchCandles(params.symbol, 60, "1h");
+          adx = this.computeAdx(candles, 14);
+        } catch {
+          adx = null;
+        }
+      }
+      if (adx !== null && adx !== undefined && adx < this.config.minAdx) {
+        const msg = `Trade rejected: ADX ${adx.toFixed(1)} below minimum ${this.config.minAdx}.`;
+        liveWorkerLogStore.addLog(msg, "warn", { symbol: params.symbol, adx });
+        return { success: false, error: msg };
+      }
     }
 
     // 5. Global Market Filter: BTC 1H dumping blocks Altcoin Longs

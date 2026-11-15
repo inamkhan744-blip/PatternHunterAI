@@ -1,11 +1,13 @@
+import { useState } from "react";
 import { calculatePositionSize } from "../lib/BinanceAutoTrade";
+import { useWalletBalance } from "../lib/WalletBalanceContext";
 import type { SignalCard } from "./SignalCardsGrid";
 import type { ScannerExecutionSettings } from "./ScannerTradeSettings";
 
 interface Props {
   isOpen: boolean;
   onClose: () => void;
-  onConfirm: () => void | Promise<void>;
+  onConfirm: () => void | Promise<{ success: boolean; error?: string } | void>;
   cardData: SignalCard;
   settings: ScannerExecutionSettings;
 }
@@ -20,6 +22,8 @@ function formatPrice(value: number): string {
 }
 
 export default function TradeConfirmModal({ isOpen, onClose, onConfirm, cardData, settings }: Props) {
+  const { balance: availableBalance } = useWalletBalance();
+  const [executionError, setExecutionError] = useState<string | null>(null);
   if (!isOpen) return null;
 
   const isLong = cardData.direction !== "SHORT";
@@ -34,7 +38,7 @@ export default function TradeConfirmModal({ isOpen, onClose, onConfirm, cardData
     positionValue = settings.fixedUsdAmount;
     quantity = entry > 0 ? settings.fixedUsdAmount / entry : 0;
   } else {
-    const sizing = calculatePositionSize(settings.riskPercent, DEFAULT_BALANCE, settings.leverage, entry, sl);
+    const sizing = calculatePositionSize(settings.riskPercent, availableBalance || DEFAULT_BALANCE, settings.leverage, entry, sl);
     quantity = sizing.quantity;
     positionValue = sizing.positionValue;
   }
@@ -43,8 +47,17 @@ export default function TradeConfirmModal({ isOpen, onClose, onConfirm, cardData
   const potentialProfit = Math.abs(tp - entry) * quantity;
 
   const handleConfirm = async () => {
-    await onConfirm();
-    onClose();
+    setExecutionError(null);
+    try {
+      const result = await onConfirm();
+      if (result && typeof result === "object" && "success" in result && !result.success) {
+        setExecutionError(result.error || "Trade execution failed.");
+        return;
+      }
+      onClose();
+    } catch (err) {
+      setExecutionError(err instanceof Error ? err.message : "Trade execution failed.");
+    }
   };
 
   return (
@@ -60,12 +73,12 @@ export default function TradeConfirmModal({ isOpen, onClose, onConfirm, cardData
         <div className="rounded-lg bg-slate-800/60 border border-slate-700 p-3 text-xs">
           <div className="flex items-center justify-between">
             <span className="text-slate-400">Available Balance</span>
-            <span className="font-mono font-bold text-cyan-300">${DEFAULT_BALANCE.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+            <span className="font-mono font-bold text-cyan-300">${(availableBalance || DEFAULT_BALANCE).toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
           </div>
           <div className="flex items-center justify-between mt-1">
             <span className="text-slate-400">Risk {settings.riskPercent}%</span>
             <span className="font-mono font-bold text-amber-300">
-              ${(DEFAULT_BALANCE * (settings.riskPercent / 100)).toFixed(2)}
+              ${((availableBalance || DEFAULT_BALANCE) * (settings.riskPercent / 100)).toFixed(2)}
             </span>
           </div>
           <div className="flex items-center justify-between mt-1">
@@ -139,6 +152,12 @@ export default function TradeConfirmModal({ isOpen, onClose, onConfirm, cardData
           >
             Cancel
           </button>
+          {executionError && (
+            <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300">
+              {executionError}
+            </div>
+          )}
+
           <button
             onClick={() => void handleConfirm()}
             className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-emerald-500 hover:from-blue-500 hover:to-emerald-400 text-xs font-bold text-white shadow-lg shadow-blue-500/40 transition"

@@ -332,6 +332,14 @@ export default function App() {
     refresh: refreshSubscription,
   } = useSubscription(user);
 
+  const openVisionAI = useCallback(() => {
+    if (!effectiveIsPro && !isAdmin) {
+      setProModalOpen(true);
+      return;
+    }
+    setVisionAIOpen(true);
+  }, [effectiveIsPro, isAdmin]);
+
   // Platform flags are read on load; the Super Admin Panel pushes updates back
   // through onSettingsChanged so a toggle applies without a reload.
   useEffect(() => {
@@ -2105,7 +2113,13 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
                 return (
                   <button
                     key={tab.key}
-                    onClick={() => setActiveTab(tab.key)}
+                    onClick={() => {
+                      if ((tab.key === "grid" || tab.key === "dca") && !effectiveIsPro && !isAdmin) {
+                        setProModalOpen(true);
+                        return;
+                      }
+                      setActiveTab(tab.key);
+                    }}
                     className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-xs font-semibold transition-colors ${
                       active
                         ? "bg-slate-800 text-cyan-300 border border-cyan-500/30"
@@ -2114,6 +2128,9 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
                   >
                     <Icon className={`w-4 h-4 ${active ? "text-cyan-400" : ""}`} />
                     <span>{tab.label}</span>
+                    {(tab.key === "grid" || tab.key === "dca") && !effectiveIsPro && !isAdmin && (
+                      <span className="ml-auto text-[10px] text-amber-400">🔒</span>
+                    )}
                   </button>
                 );
               })}
@@ -2153,7 +2170,7 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
           {/* Vision AI Chart Upload Button (hidden when the admin disables the feature) */}
           {systemSettings.enableVisionAI && (
             <button
-              onClick={() => setVisionAIOpen(true)}
+              onClick={() => openVisionAI()}
               className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-slate-950 text-xs font-bold transition-all shadow-md shadow-cyan-950/40"
             >
               <Eye className="w-4 h-4 text-slate-950" />
@@ -2269,7 +2286,7 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
 
               {systemSettings.enableVisionAI && (
                 <button
-                  onClick={() => setVisionAIOpen(true)}
+                  onClick={() => openVisionAI()}
                   className="flex items-center gap-1 px-2 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold transition-colors shrink-0"
                   title="Vision AI Chart Upload"
                 >
@@ -2499,7 +2516,7 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
 
                         {/* Vision AI in Mobile Tools */}
                         <button
-                          onClick={() => { setVisionAIOpen(true); setMobileToolsOpen(false); }}
+                          onClick={() => { openVisionAI(); setMobileToolsOpen(false); }}
                           className="w-full px-2.5 py-2 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-600 text-slate-950 font-black text-xs uppercase flex items-center gap-2"
                         >
                           <Eye className="w-3.5 h-3.5" />
@@ -2561,7 +2578,7 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
 
                 {/* Desktop Vision AI Button */}
                 <button
-                  onClick={() => setVisionAIOpen(true)}
+                  onClick={() => openVisionAI()}
                   className="hidden md:flex px-3 py-1.5 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-slate-950 font-black text-xs uppercase tracking-wider items-center gap-1.5 shadow-md shadow-cyan-950/40 transition shrink-0"
                   title="Analyze Chart Screenshot with Gemini Vision AI"
                 >
@@ -2937,6 +2954,7 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
               pattern={pattern?.name ?? null}
               fearGreed={fearGreedValue}
               onShowCoin={showCoinBySymbol}
+              isPro={effectiveIsPro || isAdmin}
               dataTimestamp={
                 candles.length > 0
                   ? candles[candles.length - 1].time > 1e11
@@ -3140,7 +3158,7 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
         isAdmin={isAdmin}
         onClose={() => setSettingsOpen(false)}
         onOpenAutoTrade={() => setAutoTradeOpen(true)}
-        onOpenVisionAI={() => setVisionAIOpen(true)}
+        onOpenVisionAI={() => openVisionAI()}
         onOpenSuperAdmin={() => {
           setSettingsOpen(false);
           setSuperAdminOpen(true);

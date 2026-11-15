@@ -176,7 +176,8 @@ export class TradeManager {
             .filter((t) => t && typeof t.id === "string" && Number(t.entryPrice) > 0 && t.mode !== "REAL")
             .map((t) => ({
               ...t,
-              mode: t.mode === "REAL" ? "REAL" : "PAPER",
+              // No real Binance keys have ever been connected: force all trades to PAPER.
+              mode: "PAPER",
               currentPrice: Number(t.currentPrice) > 0 ? t.currentPrice : t.entryPrice,
             }));
         }
@@ -191,8 +192,8 @@ export class TradeManager {
         const parsed = JSON.parse(historyRaw) as ClosedTrade[];
         if (Array.isArray(parsed)) {
           this.tradeHistory = parsed
-            .filter((t) => t && typeof t.id === "string" && t.mode !== "REAL")
-            .map((t) => ({ ...t, mode: t.mode === "REAL" ? "REAL" : "PAPER" }));
+            .filter((t) => t && typeof t.id === "string")
+            .map((t) => ({ ...t, mode: "PAPER" }));
         }
       }
     } catch {
@@ -332,18 +333,19 @@ export class TradeManager {
       }
       if (!data) return;
 
-      // Purge any non-paper (live) trades that may have been stored without real API keys.
+      // One-time cleanup: no real Binance keys have ever been connected, so force
+      // any live (is_paper = false/null) rows to paper in Supabase.
       try {
         await supabase
           .from("trades")
-          .delete()
+          .update({ is_paper: true })
           .eq("user_id", this.currentUserId)
           .or("is_paper.is.null,is_paper.eq.false");
       } catch {
         // best-effort cleanup
       }
 
-      const paperRows = (data as SupabaseTradeRow[]).filter((row) => row.is_paper !== false);
+      const paperRows = (data as SupabaseTradeRow[]).map((row) => ({ ...row, is_paper: true }));
       this.mergeRemoteTrades(paperRows);
     } catch (err) {
       console.warn("[TradeManager] Unexpected error syncing with Supabase:", err);

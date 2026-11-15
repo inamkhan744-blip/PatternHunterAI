@@ -79,6 +79,80 @@ $$;
 REVOKE ALL ON FUNCTION public.get_global_ai_config() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.get_global_ai_config() TO authenticated;
 
+-- Admin-only write through a definer function. The client never needs table-wide
+-- SELECT on the secret columns just to upsert the AI configuration.
+CREATE OR REPLACE FUNCTION public.save_global_ai_config(
+  p_active_provider text,
+  p_gemini_api_key text,
+  p_gemini_model text,
+  p_deepseek_api_key text,
+  p_deepseek_model text,
+  p_groq_api_key text,
+  p_groq_model text
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  cfg public.global_settings%ROWTYPE;
+BEGIN
+  IF NOT public.is_admin() THEN
+    RAISE EXCEPTION 'Only administrators can modify AI provider credentials.'
+      USING ERRCODE = '42501';
+  END IF;
+
+  INSERT INTO public.global_settings (
+    id,
+    active_provider,
+    gemini_api_key,
+    gemini_model,
+    deepseek_api_key,
+    deepseek_model,
+    groq_api_key,
+    groq_model
+  ) VALUES (
+    'global_config',
+    COALESCE(NULLIF(p_active_provider, ''), 'gemini'),
+    p_gemini_api_key,
+    p_gemini_model,
+    p_deepseek_api_key,
+    p_deepseek_model,
+    p_groq_api_key,
+    p_groq_model
+  )
+  ON CONFLICT (id) DO UPDATE SET
+    active_provider = EXCLUDED.active_provider,
+    gemini_api_key = EXCLUDED.gemini_api_key,
+    gemini_model = EXCLUDED.gemini_model,
+    deepseek_api_key = EXCLUDED.deepseek_api_key,
+    deepseek_model = EXCLUDED.deepseek_model,
+    groq_api_key = EXCLUDED.groq_api_key,
+    groq_model = EXCLUDED.groq_model,
+    updated_at = now(),
+    updated_by = auth.uid()
+  RETURNING * INTO cfg;
+
+  RETURN jsonb_build_object(
+    'id', cfg.id,
+    'active_provider', cfg.active_provider,
+    'gemini_api_key', cfg.gemini_api_key,
+    'gemini_model', cfg.gemini_model,
+    'deepseek_api_key', cfg.deepseek_api_key,
+    'deepseek_model', cfg.deepseek_model,
+    'groq_api_key', cfg.groq_api_key,
+    'groq_model', cfg.groq_model
+  );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.save_global_ai_config(text, text, text, text, text, text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.save_global_ai_config(text, text, text, text, text, text, text) TO authenticated;
+
+COMMENT ON FUNCTION public.save_global_ai_config(text, text, text, text, text, text, text) IS
+  'Admin-only AI configuration write; keeps provider secrets out of client SELECT grants.';
+
 COMMENT ON POLICY "authenticated_read_global_settings" ON public.global_settings IS
   'Signed-in users may read platform flags; provider secrets are protected by column grants and served only through ai-chat.';
 

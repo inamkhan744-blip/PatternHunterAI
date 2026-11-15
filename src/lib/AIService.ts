@@ -243,20 +243,15 @@ export async function saveGlobalAIConfig(config: GlobalAIConfig): Promise<Global
     groqModel: clean(config.groqModel, 120),
   };
 
-  const { error } = await supabase.from("global_settings").upsert(
-    {
-      id: GLOBAL_CONFIG_ID,
-      active_provider: next.activeProvider,
-      gemini_api_key: next.geminiApiKey,
-      gemini_model: next.geminiModel,
-      deepseek_api_key: next.deepseekApiKey,
-      deepseek_model: next.deepseekModel,
-      groq_api_key: next.groqApiKey,
-      groq_model: next.groqModel,
-      updated_at: new Date().toISOString(),
-    },
-    { onConflict: "id" }
-  );
+  const { data, error } = await supabase.rpc("save_global_ai_config", {
+    p_active_provider: next.activeProvider,
+    p_gemini_api_key: next.geminiApiKey,
+    p_gemini_model: next.geminiModel,
+    p_deepseek_api_key: next.deepseekApiKey,
+    p_deepseek_model: next.deepseekModel,
+    p_groq_api_key: next.groqApiKey,
+    p_groq_model: next.groqModel,
+  });
 
   if (error) {
     throw new AIServiceError(
@@ -265,9 +260,10 @@ export async function saveGlobalAIConfig(config: GlobalAIConfig): Promise<Global
     );
   }
 
-  cachedConfig = next;
+  const saved = rowToConfig((data ?? null) as GlobalSettingsRow | null);
+  cachedConfig = saved;
   cachedAt = Date.now();
-  return next;
+  return saved;
 }
 
 export function invalidateAIConfigCache(): void {

@@ -76,8 +76,8 @@ export default function Portfolio() {
     const newPrices: Record<string, number> = {};
     const settled = await Promise.allSettled(
       holdings.map(async (h) => {
-        const data = await fetchCandles(h.binance_symbol, 1, "1m");
-        if (data.length > 0) return { symbol: h.binance_symbol, price: data[0].close };
+        const data = await fetchCandles(h.coin, 1, "1m");
+        if (data.length > 0) return { symbol: h.coin, price: data[0].close };
         return null;
       })
     );
@@ -98,7 +98,7 @@ export default function Portfolio() {
 
   const computedHoldings = useMemo<HoldingWithPrice[]>(() => {
     return holdings.map((h) => {
-      const live = priceMap[h.binance_symbol];
+      const live = priceMap[h.coin];
       const hasPrice = typeof live === "number" && Number.isFinite(live) && live > 0;
       const currentPrice = hasPrice ? live : 0;
       const value = hasPrice ? h.quantity * currentPrice : 0;
@@ -131,8 +131,8 @@ export default function Portfolio() {
         const equalShare = Math.floor(100 / computedHoldings.length);
         let remainder = 100 - equalShare * computedHoldings.length;
         for (const h of computedHoldings) {
-          if (next[h.binance_symbol] === undefined) {
-            next[h.binance_symbol] = equalShare + (remainder > 0 ? 1 : 0);
+          if (next[h.coin] === undefined) {
+            next[h.coin] = equalShare + (remainder > 0 ? 1 : 0);
             if (remainder > 0) remainder--;
           }
         }
@@ -142,21 +142,21 @@ export default function Portfolio() {
   }, [computedHoldings]);
 
   const totalTargetWeight = useMemo(() => {
-    return computedHoldings.reduce((acc, h) => acc + (targetWeights[h.binance_symbol] ?? 0), 0);
+    return computedHoldings.reduce((acc, h) => acc + (targetWeights[h.coin] ?? 0), 0);
   }, [computedHoldings, targetWeights]);
 
   const rebalancePlans = useMemo(() => {
     if (totalValue <= 0) return [];
     return computedHoldings.map((h) => {
       const currentPct = (h.value / totalValue) * 100;
-      const targetPct = targetWeights[h.binance_symbol] ?? 0;
+      const targetPct = targetWeights[h.coin] ?? 0;
       const targetVal = (targetPct / 100) * totalValue;
       const driftVal = targetVal - h.value; // positive = BUY, negative = SELL
       const driftQty = h.currentPrice > 0 ? driftVal / h.currentPrice : 0;
       const action = Math.abs(driftVal) < 1 ? "HOLD" : driftVal > 0 ? "BUY" : "SELL";
       return {
-        symbol: h.coin_symbol,
-        binanceSymbol: h.binance_symbol,
+        symbol: h.coin.replace("USDT", ""),
+        binanceSymbol: h.coin,
         currentPct,
         targetPct,
         currentVal: h.value,
@@ -220,9 +220,7 @@ export default function Portfolio() {
       const { data, error } = await supabase
         .from("portfolio_holdings")
         .insert({
-          coin_symbol: coin.symbol,
-          binance_symbol: coin.binanceSymbol,
-          coin_label: coin.label,
+          coin: coin.binanceSymbol,
           quantity: qty,
           buy_price: bp,
         })
@@ -528,11 +526,11 @@ export default function Portfolio() {
                 className="flex items-center gap-3 p-3 sm:p-4 rounded-xl bg-slate-900 border border-slate-800 hover:border-slate-700 transition-colors"
               >
                 <div className="w-9 h-9 rounded-full bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center text-xs font-bold shrink-0">
-                  {h.coin_symbol.slice(0, 3)}
+                  {h.coin.replace("USDT", "").slice(0, 3)}
                 </div>
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-semibold text-white truncate">
-                    {h.coin_symbol}<span className="text-slate-500 font-normal">/USDT</span>
+                    {h.coin.replace("USDT", "")}<span className="text-slate-500 font-normal">/USDT</span>
                   </p>
                   <p className="text-xs text-slate-500">
                     {h.quantity} @ {formatPrice(h.buy_price)}

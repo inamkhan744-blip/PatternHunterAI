@@ -236,9 +236,8 @@ export interface ConfluenceResult {
 
 export interface PortfolioHolding {
   id: string;
-  coin_symbol: string;
-  binance_symbol: string;
-  coin_label: string;
+  user_id?: string;
+  coin: string;
   quantity: number;
   buy_price: number;
   created_at: string;

@@ -1917,6 +1917,7 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
         leverageOverride: settings.leverage,
         riskPercentOverride: settings.riskPercent,
         maxSlippagePct: 1.0,
+        manual: true,
       });
       if (result.success && result.trade) {
         tradeManager.addTrade({

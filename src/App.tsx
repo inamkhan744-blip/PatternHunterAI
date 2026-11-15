@@ -880,6 +880,7 @@ export default function App() {
           marketType: config.marketType,
           leverage: config.leverage,
           riskPercent: config.riskPercent,
+          currentPrice,
         });
 
         if (pResult.success && pResult.trade) {
@@ -1175,6 +1176,7 @@ export default function App() {
             riskPercent: cfg.riskPercent,
             atrStopMultiplier: rangeMode ? 1 : undefined,
             atrRiskRewardRatio: rangeMode ? 1.5 : undefined,
+            currentPrice: livePrice,
           });
 
           if (pResult.success && pResult.trade) {

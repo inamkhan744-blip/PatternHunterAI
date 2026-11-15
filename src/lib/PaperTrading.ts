@@ -118,6 +118,7 @@ export class PaperTradingEngine {
     riskPercent?: number;
     atrStopMultiplier?: number;
     atrRiskRewardRatio?: number;
+    currentPrice?: number;
   }): { success: boolean; trade?: PaperTrade; error?: string } {
     // Check if an active open trade already exists for this symbol (Execution Lock)
     const existingOpen = this.account.trades.find((t) => t.symbol === params.symbol && t.status === "OPEN");
@@ -148,6 +149,35 @@ export class PaperTradingEngine {
       params.atrStopMultiplier,
       params.atrRiskRewardRatio
     );
+
+    // Validate bracket ordering.
+    if (direction === "LONG") {
+      if (!(takeProfitPrice > params.entryPrice) || !(stopLossPrice < params.entryPrice)) {
+        return { success: false, error: "Invalid stop-loss/take-profit bracket. Trade cancelled." };
+      }
+    } else {
+      if (!(takeProfitPrice < params.entryPrice) || !(stopLossPrice > params.entryPrice)) {
+        return { success: false, error: "Invalid stop-loss/take-profit bracket. Trade cancelled." };
+      }
+    }
+
+    // Entry validation: reject if current price already crossed TP/SL.
+    const currentPrice = Number.isFinite(params.currentPrice) ? (params.currentPrice as number) : params.entryPrice;
+    if (direction === "LONG") {
+      if (currentPrice >= takeProfitPrice) {
+        return { success: false, error: "Current price has already passed the Take Profit. Trade cancelled." };
+      }
+      if (currentPrice <= stopLossPrice) {
+        return { success: false, error: "Current price has already hit the Stop Loss. Trade cancelled." };
+      }
+    } else {
+      if (currentPrice <= takeProfitPrice) {
+        return { success: false, error: "Current price has already passed the Take Profit. Trade cancelled." };
+      }
+      if (currentPrice >= stopLossPrice) {
+        return { success: false, error: "Current price has already hit the Stop Loss. Trade cancelled." };
+      }
+    }
 
     // Check virtual margin
     const sizing = calculatePositionSize(
@@ -198,6 +228,9 @@ export class PaperTradingEngine {
     for (const trade of this.account.trades) {
       if (trade.status !== "OPEN" || trade.symbol !== symbol) continue;
 
+      // Minimum trade duration: ignore TP/SL for the first 5 seconds.
+      if (Date.now() - trade.openTime < 5000) continue;
+
       let exitType: "TP" | "SL" | null = null;
       if (trade.direction === "LONG") {
         if (currentPrice <= trade.stopLossPrice) exitType = "SL";
@@ -220,12 +253,17 @@ export class PaperTradingEngine {
     const trade = this.account.trades.find((t) => t.id === tradeId);
     if (!trade || trade.status !== "OPEN") return null;
     if (!Number.isFinite(exitPrice) || exitPrice <= 0) return null;
+    if (exitReason !== "MANUAL" && Date.now() - trade.openTime < 5000) return null;
 
     trade.status = "CLOSED";
     trade.closePrice = exitPrice;
     trade.closeTime = Date.now();
 
     if (exitReason === "MANUAL") {
+      // Minimum duration guard for TP/SL auto-close.
+      if (Date.now() - trade.openTime < 5000 && (exitPrice <= trade.stopLossPrice || exitPrice >= trade.takeProfitPrice)) {
+        // keep manual close allowed but don't relabel
+      }
       const crossedSl =
         trade.direction === "LONG"
           ? exitPrice <= trade.stopLossPrice

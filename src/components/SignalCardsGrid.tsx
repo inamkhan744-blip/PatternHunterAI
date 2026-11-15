@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Zap, RefreshCw, TrendingUp, TrendingDown, Rocket, Newspaper, Star, Volume2, VolumeX, AlertCircle, Settings, ChevronDown, ExternalLink } from "lucide-react";
-import { fetchTopUsdtPairs, fetchCandles, fetch24hQuoteVolumes, fetchMarketCaps } from "../lib/binance";
+import { fetchTopUsdtPairs, fetchCandles, fetch24hQuoteVolumes, fetchMarketCaps, fetchTickerPrice } from "../lib/binance";
 import { fetchLatestNews } from "../lib/NewsService";
 import type { NewsEvent } from "../lib/NewsService";
 import { evaluateConfluence } from "../lib/ConfluenceEngine";
@@ -238,9 +238,14 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
     const stored = localStorage.getItem("scanner_sort");
     return stored === "squeeze" || stored === "volume" || stored === "score" ? stored : "squeeze";
   });
-  const [soundEnabled, setSoundEnabled] = useState(true);
+  const [soundEnabled, setSoundEnabled] = useState<boolean>(() => {
+    const stored = localStorage.getItem("scanner_sound_enabled");
+    return stored === null ? true : stored === "true";
+  });
   const [watchedSymbols, setWatchedSymbols] = useState<Set<string>>(new Set(watchlistSymbols || []));
   const [visibleCount, setVisibleCount] = useState(20);
+  const [marketCapFilter, setMarketCapFilter] = useState<"all" | "high" | "mid" | "low">("all");
+  const [volumeFilter, setVolumeFilter] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [tradeSettingsOpen, setTradeSettingsOpen] = useState(false);
   const [managingSymbol, setManagingSymbol] = useState<string | null>(null);
@@ -285,6 +290,10 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
   useEffect(() => {
     localStorage.setItem("scanner_timeframe", selectedTimeframe);
   }, [selectedTimeframe]);
+
+  useEffect(() => {
+    localStorage.setItem("scanner_sound_enabled", String(soundEnabled));
+  }, [soundEnabled]);
   useEffect(() => {
     localStorage.setItem("scanner_filter", filter);
   }, [filter]);
@@ -580,6 +589,15 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
           ? price >= tp || price <= sl
           : price <= tp || price >= sl;
       if (age > 5 * 60 * 1000 || hitTarget) {
+        if (hitTarget) {
+          const isTp = direction === "LONG" ? price >= entry.card.takeProfit : price <= entry.card.takeProfit;
+          const storageKey = isTp ? "scanner_tp_hits" : "scanner_sl_hits";
+          try {
+            localStorage.setItem(storageKey, String(Number(localStorage.getItem(storageKey) || "0") + 1));
+          } catch {
+            // ignore
+          }
+        }
         cache.delete(key);
       }
     }
@@ -600,17 +618,47 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
     }
   }, [coins, selectedTimeframe, newsEvents, thresholds, volumes24h, marketCaps, playBeep, showToast]);
 
+  const scanRef = useRef(scan);
   useEffect(() => {
-    void scan();
-    const timer = setInterval(() => void scan(), 5000);
-    return () => clearInterval(timer);
+    scanRef.current = scan;
   }, [scan]);
+
+  useEffect(() => {
+    void scanRef.current();
+    const timer = setInterval(() => void scanRef.current(), 5000);
+    return () => clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     setVisibleCount(20);
   }, [filter, sort, selectedTimeframe, coins]);
 
-  const handleDirectTrade = (card: SignalCard) => {
+  const handleDirectTrade = async (card: SignalCard) => {
+    try {
+      const live = await fetchTickerPrice(card.coin.binanceSymbol);
+      const price = live?.price ?? card.price;
+      if (card.direction === "LONG") {
+        if (price >= card.takeProfit) {
+          showToast("Price has already hit Take Profit. Trade cancelled.");
+          return;
+        }
+        if (price <= card.stopLoss) {
+          showToast("Price has already hit Stop Loss. Trade cancelled.");
+          return;
+        }
+      } else {
+        if (price <= card.takeProfit) {
+          showToast("Price has already hit Take Profit. Trade cancelled.");
+          return;
+        }
+        if (price >= card.stopLoss) {
+          showToast("Price has already hit Stop Loss. Trade cancelled.");
+          return;
+        }
+      }
+    } catch {
+      // continue to modal if price fetch fails
+    }
     setConfirmCard(card);
   };
 
@@ -635,16 +683,30 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
     }
   };
 
-  const handleToggleWatch = useCallback((coin: Coin) => {
-    setWatchedSymbols((previous) => {
-      const next = new Set(previous);
-      if (next.has(coin.binanceSymbol)) next.delete(coin.binanceSymbol);
-      else next.add(coin.binanceSymbol);
-      return next;
-    });
-    showToast(watchedSymbols.has(coin.binanceSymbol) ? `Removed ${coin.symbol} from watchlist` : `Added ${coin.symbol} to watchlist`);
-    onToggleWatch?.(coin);
-  }, [onToggleWatch, watchedSymbols, showToast]);
+  const handleToggleWatch = useCallback(
+    (coin: Coin) => {
+      const wasWatched = watchedSymbols.has(coin.binanceSymbol);
+      // Optimistic update
+      setWatchedSymbols((previous) => {
+        const next = new Set(previous);
+        if (wasWatched) next.delete(coin.binanceSymbol);
+        else next.add(coin.binanceSymbol);
+        return next;
+      });
+      showToast(wasWatched ? `Removed ${coin.symbol} from watchlist` : `Added ${coin.symbol} to watchlist`);
+      // Background DB call with rollback on failure
+      Promise.resolve(onToggleWatch?.(coin)).catch(() => {
+        setWatchedSymbols((previous) => {
+          const next = new Set(previous);
+          if (wasWatched) next.add(coin.binanceSymbol);
+          else next.delete(coin.binanceSymbol);
+          return next;
+        });
+        showToast(`Failed to update watchlist for ${coin.symbol}`);
+      });
+    },
+    [onToggleWatch, watchedSymbols, showToast]
+  );
 
   const filteredNewsCards = newsCards.filter((card) => {
     if (filter === "long") return card.direction === "LONG";
@@ -665,6 +727,14 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
     squeezeCards.filter((card) => {
       if (filter === "long") return card.direction === "LONG";
       if (filter === "short") return card.direction === "SHORT";
+      const mc = marketCaps[card.coin.symbol] || 0;
+      if (marketCapFilter === "high" && mc < 10_000_000_000) return false;
+      if (marketCapFilter === "mid" && (mc < 1_000_000_000 || mc >= 10_000_000_000)) return false;
+      if (marketCapFilter === "low" && mc >= 1_000_000_000) return false;
+      if (volumeFilter) {
+        const vol = volumes24h[card.coin.symbol] || 0;
+        if (vol < 10_000_000) return false;
+      }
       return true;
     })
   );
@@ -755,7 +825,7 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
 
         {!card.news && typeof card.signalAgeMs === "number" && (
           <div className="mt-1 text-[10px] text-slate-500">
-            Signal Age: {Math.max(1, Math.round(card.signalAgeMs / 60000))}m
+            Signal Age: {card.signalAgeMs < 60000 ? "just now" : `${Math.max(1, Math.round(card.signalAgeMs / 60000))} min${Math.round(card.signalAgeMs / 60000) > 1 ? "s" : ""} ago`}
           </div>
         )}
 
@@ -1031,6 +1101,27 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
             </button>
           ))}
         </div>
+        <div className="flex items-center gap-1.5 flex-wrap">
+          {(["all", "high", "mid", "low"] as const).map((mc) => (
+            <button
+              key={mc}
+              onClick={() => setMarketCapFilter(mc)}
+              className={`px-2 py-1 rounded text-[10px] font-bold transition ${
+                marketCapFilter === mc ? "bg-cyan-500 text-slate-950" : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+              }`}
+            >
+              {mc === "all" ? "All MC" : mc === "high" ? "High MC" : mc === "mid" ? "Mid MC" : "Low MC"}
+            </button>
+          ))}
+          <button
+            onClick={() => setVolumeFilter((v) => !v)}
+            className={`px-2 py-1 rounded text-[10px] font-bold transition ${
+              volumeFilter ? "bg-cyan-500 text-slate-950" : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+            }`}
+          >
+            Vol &gt;10M
+          </button>
+        </div>
         <div className="flex items-center gap-2">
           <label className="text-xs text-slate-400">Sort</label>
           <select
@@ -1042,6 +1133,9 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
             <option value="volume">Highest Volume</option>
             <option value="score">Highest Score</option>
           </select>
+        </div>
+        <div className="text-[10px] text-slate-500 font-mono">
+          TP: {Number(localStorage.getItem("scanner_tp_hits") || 0)} | SL: {Number(localStorage.getItem("scanner_sl_hits") || 0)}
         </div>
       </div>
 
@@ -1094,8 +1188,12 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
         {loading && newsCards.length === 0 && squeezeCards.length === 0 ? (
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-2">{skeletonCards}</div>
         ) : filteredSqueezeCards.length === 0 && !marketError ? (
-          <div className="flex items-center justify-center py-16 text-slate-500">
-            No matching setups found right now.
+          <div className="flex flex-col items-center justify-center py-16 text-slate-500 gap-2">
+            <div className="w-12 h-12 rounded-full bg-slate-800/60 flex items-center justify-center">
+              <span className="text-2xl">📡</span>
+            </div>
+            <p className="text-sm">No matching setups found right now.</p>
+            <p className="text-xs text-slate-600">The market may be in a consolidation phase.</p>
           </div>
         ) : (
           <>

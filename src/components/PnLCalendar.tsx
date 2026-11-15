@@ -29,8 +29,12 @@ export default function PnLCalendar() {
   // Load trades from engine or paper engine
   const closedTrades = useMemo(() => {
     if (dataSource === "LIVE") {
-      return autoTradeEngine.getAllTrades().filter((t) => t.status === "CLOSED");
+      // Live tab: only REAL (is_paper = false) trades.
+      return autoTradeEngine
+        .getAllTrades()
+        .filter((t) => t.status === "CLOSED" && t.executionMode === "REAL");
     } else {
+      // Paper tab: only PAPER (is_paper = true) trades.
       return paperTradingEngine.getClosedTrades();
     }
   }, [dataSource]);

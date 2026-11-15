@@ -662,7 +662,11 @@ export default function App() {
     [loadWatchlist]
   );
 
+  const loadDataAbortRef = useRef<AbortController | null>(null);
   const loadData = useCallback(async (binanceSymbol: string, tf: Timeframe) => {
+    loadDataAbortRef.current?.abort();
+    const controller = new AbortController();
+    loadDataAbortRef.current = controller;
     setLoading(true);
     setExplanation(null);
     setAiError(null);
@@ -671,7 +675,7 @@ export default function App() {
     setSlPrice(null);
     setTpPrice(null);
     try {
-      const data = await fetchCandles(binanceSymbol, 200, tf);
+      const data = await fetchCandles(binanceSymbol, 500, tf, controller.signal);
       setCandles(data);
       const foundPattern = detectPattern(data);
       setPattern(foundPattern);
@@ -751,6 +755,7 @@ export default function App() {
       const stats = await fetchMarketStats(binanceSymbol);
       setMarketStats(stats);
     } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
       setCandles([]);
       setPattern(null);
       setAllPatterns([]);
@@ -1646,8 +1651,7 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
           ? v
           : null;
 
-      const deterministic = getFallbackPrices(pattern, lastPrice);
-      const nextEntry = sane(entryVal) ?? sane(parsed?.entry) ?? deterministic.entry;
+      const nextEntry = sane(entryVal) ?? sane(parsed?.entry) ?? lastPrice;
       const aiSl = sane(slVal) ?? sane(parsed?.sl);
       const aiTp = sane(tpVal) ?? sane(parsed?.tp);
 
@@ -1664,28 +1668,15 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
           : null
       );
       setEntryPrice(nextEntry);
-      setSlPrice(slOnCorrectSide ? aiSl : deterministic.sl);
-      setTpPrice(tpOnCorrectSide ? aiTp : deterministic.tp);
+      setSlPrice(slOnCorrectSide ? aiSl : null);
+      setTpPrice(tpOnCorrectSide ? aiTp : null);
     } catch (err) {
       console.error("Pattern Analysis error:", err);
-      const reason = err instanceof Error ? err.message : "AI services unreachable";
-
-      // No fabricated AI narrative: say the service is unavailable and clearly label
-      // the deterministic ATR/pattern projection as calculated, not AI-generated.
-      const prices = getFallbackPrices(pattern, lastPrice);
-      setExplanation(
-        [
-          `Pattern: ${pattern.name} on ${selectedCoin.symbol}/USDT at $${lastPrice.toFixed(2)}.`,
-          `Entry (calculated): $${prices.entry.toFixed(2)}`,
-          `SL (calculated): $${prices.sl.toFixed(2)}`,
-          `TP (calculated): $${prices.tp.toFixed(2)}`,
-          "These are deterministic percentage projections from the detected pattern — not AI analysis.",
-        ].join("\n")
-      );
-      setAiError(`AI analysis unavailable (${reason}). Levels below are calculated, not AI-generated.`);
-      setEntryPrice(prices.entry);
-      setSlPrice(prices.sl);
-      setTpPrice(prices.tp);
+      setExplanation(null);
+      setAiError("AI providers offline. Cannot generate analysis.");
+      setEntryPrice(null);
+      setSlPrice(null);
+      setTpPrice(null);
     } finally {
       setAiLoading(false);
     }
@@ -2890,6 +2881,9 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
                       timeframe={tfLabel}
                       loading={loading}
                       chartType={chartType}
+                      entryPrice={entryPrice}
+                      slPrice={slPrice}
+                      tpPrice={tpPrice}
                       fomoLocked={fomoLocked}
                       fomoRemainingSeconds={fomoRemainingSeconds}
                     />

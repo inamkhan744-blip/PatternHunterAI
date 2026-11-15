@@ -57,6 +57,29 @@ export default function TradeConfirmModal({ isOpen, onClose, onConfirm, cardData
           </button>
         </div>
 
+        <div className="rounded-lg bg-slate-800/60 border border-slate-700 p-3 text-xs">
+          <div className="flex items-center justify-between">
+            <span className="text-slate-400">Available Balance</span>
+            <span className="font-mono font-bold text-cyan-300">${DEFAULT_BALANCE.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+          </div>
+          <div className="flex items-center justify-between mt-1">
+            <span className="text-slate-400">Risk {settings.riskPercent}%</span>
+            <span className="font-mono font-bold text-amber-300">
+              ${(DEFAULT_BALANCE * (settings.riskPercent / 100)).toFixed(2)}
+            </span>
+          </div>
+          <div className="flex items-center justify-between mt-1">
+            <span className="text-slate-400">Position Size</span>
+            <span className="font-mono font-bold text-slate-200">${positionValue.toFixed(2)}</span>
+          </div>
+          <div className="flex items-center justify-between mt-1">
+            <span className="text-slate-400">Margin Required</span>
+            <span className="font-mono font-bold text-slate-200">
+              ${(positionValue / Math.max(1, settings.leverage)).toFixed(2)}
+            </span>
+          </div>
+        </div>
+
         <div className="flex items-center justify-between">
           <div>
             <p className="text-lg font-black text-white">{cardData.coin.symbol}/USDT</p>

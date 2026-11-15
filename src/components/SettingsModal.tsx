@@ -572,6 +572,10 @@ export default function SettingsModal({
               <p className="text-[11px] text-slate-400">
                 PatternHunter AI v2.4 Enterprise Platform
               </p>
+              <div className="flex gap-3 text-[10px] text-slate-500 mt-1">
+                <a href="/privacy" className="hover:text-white">Privacy Policy</a>
+                <a href="/terms" className="hover:text-white">Terms of Service</a>
+              </div>
             </div>
           </div>
 

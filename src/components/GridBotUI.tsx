@@ -3,6 +3,8 @@ import { Play, Square, Bot, Activity, AlertCircle, Layers, CheckCircle2 } from "
 import { gridTradingBot, GridBotState, GridBotConfig } from "../lib/GridBot";
 import { formatPrice } from "../lib/patterns";
 import type { Coin } from "../types";
+import { useAuth } from "../lib/auth";
+import { useSubscription } from "../lib/useSubscription";
 
 interface Props {
   selectedCoin: Coin;
@@ -10,6 +12,8 @@ interface Props {
 }
 
 export default function GridBotUI({ selectedCoin, currentPrice }: Props) {
+  const { user } = useAuth();
+  const { isPro, isAdmin } = useSubscription(user);
   const [botState, setBotState] = useState<GridBotState>(gridTradingBot.getState());
 
   // Input states with intelligent defaults around current price (e.g. ±5%)
@@ -59,6 +63,10 @@ export default function GridBotUI({ selectedCoin, currentPrice }: Props) {
 
   const handleStartBot = () => {
     setErrorMsg(null);
+    if (gridCount <= 0 || investmentAmount / gridCount < 1) {
+      setErrorMsg("Investment per grid must be at least $1.");
+      return;
+    }
     const config: GridBotConfig = {
       symbol: selectedCoin.binanceSymbol,
       lowerPrice,
@@ -76,6 +84,15 @@ export default function GridBotUI({ selectedCoin, currentPrice }: Props) {
   const handleStopBot = () => {
     gridTradingBot.stopBot();
   };
+
+  if (!isPro && !isAdmin) {
+    return (
+      <div className="p-6 text-center text-slate-400">
+        <p className="font-bold text-white mb-2">Pro Feature</p>
+        <p className="text-sm">Upgrade to Pro to use Grid Bot.</p>
+      </div>
+    );
+  }
 
   return (
     <div className="rounded-2xl bg-[#090d16] border border-cyan-500/30 p-5 font-mono shadow-2xl space-y-5">

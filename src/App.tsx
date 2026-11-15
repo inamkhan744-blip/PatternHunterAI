@@ -104,6 +104,8 @@ import {
   type TradingViewSignal as RealtimeTradingViewSignal,
 } from "./lib/useTradingViewSignals";
 import { isLiveTradingConfigured, refreshCredentialStatus } from "./lib/CredentialVault";
+import { WalletBalanceProvider } from "./lib/WalletBalanceContext";
+import { ToastProvider } from "./lib/ToastContext";
 import { autoTradeEngine, MAX_SLIPPAGE_PCT } from "./lib/BinanceAutoTrade";
 import { getActiveExchange, getExchangeCredentials, setActiveExchange, SUPPORTED_EXCHANGES, type ExchangeId } from "./lib/MultiExchange";
 import { liveWorkerLogStore } from "./lib/LiveWorkerLogStore";
@@ -2013,7 +2015,12 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
   };
 
   return (
-    <div className="min-h-screen bg-slate-950 text-white flex flex-col lg:flex-row pb-16 lg:pb-0">
+    <ToastProvider>
+      <WalletBalanceProvider initialBalance={walletBalance}>
+        <div className="min-h-screen bg-slate-950 text-white flex flex-col lg:flex-row pb-16 lg:pb-0">
+          <div className="lg:hidden fixed top-2 right-2 z-[60] rounded-lg bg-slate-900/90 border border-slate-700 px-2 py-1 text-[10px] font-mono text-cyan-300 shadow">
+            {isLiveTradingConfigured() ? "Live" : "Paper"} Bal: ${walletBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+          </div>
       {/* Auto-Pilot save failure toast (the toggle has already been reverted) */}
       {autoPilotError && (
         <div
@@ -3173,5 +3180,7 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
         onSelectTab={(tab) => setActiveTab(tab)}
       />
     </div>
+      </WalletBalanceProvider>
+    </ToastProvider>
   );
 }

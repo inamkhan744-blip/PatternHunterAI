@@ -12,6 +12,8 @@ import { scanSMC } from "../lib/SMCScanner";
 import { atr, bollingerBands } from "../lib/indicators";
 import { calculateAtrStopLoss, calculatePositionSize } from "../lib/BinanceAutoTrade";
 import { formatPrice } from "../lib/patterns";
+import { useWalletBalance } from "../lib/WalletBalanceContext";
+import { useToast } from "../lib/ToastContext";
 import { COINS, PRO_COINS } from "../constants";
 import type { Coin, Timeframe } from "../types";
 
@@ -215,6 +217,8 @@ function computeObv(candles: { close: number; volume: number }[]): number[] {
 }
 
 export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectCoin, watchlistSymbols, onToggleWatch, onOneClickTrade, activeTrades, onManagePosition }: Props) {
+  const { balance: walletBalance } = useWalletBalance();
+  const { showToast } = useToast();
   const [selectedTimeframe, setSelectedTimeframe] = useState<Timeframe>(() => {
     const stored = localStorage.getItem("scanner_timeframe");
     return stored && TIMEFRAMES.includes(stored as Timeframe) ? (stored as Timeframe) : initialTimeframe;
@@ -237,7 +241,6 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [watchedSymbols, setWatchedSymbols] = useState<Set<string>>(new Set(watchlistSymbols || []));
   const [visibleCount, setVisibleCount] = useState(20);
-  const [toast, setToast] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [tradeSettingsOpen, setTradeSettingsOpen] = useState(false);
   const [managingSymbol, setManagingSymbol] = useState<string | null>(null);
@@ -278,11 +281,6 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
     setWatchedSymbols(new Set(watchlistSymbols || []));
   }, [watchlistSymbols]);
 
-  useEffect(() => {
-    if (!toast) return;
-    const timer = setTimeout(() => setToast(null), 2500);
-    return () => clearTimeout(timer);
-  }, [toast]);
 
   useEffect(() => {
     localStorage.setItem("scanner_timeframe", selectedTimeframe);
@@ -615,14 +613,14 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
     try {
       const result = await onOneClickTrade?.(confirmCard, settings);
       if (result && typeof result === "object" && "success" in result && !result.success) {
-        setToast(`Trade failed: ${result.error || confirmCard.coin.symbol}`);
+        showToast(`Trade failed: ${result.error || confirmCard.coin.symbol}`);
       } else {
-        setToast(`Trade executed: ${confirmCard.coin.symbol}`);
+        showToast(`Trade executed: ${confirmCard.coin.symbol}`);
       }
     } catch (error) {
       const msg = error instanceof Error ? error.message : "Unknown execution error";
       console.error("[Scanner] direct trade failed:", error);
-      setToast(`Trade failed: ${msg}`);
+      showToast(`Trade failed: ${msg}`);
     }
     if (settings.soundOnExecution) playBeep();
     setConfirmCard(null);
@@ -635,9 +633,9 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
       else next.add(coin.binanceSymbol);
       return next;
     });
-    setToast(watchedSymbols.has(coin.binanceSymbol) ? `Removed ${coin.symbol} from watchlist` : `Added ${coin.symbol} to watchlist`);
+    showToast(watchedSymbols.has(coin.binanceSymbol) ? `Removed ${coin.symbol} from watchlist` : `Added ${coin.symbol} to watchlist`);
     onToggleWatch?.(coin);
-  }, [onToggleWatch, watchedSymbols]);
+  }, [onToggleWatch, watchedSymbols, showToast]);
 
   const filteredNewsCards = newsCards.filter((card) => {
     if (filter === "long") return card.direction === "LONG";
@@ -805,9 +803,9 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
           <div className="col-span-2 rounded-lg bg-slate-950/70 border border-slate-800 p-2">
             <div className="text-slate-500">Size</div>
             <div className="font-mono font-bold text-slate-200">
-              ${calculatePositionSize(1.5, 10000, 1, card.entryPrice, card.stopLoss).positionValue.toFixed(0)}
+              ${calculatePositionSize(loadScannerExecutionSettings().riskPercent, walletBalance || 10000, 1, card.entryPrice, card.stopLoss).positionValue.toFixed(0)}
               {" "}
-              ({((calculatePositionSize(1.5, 10000, 1, card.entryPrice, card.stopLoss).positionValue / 10000) * 100).toFixed(1)}% of Bal)
+              ({(((calculatePositionSize(loadScannerExecutionSettings().riskPercent, walletBalance || 10000, 1, card.entryPrice, card.stopLoss).positionValue) / (walletBalance || 10000)) * 100).toFixed(1)}% of Bal)
             </div>
           </div>
         </div>
@@ -1158,11 +1156,6 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
         );
       })()}
 
-      {toast && (
-        <div className="fixed top-4 left-1/2 z-[9999] -translate-x-1/2 rounded-lg bg-slate-800 border border-slate-700 px-4 py-2 text-xs text-slate-200 shadow-xl">
-          {toast}
-        </div>
-      )}
     </div>
   );
 }

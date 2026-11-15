@@ -6,11 +6,12 @@ const TICKER_API = "https://api.binance.com/api/v3/ticker/24hr";
 export async function fetchCandles(
   symbol: string,
   limit = 200,
-  interval: Timeframe = "1h"
+  interval: Timeframe = "1h",
+  signal?: AbortSignal
 ): Promise<Candle[]> {
   const binanceInterval = interval === "1W" ? "1w" : interval;
   const url = `${BINANCE_API}?symbol=${symbol}&interval=${binanceInterval}&limit=${limit}`;
-  const res = await fetch(url);
+  const res = await fetch(url, { signal });
   if (!res.ok) {
     throw new Error(`Failed to fetch data for ${symbol} (${res.status})`);
   }

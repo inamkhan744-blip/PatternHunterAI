@@ -30,6 +30,9 @@ interface Props {
   loading?: boolean;
   chartType?: "candles" | "line";
   showSMC?: boolean;
+  entryPrice?: number | null;
+  slPrice?: number | null;
+  tpPrice?: number | null;
   fomoLocked?: boolean;
   fomoRemainingSeconds?: number;
   showGridLines?: boolean;
@@ -63,6 +66,9 @@ export default function CandlestickChart({
   loading = false,
   chartType = "candles",
   showSMC = true,
+  entryPrice = null,
+  slPrice = null,
+  tpPrice = null,
   fomoLocked = false,
   fomoRemainingSeconds = 0,
 }: Props) {
@@ -75,6 +81,7 @@ export default function CandlestickChart({
   const lineChartSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const lineSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const extraLineSeriesRef = useRef<ISeriesApi<"Line">[]>([]);
+  const aiPriceLinesRef = useRef<unknown[]>([]);
   const volumeSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const ma7SeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const ma25SeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
@@ -972,6 +979,30 @@ export default function CandlestickChart({
     });
     requestAnimationFrame(drawSMCOverlay);
   };
+
+  useEffect(() => {
+    const series = candleSeriesRef.current;
+    if (!series) return;
+    for (const line of aiPriceLinesRef.current) {
+      try { series.removePriceLine(line as never); } catch { /* ignore */ }
+    }
+    aiPriceLinesRef.current = [];
+    const addLine = (price: number | null, color: string, title: string) => {
+      if (price === null || !Number.isFinite(price)) return;
+      const line = series.createPriceLine({
+        price,
+        color,
+        lineWidth: 2,
+        lineStyle: LineStyle.Dashed,
+        axisLabelVisible: true,
+        title,
+      });
+      aiPriceLinesRef.current.push(line as unknown);
+    };
+    addLine(entryPrice, "#3b82f6", "Entry");
+    addLine(slPrice, "#ef4444", "SL");
+    addLine(tpPrice, "#22c55e", "TP");
+  }, [entryPrice, slPrice, tpPrice]);
 
   return (
     <div className="relative w-full h-full min-h-[500px] lg:min-h-[60vh] flex flex-col">

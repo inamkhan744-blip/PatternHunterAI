@@ -80,9 +80,9 @@ export default function PatternPanel({
         <div className="w-16 h-16 rounded-full bg-slate-800 flex items-center justify-center mb-4">
           <Sparkles className="w-7 h-7 text-slate-500" />
         </div>
-        <p className="text-slate-400 font-medium">Scanning for patterns…</p>
+        <p className="text-slate-400 font-medium">No high-probability patterns found.</p>
         <p className="text-sm text-slate-500 mt-1">
-          Analyzing the last 50 candles for classic chart patterns including Head & Shoulders, Flags, Triangles, Wedges, and more.
+          The market is currently in a consolidation or low-volatility phase.
         </p>
       </div>
     );

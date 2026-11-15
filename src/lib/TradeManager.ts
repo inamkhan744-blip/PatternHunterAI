@@ -202,6 +202,20 @@ export class TradeManager {
   }
 
   /** Flushes any queued writes immediately (e.g. after regaining connectivity). */
+  public resetAll(): void {
+    this.activeTrades = [];
+    this.tradeHistory = [];
+    if (typeof localStorage !== "undefined") {
+      try {
+        localStorage.removeItem(STORAGE_KEY_ACTIVE_TRADES);
+        localStorage.removeItem(STORAGE_KEY_TRADE_HISTORY);
+      } catch {
+        // ignore
+      }
+    }
+    this.saveState();
+  }
+
   public async requestSyncNow(): Promise<void> {
     await this.flushSyncQueue();
     await this.fetchAndMergeSupabaseTrades();

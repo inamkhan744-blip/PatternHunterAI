@@ -6,6 +6,7 @@ import { formatPrice } from "../lib/patterns";
 import { supabase } from "../lib/supabase";
 import { useAuth } from "../lib/auth";
 import { autoTradeEngine } from "../lib/BinanceAutoTrade";
+import { tradeManager } from "../lib/TradeManager";
 import { generateTaxReportPDF } from "../lib/TaxExportService";
 import { paperTradingEngine } from "../lib/PaperTrading";
 import PnLCalendar from "./PnLCalendar";
@@ -22,7 +23,11 @@ interface HoldingWithPrice extends PortfolioHolding {
   pnlPercent: number;
 }
 
-export default function Portfolio() {
+interface Props {
+  onBalanceChange?: (balance: number) => void;
+}
+
+export default function Portfolio({ onBalanceChange }: Props) {
   const { user } = useAuth();
   const [holdings, setHoldings] = useState<PortfolioHolding[]>([]);
   const [loading, setLoading] = useState(true);
@@ -339,7 +344,11 @@ export default function Portfolio() {
             </button>
           )}
           <button
-            onClick={() => paperTradingEngine.resetAccount(10000)}
+            onClick={() => {
+              paperTradingEngine.resetAccount(10000);
+              tradeManager.resetAll();
+              onBalanceChange?.(10000);
+            }}
             className="flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-sm font-medium transition-colors"
           >
             <Wallet className="w-4 h-4" />

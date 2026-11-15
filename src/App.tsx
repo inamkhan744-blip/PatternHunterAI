@@ -236,6 +236,13 @@ export default function App() {
   const [walletBalance, setWalletBalance] = useState<number>(() =>
     isLiveTradingConfigured() ? 0 : paperTradingEngine.getAccount().balance
   );
+  const openTradeCount = tradeManager.getActiveTrades().length;
+  // Keep the header balance in sync with the paper engine on open/close.
+  useEffect(() => {
+    if (!isLiveTradingConfigured()) {
+      setWalletBalance(paperTradingEngine.getAccount().balance);
+    }
+  }, [openTradeCount]);
   const [isOffline, setIsOffline] = useState<boolean>(() => (typeof navigator !== "undefined" ? !navigator.onLine : false));
   const prevUserRef = useRef(user);
   useEffect(() => {
@@ -915,6 +922,7 @@ export default function App() {
             mode: "PAPER",
             customId: pResult.trade.id,
           });
+          setWalletBalance(paperTradingEngine.getAccount().balance);
           pushNotificationService.notifyTradeExecution({
             symbol: pResult.trade.symbol,
             direction: pResult.trade.direction,
@@ -1212,6 +1220,7 @@ export default function App() {
               customId: pResult.trade.id,
               atrAtEntry: candidate.atr,
             });
+            setWalletBalance(paperTradingEngine.getAccount().balance);
             pushNotificationService
               .notifyTradeExecution({
                 symbol: pResult.trade.symbol,
@@ -3065,7 +3074,7 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
 
           {activeTab === "portfolio" && (
             <div className="space-y-6">
-              <Portfolio />
+              <Portfolio onBalanceChange={setWalletBalance} />
             </div>
           )}
         </main>

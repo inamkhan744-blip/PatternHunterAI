@@ -10,6 +10,7 @@ interface Props {
   onConfirm: () => void | Promise<{ success: boolean; error?: string } | void>;
   cardData: SignalCard;
   settings: ScannerExecutionSettings;
+  onOpenScannerSettings?: () => void;
 }
 
 const DEFAULT_BALANCE = 1000;
@@ -21,7 +22,7 @@ function formatPrice(value: number): string {
   return value.toFixed(6);
 }
 
-export default function TradeConfirmModal({ isOpen, onClose, onConfirm, cardData, settings }: Props) {
+export default function TradeConfirmModal({ isOpen, onClose, onConfirm, cardData, settings, onOpenScannerSettings }: Props) {
   const { balance: availableBalance } = useWalletBalance();
   const [executionError, setExecutionError] = useState<string | null>(null);
   const [orderType, setOrderType] = useState<"MARKET" | "LIMIT" | "STOP_MARKET">("MARKET");
@@ -167,8 +168,16 @@ export default function TradeConfirmModal({ isOpen, onClose, onConfirm, cardData
             Cancel
           </button>
           {executionError && (
-            <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300">
-              {executionError}
+            <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300 space-y-2">
+              <div>{executionError}</div>
+              {executionError.includes("Scanner Limit Reached") && onOpenScannerSettings && (
+                <button
+                  onClick={onOpenScannerSettings}
+                  className="text-cyan-400 underline hover:text-cyan-300"
+                >
+                  Open Scanner Trade Settings
+                </button>
+              )}
             </div>
           )}
 

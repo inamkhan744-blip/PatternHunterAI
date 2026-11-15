@@ -1235,6 +1235,7 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
           onConfirm={handleConfirmTrade}
           cardData={confirmCard}
           settings={loadScannerExecutionSettings()}
+          onOpenScannerSettings={() => setTradeSettingsOpen(true)}
         />
       )}
 

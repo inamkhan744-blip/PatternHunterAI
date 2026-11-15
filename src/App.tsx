@@ -2005,6 +2005,17 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
           return { success: false, error: "Price has already hit Stop Loss. Trade cancelled." };
         }
       }
+      // Independent scanner open-trade limit (not shared with Auto-Pilot).
+      const scannerOpenCount = (tradeManager.getActiveTrades() || []).filter(
+        (t) => t.source === "MANUAL"
+      ).length;
+      if (scannerOpenCount >= settings.maxOpenScannerTrades) {
+        return {
+          success: false,
+          error: `Scanner Limit Reached (${scannerOpenCount}/${settings.maxOpenScannerTrades}). Please close a position or increase the limit in Scanner Trade Settings.`,
+        };
+      }
+
       const result = await autoTradeEngine.executeTrade({
         symbol: card.coin.binanceSymbol,
         entryPrice: card.entryPrice,

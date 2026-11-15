@@ -385,6 +385,9 @@ export default function ActivePositions({ currentSymbol, currentPrice }: Props) 
                           </span>
                         </div>
                       </div>
+                      <div className="text-[10px] text-slate-500 font-mono">
+                        Trail: {trade.trailingStage || "INITIAL"}
+                      </div>
 
                       <button
                         onClick={() => handleCloseTrade(trade)}

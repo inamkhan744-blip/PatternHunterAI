@@ -137,8 +137,28 @@ export class TradeManager {
   private onlineHandlerAttached = false;
 
   constructor() {
+    this.clearLegacyTradeCache();
     this.loadState();
     this.loadQueue();
+  }
+
+  /** One-time cleanup of legacy trade caches that may contain paper trades
+   *  mislabelled as live. */
+  private clearLegacyTradeCache(): void {
+    if (typeof localStorage === "undefined") return;
+    const legacyKeys = ["fortress_trades"];
+    for (const key of legacyKeys) {
+      const raw = localStorage.getItem(key);
+      if (!raw) continue;
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.some((t) => t?.is_paper !== false)) {
+          localStorage.removeItem(key);
+        }
+      } catch {
+        localStorage.removeItem(key);
+      }
+    }
   }
 
   // ---------------------------------------------------------------- state I/O

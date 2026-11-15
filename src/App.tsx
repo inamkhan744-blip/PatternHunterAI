@@ -88,7 +88,6 @@ import {
 } from "./lib/SystemSettings";
 import LeaderboardModal from "./components/LeaderboardModal";
 import OrderBook from "./components/OrderBook";
-import PnLCalendar from "./components/PnLCalendar";
 import GridBotUI from "./components/GridBotUI";
 import TradingJournal from "./components/TradingJournal";
 import DCABotUI from "./components/DCABotUI";
@@ -3066,9 +3065,6 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
           {activeTab === "portfolio" && (
             <div className="space-y-6">
               <Portfolio />
-              <div className="max-w-7xl mx-auto px-4 sm:px-6">
-                <PnLCalendar />
-              </div>
             </div>
           )}
         </main>

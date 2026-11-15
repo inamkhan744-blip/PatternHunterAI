@@ -2018,7 +2018,7 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
     <ToastProvider>
       <WalletBalanceProvider initialBalance={walletBalance}>
         <div className="min-h-screen bg-slate-950 text-white flex flex-col lg:flex-row pb-16 lg:pb-0">
-          <div className="lg:hidden fixed top-2 right-2 z-[60] rounded-lg bg-slate-900/90 border border-slate-700 px-2 py-1 text-[10px] font-mono text-cyan-300 shadow">
+          <div className="lg:hidden w-full bg-slate-900/90 border-b border-slate-700 px-3 py-1 text-[10px] font-mono text-cyan-300">
             {isLiveTradingConfigured() ? "Live" : "Paper"} Bal: ${walletBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
           </div>
       {/* Auto-Pilot save failure toast (the toggle has already been reverted) */}

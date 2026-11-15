@@ -58,6 +58,11 @@ export class PaperTradingEngine {
 
   constructor() {
     this.account = this.loadAccount();
+    // One-time cleanup of impossible ghost trades/margins from prior versions.
+    if (typeof localStorage !== "undefined" && localStorage.getItem("fortress_paper_reset_v2") !== "done") {
+      this.resetAccount(10000);
+      localStorage.setItem("fortress_paper_reset_v2", "done");
+    }
   }
 
   private loadAccount(): PaperAccount {
@@ -210,6 +215,9 @@ export class PaperTradingEngine {
       status: "OPEN",
     };
 
+    // Deduct the committed margin from the available balance immediately.
+    this.account.balance = Number((this.account.balance - sizing.marginRequired).toFixed(2));
+
     this.account.trades.unshift(trade);
     this.saveAccount();
 
@@ -293,7 +301,7 @@ export class PaperTradingEngine {
     trade.fees = fees;
     trade.realizedPnl = realizedPnl;
 
-    this.account.balance = Number((this.account.balance + realizedPnl).toFixed(2));
+    this.account.balance = Number((this.account.balance + trade.marginRequired + realizedPnl).toFixed(2));
     this.account.realizedPnlTotal = Number((this.account.realizedPnlTotal + realizedPnl).toFixed(2));
 
     if (realizedPnl > 0) {

@@ -20,6 +20,7 @@ import {
   ClosedTrade,
   TradeStats,
 } from "../lib/TradeManager";
+import { useWalletBalance } from "../lib/WalletBalanceContext";
 import { formatPrice } from "../lib/patterns";
 import { isLiveTradingConfigured } from "../lib/CredentialVault";
 
@@ -30,18 +31,54 @@ interface Props {
 
 export default function ActivePositions({ currentSymbol, currentPrice }: Props) {
   const [subTab, setSubTab] = useState<"active" | "history">("active");
+  const [modeFilter, setModeFilter] = useState<"all" | "live" | "paper">("all");
   const [activeTrades, setActiveTrades] = useState<ActiveTrade[]>(() => tradeManager.getActiveTrades());
   const [tradeHistory, setTradeHistory] = useState<ClosedTrade[]>(() => tradeManager.getTradeHistory());
-  const [stats, setStats] = useState<TradeStats>(() => tradeManager.getStats());
-
   // Real-money mode requires server-side encrypted credentials to exist.
   const hasValidBinanceKeys = useMemo(() => isLiveTradingConfigured(), []);
+  const { balance, setBalance } = useWalletBalance();
+
+  const filteredActiveTrades = useMemo(() => {
+    if (modeFilter === "all") return activeTrades;
+    return activeTrades.filter((t) =>
+      modeFilter === "live" ? t.mode === "REAL" : t.mode === "PAPER"
+    );
+  }, [activeTrades, modeFilter]);
+
+  const filteredTradeHistory = useMemo(() => {
+    if (modeFilter === "all") return tradeHistory;
+    return tradeHistory.filter((t) =>
+      modeFilter === "live" ? t.mode === "REAL" : t.mode === "PAPER"
+    );
+  }, [tradeHistory, modeFilter]);
+
+  const filteredStats = useMemo(() => {
+    const total = filteredTradeHistory.length;
+    let wins = 0;
+    let losses = 0;
+    let totalPnl = 0;
+    const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    let pnl30d = 0;
+    for (const t of filteredTradeHistory) {
+      totalPnl += t.realizedPnl;
+      if (t.realizedPnl > 0) wins++;
+      else if (t.realizedPnl < 0) losses++;
+      if (t.closeTime >= thirtyDaysAgo) pnl30d += t.realizedPnl;
+    }
+    return {
+      totalTrades: total,
+      wins,
+      losses,
+      winRate: total > 0 ? (wins / total) * 100 : 0,
+      totalPnl,
+      pnl30d,
+    } as TradeStats & { pnl30d: number };
+  }, [filteredTradeHistory]);
 
   useEffect(() => {
     const sync = () => {
       setActiveTrades(tradeManager.getActiveTrades());
       setTradeHistory(tradeManager.getTradeHistory());
-      setStats(tradeManager.getStats());
     };
 
     const unsubscribe = tradeManager.subscribe(sync);
@@ -79,11 +116,13 @@ export default function ActivePositions({ currentSymbol, currentPrice }: Props) 
     );
     if (!closed) {
       setCloseError(error || "Could not close the position.");
+    } else {
+      setBalance(balance + (closed.realizedPnl ?? 0));
     }
   };
 
   const handleCloseAll = () => {
-    if (activeTrades.length === 0) return;
+    if (filteredActiveTrades.length === 0) return;
     setCloseAllConfirm(true);
   };
 
@@ -138,7 +177,7 @@ export default function ActivePositions({ currentSymbol, currentPrice }: Props) 
             }`}
           >
             <Layers className="w-4 h-4" />
-            Active Positions ({activeTrades.length})
+            Active Positions ({filteredActiveTrades.length})
           </button>
           <button
             onClick={() => setSubTab("history")}
@@ -149,9 +188,23 @@ export default function ActivePositions({ currentSymbol, currentPrice }: Props) 
             }`}
           >
             <History className="w-4 h-4" />
-            Trade History ({tradeHistory.length})
+            Trade History ({filteredTradeHistory.length})
           </button>
         </div>
+      </div>
+
+      <div className="flex items-center gap-2 font-mono">
+        {(["all", "live", "paper"] as const).map((m) => (
+          <button
+            key={m}
+            onClick={() => setModeFilter(m)}
+            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition ${
+              modeFilter === m ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40" : "text-slate-400 hover:text-white"
+            }`}
+          >
+            {m === "all" ? "All" : m === "live" ? "Live" : "Paper"}
+          </button>
+        ))}
       </div>
 
       {/* Institutional Performance Stats Cards */}
@@ -161,10 +214,10 @@ export default function ActivePositions({ currentSymbol, currentPrice }: Props) 
             Total Closed Trades
           </span>
           <span className="text-2xl font-black text-white mt-1 block">
-            {stats.totalTrades}
+            {filteredStats.totalTrades}
           </span>
           <span className="text-[10px] text-slate-500">
-            {activeTrades.length} currently open
+            {filteredActiveTrades.length} currently open
           </span>
         </div>
 
@@ -172,11 +225,11 @@ export default function ActivePositions({ currentSymbol, currentPrice }: Props) 
           <span className="text-[11px] text-slate-400 block uppercase font-sans">
             Win Rate
           </span>
-          <span className={`text-2xl font-black mt-1 block ${stats.winRate >= 50 ? "text-[#00ff66]" : "text-amber-400"}`}>
-            {stats.winRate.toFixed(1)}%
+          <span className={`text-2xl font-black mt-1 block $            {filteredStats.winRate >= 50 ? "text-[#00ff66]" : "text-amber-400"}`}>
+            {filteredStats.winRate.toFixed(1)}%
           </span>
           <span className="text-[10px] text-slate-500">
-            {stats.wins}W / {stats.losses}L
+            {filteredStats.wins}W / {filteredStats.losses}L
           </span>
         </div>
 
@@ -186,10 +239,10 @@ export default function ActivePositions({ currentSymbol, currentPrice }: Props) 
           </span>
           <span
             className={`text-2xl font-black mt-1 block ${
-              stats.totalPnl >= 0 ? "text-[#00ff66]" : "text-[#ff3344]"
+              filteredStats.totalPnl >= 0 ? "text-[#00ff66]" : "text-[#ff3344]"
             }`}
           >
-            {stats.totalPnl >= 0 ? "+" : ""}${stats.totalPnl.toFixed(2)}
+            {filteredStats.totalPnl >= 0 ? "+" : ""}${filteredStats.totalPnl.toFixed(2)}
           </span>
           <span className="text-[10px] text-slate-500">
             Lifetime realized returns
@@ -227,18 +280,18 @@ export default function ActivePositions({ currentSymbol, currentPrice }: Props) 
               <Zap className="w-4 h-4 text-amber-400" />
               Live Active Positions
             </h2>
-            {activeTrades.length > 0 && (
+            {filteredActiveTrades.length > 0 && (
               <button
                 onClick={handleCloseAll}
                 className="px-3 py-1.5 rounded-lg bg-red-600/20 hover:bg-red-600/40 border border-red-500/50 text-[#ff3344] text-xs font-bold transition flex items-center gap-1.5 font-mono"
               >
                 <XCircle className="w-3.5 h-3.5" />
-                Close All ({activeTrades.length})
+                Close All ({filteredActiveTrades.length})
               </button>
             )}
           </div>
 
-          {activeTrades.length === 0 ? (
+          {filteredActiveTrades.length === 0 ? (
             <div className="p-12 rounded-2xl bg-slate-900/50 border border-slate-800 text-center space-y-3">
               <div className="w-14 h-14 mx-auto rounded-full bg-slate-800/80 flex items-center justify-center text-slate-500">
                 <Layers className="w-6 h-6" />
@@ -250,21 +303,22 @@ export default function ActivePositions({ currentSymbol, currentPrice }: Props) 
             </div>
           ) : (
             <div className="grid grid-cols-1 gap-3">
-              {activeTrades.map((trade) => {
+              {filteredActiveTrades.map((trade) => {
                 const isProfitable = trade.unrealizedPnl >= 0;
                 const isTrulyReal = trade.mode === "REAL" && hasValidBinanceKeys;
 
                 // Pre-compute the risk/reward figures shown in the metrics grid.
                 const isLong = trade.direction === "LONG";
+                const live = trade.currentPrice || trade.entryPrice;
                 const riskDollars = Math.abs(
                   isLong
-                    ? (trade.entryPrice - trade.stopLossPrice) * trade.quantity
-                    : (trade.stopLossPrice - trade.entryPrice) * trade.quantity
+                    ? (live - trade.stopLossPrice) * trade.quantity
+                    : (trade.stopLossPrice - live) * trade.quantity
                 );
                 const rewardDollars = Math.abs(
                   isLong
-                    ? (trade.takeProfitPrice - trade.entryPrice) * trade.quantity
-                    : (trade.entryPrice - trade.takeProfitPrice) * trade.quantity
+                    ? (trade.takeProfitPrice - live) * trade.quantity
+                    : (live - trade.takeProfitPrice) * trade.quantity
                 );
                 const riskRewardRatio = riskDollars > 0 ? rewardDollars / riskDollars : 0;
                 const marginUsed =
@@ -464,11 +518,11 @@ export default function ActivePositions({ currentSymbol, currentPrice }: Props) 
               Closed Trade Ledger
             </h2>
             <span className="text-xs text-slate-400 font-mono">
-              Total Recorded: {tradeHistory.length}
+              Total Recorded: {filteredTradeHistory.length}
             </span>
           </div>
 
-          {tradeHistory.length === 0 ? (
+          {filteredTradeHistory.length === 0 ? (
             <div className="p-12 rounded-2xl bg-slate-900/50 border border-slate-800 text-center space-y-3">
               <div className="w-14 h-14 mx-auto rounded-full bg-slate-800/80 flex items-center justify-center text-slate-500">
                 <History className="w-6 h-6" />

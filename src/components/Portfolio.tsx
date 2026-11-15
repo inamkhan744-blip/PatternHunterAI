@@ -8,6 +8,7 @@ import { useAuth } from "../lib/auth";
 import { autoTradeEngine } from "../lib/BinanceAutoTrade";
 import { generateTaxReportPDF } from "../lib/TaxExportService";
 import { paperTradingEngine } from "../lib/PaperTrading";
+import PnLCalendar from "./PnLCalendar";
 import type { PortfolioHolding } from "../types";
 
 const ALL_COINS = [...COINS, ...PRO_COINS];
@@ -337,6 +338,13 @@ export default function Portfolio() {
               <span className="hidden sm:inline">Refresh Prices</span>
             </button>
           )}
+          <button
+            onClick={() => paperTradingEngine.resetAccount(10000)}
+            className="flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-sm font-medium transition-colors"
+          >
+            <Wallet className="w-4 h-4" />
+            <span className="hidden sm:inline">Reset Paper Balance</span>
+          </button>
         </div>
       </div>
 
@@ -594,6 +602,9 @@ export default function Portfolio() {
           })}
         </div>
       )}
+      <div className="mt-6">
+        <PnLCalendar />
+      </div>
     </div>
   );
 }

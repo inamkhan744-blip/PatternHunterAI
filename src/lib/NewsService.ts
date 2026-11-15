@@ -108,34 +108,47 @@ function isNegative(title: string, description: string): boolean {
 }
 
 export async function fetchLatestNews(): Promise<NewsEvent[]> {
-  const response = await fetch(NEWS_URL);
-  if (!response.ok) {
-    throw new Error(`News request failed (${response.status})`);
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const response = await fetch(NEWS_URL);
+      if (!response.ok) {
+        if (response.status === 429 && attempt < 2) {
+          await new Promise((resolve) => setTimeout(resolve, 1000 * Math.pow(2, attempt)));
+          continue;
+        }
+        throw new Error(`News request failed (${response.status})`);
+      }
+      const data = (await response.json()) as {
+        articles?: Array<{
+          title: string;
+          description?: string;
+          link: string;
+          pubDate: string;
+          source?: string;
+        }>;
+      };
+      return (data.articles || [])
+        .map((article, index) => {
+          const text = `${article.title} ${article.description || ""}`;
+          return {
+            id: article.link || String(index),
+            title: article.title,
+            url: article.link,
+            source: article.source,
+            symbols: extractSymbols(text),
+            publishedAt: article.pubDate,
+            negative: isNegative(article.title, article.description || ""),
+          };
+        })
+        .filter((event) => event.symbols.length > 0)
+        .slice(0, 20);
+    } catch (err) {
+      lastError = err;
+      if (attempt < 2) {
+        await new Promise((resolve) => setTimeout(resolve, 1000 * Math.pow(2, attempt)));
+      }
+    }
   }
-
-    const data = (await response.json()) as {
-      articles?: Array<{
-        title: string;
-        description?: string;
-        link: string;
-        pubDate: string;
-        source?: string;
-      }>;
-    };
-
-    return (data.articles || [])
-      .map((article, index) => {
-        const text = `${article.title} ${article.description || ""}`;
-        return {
-          id: article.link || String(index),
-          title: article.title,
-          url: article.link,
-          source: article.source,
-          symbols: extractSymbols(text),
-          publishedAt: article.pubDate,
-          negative: isNegative(article.title, article.description || ""),
-        };
-      })
-      .filter((event) => event.symbols.length > 0)
-      .slice(0, 20);
+  throw lastError instanceof Error ? lastError : new Error("News request failed");
 }

@@ -1966,7 +1966,7 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
       {autoPilotError && (
         <div
           role="alert"
-          className="fixed bottom-20 lg:bottom-6 right-4 z-[70] max-w-sm px-4 py-3 rounded-xl bg-red-950 border border-red-500/70 text-red-200 text-xs font-semibold shadow-2xl flex items-start gap-2"
+          className="fixed top-4 right-4 z-[9999] max-w-sm px-4 py-3 rounded-xl bg-red-950 border border-red-500/70 text-red-200 text-xs font-semibold shadow-2xl flex items-start gap-2"
         >
           <span className="flex-1">{autoPilotError}</span>
           <button

@@ -1151,7 +1151,7 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
       })()}
 
       {toast && (
-        <div className="fixed bottom-4 left-1/2 z-50 -translate-x-1/2 rounded-lg bg-slate-800 border border-slate-700 px-4 py-2 text-xs text-slate-200 shadow-xl">
+        <div className="fixed top-4 left-1/2 z-[9999] -translate-x-1/2 rounded-lg bg-slate-800 border border-slate-700 px-4 py-2 text-xs text-slate-200 shadow-xl">
           {toast}
         </div>
       )}

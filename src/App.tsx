@@ -208,10 +208,49 @@ function formatVolume(vol: number): string {
 export default function App() {
   const { user, loading: authLoading } = useAuth();
 
-  const [activeTab, setActiveTab] = useState<AppTab>("chart");
+  const [activeTab, setActiveTab] = useState<AppTab>(() => {
+    const saved = localStorage.getItem("app_active_tab");
+    return (saved as AppTab) || "chart";
+  });
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
-  const [selectedCoin, setSelectedCoin] = useState<Coin>(COINS[0]);
-  const [timeframe, setTimeframe] = useState<Timeframe>("1h");
+  const [selectedCoin, setSelectedCoin] = useState<Coin>(() => {
+    try {
+      const saved = localStorage.getItem("app_selected_coin");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        const found = [...COINS, ...PRO_COINS].find(
+          (c) => c.binanceSymbol === parsed?.binanceSymbol
+        );
+        if (found) return found;
+      }
+    } catch {
+      /* ignore */
+    }
+    return COINS[0];
+  });
+  const [timeframe, setTimeframe] = useState<Timeframe>(() => {
+    const saved = localStorage.getItem("app_timeframe");
+    return (saved as Timeframe) || "1h";
+  });
+  const prevUserRef = useRef(user);
+  useEffect(() => {
+    localStorage.setItem("app_active_tab", activeTab);
+  }, [activeTab]);
+  useEffect(() => {
+    localStorage.setItem("app_selected_coin", JSON.stringify(selectedCoin));
+  }, [selectedCoin]);
+  useEffect(() => {
+    localStorage.setItem("app_timeframe", timeframe);
+  }, [timeframe]);
+  useEffect(() => {
+    if (prevUserRef.current && !user) {
+      localStorage.removeItem("app_active_tab");
+      localStorage.removeItem("app_selected_coin");
+      localStorage.removeItem("app_timeframe");
+    }
+    prevUserRef.current = user;
+  }, [user]);
+
   const [candles, setCandles] = useState<Candle[]>([]);
   const [pattern, setPattern] = useState<DetectedPattern | null>(null);
   const [allPatterns, setAllPatterns] = useState<PatternWithConfidence[]>([]);

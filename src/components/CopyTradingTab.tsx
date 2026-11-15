@@ -275,6 +275,7 @@ export default function CopyTradingTab() {
         marketType: "Futures",
         leverage: Math.min(pos.leverage, maxLeverage),
         riskPercent: 1.5,
+        currentPrice: pos.symbol === "BTCUSDT" ? 68000 : pos.symbol === "ETHUSDT" ? 3500 : 150,
       });
     }
 

@@ -742,12 +742,14 @@ export class TradeManager {
       );
 
       let reason: "TP" | "SL" | null = null;
-      if (trade.direction === "LONG") {
-        if (currentPrice <= currentSl) reason = "SL";
-        else if (currentPrice >= trade.takeProfitPrice) reason = "TP";
-      } else {
-        if (currentPrice >= currentSl) reason = "SL";
-        else if (currentPrice <= trade.takeProfitPrice) reason = "TP";
+      if (Date.now() - trade.openTime >= 5000) {
+        if (trade.direction === "LONG") {
+          if (currentPrice <= currentSl) reason = "SL";
+          else if (currentPrice >= trade.takeProfitPrice) reason = "TP";
+        } else {
+          if (currentPrice >= currentSl) reason = "SL";
+          else if (currentPrice <= trade.takeProfitPrice) reason = "TP";
+        }
       }
 
       const next: ActiveTrade = {
@@ -791,6 +793,10 @@ export class TradeManager {
   ): ClosedTrade | null {
     const trade = this.activeTrades.find((t) => t.id === tradeId);
     if (!trade) return null;
+
+    if ((exitReason === "TP" || exitReason === "SL") && Date.now() - trade.openTime < 5000) {
+      return null;
+    }
 
     const candidate = exitPrice ?? trade.currentPrice;
     const closePrice = Number.isFinite(candidate) && candidate > 0 ? candidate : trade.currentPrice;

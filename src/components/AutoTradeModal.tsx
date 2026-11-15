@@ -339,6 +339,7 @@ export default function AutoTradeModal({
           marketType: config.marketType,
           leverage: config.leverage,
           riskPercent: config.riskPercent,
+          currentPrice,
         });
 
         if (pResult.success && pResult.trade) {

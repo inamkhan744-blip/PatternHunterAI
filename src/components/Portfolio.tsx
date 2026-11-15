@@ -188,6 +188,7 @@ export default function Portfolio() {
           entryPrice: plan.price,
           atrValue: plan.price * 0.02,
           direction: plan.action === "BUY" ? "LONG" : "SHORT",
+          currentPrice: plan.price,
         });
         executedCount++;
       }

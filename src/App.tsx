@@ -232,6 +232,9 @@ export default function App() {
     const saved = localStorage.getItem("app_timeframe");
     return (saved as Timeframe) || "1h";
   });
+  const [walletBalance, setWalletBalance] = useState<number>(() =>
+    isLiveTradingConfigured() ? 0 : paperTradingEngine.getAccount().balance
+  );
   const prevUserRef = useRef(user);
   useEffect(() => {
     localStorage.setItem("app_active_tab", activeTab);
@@ -250,6 +253,16 @@ export default function App() {
     }
     prevUserRef.current = user;
   }, [user]);
+
+  useEffect(() => {
+    if (isLiveTradingConfigured()) {
+      void autoTradeEngine.fetchAccountBalance().then((res) => {
+        if (res.ok) setWalletBalance(res.freeBalance || res.usdtBalance);
+      });
+    } else {
+      setWalletBalance(paperTradingEngine.getAccount().balance);
+    }
+  }, []);
 
   const [candles, setCandles] = useState<Candle[]>([]);
   const [pattern, setPattern] = useState<DetectedPattern | null>(null);
@@ -2058,6 +2071,17 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
               PatternHunter <span className="text-cyan-400">AI</span>
             </h1>
             <span className="text-[10px] text-slate-500 leading-none mt-1">Fortress Hedge Fund</span>
+          </div>
+        </div>
+
+        {/* Wallet balance widget */}
+        <div className="px-5 py-3 border-b border-slate-800 text-xs">
+          <div className="text-slate-500 uppercase tracking-wider text-[10px]">Wallet Balance</div>
+          <div className="font-mono font-bold text-cyan-300 mt-1">
+            {isLiveTradingConfigured() ? "Live" : "Paper"} Bal: ${walletBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+          </div>
+          <div className="text-[10px] text-slate-500 mt-1">
+            Open positions: {tradeManager.getActiveTrades().length}
           </div>
         </div>
 

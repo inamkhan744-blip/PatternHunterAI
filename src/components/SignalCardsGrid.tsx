@@ -10,7 +10,7 @@ import type { ScannerExecutionSettings } from "./ScannerTradeSettings";
 import TradeConfirmModal from "./TradeConfirmModal";
 import { scanSMC } from "../lib/SMCScanner";
 import { atr, bollingerBands } from "../lib/indicators";
-import { calculateAtrStopLoss } from "../lib/BinanceAutoTrade";
+import { calculateAtrStopLoss, calculatePositionSize } from "../lib/BinanceAutoTrade";
 import { formatPrice } from "../lib/patterns";
 import { COINS, PRO_COINS } from "../constants";
 import type { Coin, Timeframe } from "../types";
@@ -801,6 +801,14 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
           <div className="rounded-lg bg-slate-950/70 border border-slate-800 p-2">
             <div className="text-slate-500">Market Cap</div>
             <div className="font-mono font-bold text-slate-200">{formatCompact(card.marketCap)}</div>
+          </div>
+          <div className="col-span-2 rounded-lg bg-slate-950/70 border border-slate-800 p-2">
+            <div className="text-slate-500">Size</div>
+            <div className="font-mono font-bold text-slate-200">
+              ${calculatePositionSize(1.5, 10000, 1, card.entryPrice, card.stopLoss).positionValue.toFixed(0)}
+              {" "}
+              ({((calculatePositionSize(1.5, 10000, 1, card.entryPrice, card.stopLoss).positionValue / 10000) * 100).toFixed(1)}% of Bal)
+            </div>
           </div>
         </div>
 

@@ -278,6 +278,19 @@ export default function App() {
     };
   }, []);
 
+  // Background polling fallback when tab is hidden.
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (document.visibilityState !== "hidden") return;
+      for (const trade of tradeManager.getActiveTrades()) {
+        void fetchTickerPrice(trade.symbol).then((q) => {
+          if (q?.price) tradeManager.updateLivePrice(trade.symbol, q.price);
+        });
+      }
+    }, 10000);
+    return () => clearInterval(timer);
+  }, []);
+
   const [candles, setCandles] = useState<Candle[]>([]);
   const [pattern, setPattern] = useState<DetectedPattern | null>(null);
   const [allPatterns, setAllPatterns] = useState<PatternWithConfidence[]>([]);
@@ -1242,6 +1255,7 @@ export default function App() {
         new Set([
           ...watchlist.map((item) => item.binance_symbol).filter(Boolean),
           ...AUTO_PILOT_SCAN_UNIVERSE.map((coin) => coin.binanceSymbol),
+          ...PRO_COINS.map((coin) => coin.binanceSymbol),
         ])
       );
 
@@ -1250,7 +1264,9 @@ export default function App() {
         if (tradeManager.hasActivePosition(symbol)) continue;
 
         try {
-          const data = await fetchCandles(symbol, 120, timeframe);
+          const rawData = await fetchCandles(symbol, 120, timeframe);
+          // Only evaluate on fully closed candles.
+          const data = rawData.slice(0, -1);
           if (data.length < 30) continue;
 
           const smcData = scanSMC(data);

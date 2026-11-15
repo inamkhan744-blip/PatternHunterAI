@@ -674,6 +674,12 @@ export default function AutoTradeModal({
                   {dailyTradeCount} of {isAdmin ? "∞" : isPro ? proTradeLimit : FREE_DAILY_MANUAL_TRADE_LIMIT} trades used today
                 </span>
               </div>
+              <div className="flex items-center gap-2">
+                <span className="text-slate-400">Max Open Trades:</span>
+                <span className="font-bold text-white">
+                  {tradeManager.getActiveTrades().length} / {autoTradeEngine.getConfig().maxOpenTrades}
+                </span>
+              </div>
 
               {/* Pro Dropdown for Daily Trade Limit */}
               {isPro || isAdmin ? (

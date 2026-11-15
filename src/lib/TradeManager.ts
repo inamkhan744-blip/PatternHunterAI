@@ -103,7 +103,7 @@ export interface SupabaseTradeRow {
   take_profit_price?: number | null;
   exit_reason?: "MANUAL" | "TP" | "SL" | "KILL_SWITCH" | null;
   source?: "MANUAL" | "AUTO-PILOT";
-  is_paper: boolean;
+  is_paper?: boolean | null;
   created_at: string;
   closed_at?: string | null;
 }
@@ -366,7 +366,9 @@ export class TradeManager {
     for (const row of remoteRows) {
       if (!row || !row.id) continue;
 
-      const mode: TradeMode = row.is_paper ? "PAPER" : "REAL";
+      // Backwards compatibility: rows without an explicit is_paper flag are treated
+      // as paper trades (no real exchange keys were ever used historically).
+      const mode: TradeMode = row.is_paper === false ? "REAL" : "PAPER";
       const marketType: MarketType = row.market_type === "Futures" ? "Futures" : "Spot";
       const direction: TradeDirection = row.direction === "SHORT" ? "SHORT" : "LONG";
       const leverage = Number(row.leverage) > 0 ? Number(row.leverage) : 1;

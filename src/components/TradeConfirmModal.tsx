@@ -24,6 +24,7 @@ function formatPrice(value: number): string {
 export default function TradeConfirmModal({ isOpen, onClose, onConfirm, cardData, settings }: Props) {
   const { balance: availableBalance } = useWalletBalance();
   const [executionError, setExecutionError] = useState<string | null>(null);
+  const [orderType, setOrderType] = useState<"MARKET" | "LIMIT" | "STOP_MARKET">("MARKET");
   if (!isOpen) return null;
 
   const isLong = cardData.direction !== "SHORT";
@@ -68,6 +69,19 @@ export default function TradeConfirmModal({ isOpen, onClose, onConfirm, cardData
           <button onClick={onClose} className="text-slate-400 hover:text-white text-lg leading-none">
             ×
           </button>
+        </div>
+
+        <div className="flex items-center gap-2 text-xs">
+          <span className="text-slate-400">Order Type</span>
+          <select
+            value={orderType}
+            onChange={(e) => setOrderType(e.target.value as "MARKET" | "LIMIT" | "STOP_MARKET")}
+            className="rounded-lg bg-slate-800 border border-slate-700 px-2 py-1 text-slate-200"
+          >
+            <option value="MARKET">Market</option>
+            <option value="LIMIT">Limit</option>
+            <option value="STOP_MARKET">Stop-Market</option>
+          </select>
         </div>
 
         <div className="rounded-lg bg-slate-800/60 border border-slate-700 p-3 text-xs">

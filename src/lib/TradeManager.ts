@@ -84,6 +84,7 @@ export interface TradeStats {
   losses: number;
   winRate: number;
   totalPnl: number;
+  pnl30d?: number;
 }
 
 export interface SupabaseTradeRow {
@@ -1207,7 +1208,11 @@ export class TradeManager {
     }
 
     const diff = direction === "LONG" ? currentPrice - entryPrice : entryPrice - currentPrice;
-    const pnl = Number((diff * quantity).toFixed(2));
+    const grossPnl = diff * quantity;
+    // Deduct estimated taker fees + slippage (0.04% per side).
+    const feeRate = 0.0004;
+    const fees = (entryPrice + currentPrice) * quantity * feeRate;
+    const pnl = Number((grossPnl - fees).toFixed(2));
     const lev = marketType === "Futures" ? Math.max(1, leverage) : 1;
     const pnlPercent = Number((((diff / entryPrice) * 100) * lev).toFixed(2));
     return { pnl, pnlPercent };

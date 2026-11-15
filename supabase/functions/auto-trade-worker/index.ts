@@ -558,6 +558,8 @@ interface OpenTradeRow {
   tp_order_id: string | null;
 }
 
+const TAKER_FEE_RATE = 0.0004;
+
 function signedPnl(
   direction: Direction,
   entryPrice: number,
@@ -565,6 +567,12 @@ function signedPnl(
   quantity: number
 ): number {
   return (exitPrice - entryPrice) * quantity * (direction === "LONG" ? 1 : -1);
+}
+
+function roundTripFees(entryPrice: number, exitPrice: number, quantity: number): number {
+  return Number(
+    ((Math.max(0, entryPrice * quantity) + Math.max(0, exitPrice * quantity)) * TAKER_FEE_RATE).toFixed(2)
+  );
 }
 
 /** Virtual paper equity: starting balance plus every realised paper P&L. */
@@ -580,8 +588,22 @@ async function paperAccountBalance(
     .eq("status", "CLOSED")
     .limit(1000);
 
+  const { data: openRows } = await supabase
+    .from("trades")
+    .select("entry_price, quantity, leverage, market_type")
+    .eq("user_id", userId)
+    .eq("is_paper", true)
+    .eq("status", "OPEN")
+    .limit(200);
+
   const realised = (data ?? []).reduce((sum, row) => sum + Number(row.pnl ?? 0), 0);
-  return PAPER_STARTING_BALANCE + realised;
+  const committedMargin = (openRows ?? []).reduce((sum, row) => {
+    const notional = Number(row.entry_price ?? 0) * Number(row.quantity ?? 0);
+    const leverage = row.market_type === "Futures" ? Math.max(1, Number(row.leverage ?? 1)) : 1;
+    return sum + (notional > 0 ? notional / leverage : 0);
+  }, 0);
+
+  return Number((PAPER_STARTING_BALANCE + realised - committedMargin).toFixed(2));
 }
 
 /** Settles paper positions whose SL/TP has been touched since the last run. */
@@ -625,7 +647,8 @@ async function settlePaperPositions(
     if (!exitReason) continue;
 
     const exitPrice = exitReason === "SL" ? stop : target;
-    const pnl = signedPnl(row.direction, entryPrice, exitPrice, quantity);
+    const fees = roundTripFees(entryPrice, exitPrice, quantity);
+    const pnl = Number((signedPnl(row.direction, entryPrice, exitPrice, quantity) - fees).toFixed(2));
     const leverage = Math.max(1, Number(row.leverage ?? 1));
     const margin = (entryPrice * quantity) / leverage;
     const pnlPercent = margin > 0 ? (pnl / margin) * 100 : 0;
@@ -638,6 +661,7 @@ async function settlePaperPositions(
         exit_reason: exitReason,
         pnl,
         pnl_percent: pnlPercent,
+        fees,
         closed_at: new Date().toISOString(),
         closed_by: "AUTO_PILOT",
         updated_at: new Date().toISOString(),

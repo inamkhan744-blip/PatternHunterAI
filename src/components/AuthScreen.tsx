@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   Activity,
   Mail,
@@ -22,6 +22,20 @@ export default function AuthScreen() {
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      // Drop credentials and pending UI state before the dashboard unmounts.
+      mountedRef.current = false;
+      setEmail("");
+      setPassword("");
+      setError(null);
+      setSuccessMessage(null);
+      setLoading(false);
+    };
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -32,21 +46,23 @@ export default function AuthScreen() {
     try {
       if (mode === "login") {
         const result = await signIn(email.trim(), password);
-        if (result.error) {
+        if (mountedRef.current && result.error) {
           setError(result.error);
         }
       } else {
         const result = await signUp(email.trim(), password);
-        if (result.error) {
+        if (mountedRef.current && result.error) {
           setError(result.error);
-        } else {
+        } else if (mountedRef.current) {
           setSuccessMessage("Account created successfully! Check your inbox if confirmation is required.");
         }
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Authentication request failed.");
+      if (mountedRef.current) {
+        setError(err instanceof Error ? err.message : "Authentication request failed.");
+      }
     } finally {
-      setLoading(false);
+      if (mountedRef.current) setLoading(false);
     }
   };
 
@@ -55,13 +71,15 @@ export default function AuthScreen() {
     setLoading(true);
     try {
       const result = await signInWithGoogle();
-      if (result.error) {
+      if (mountedRef.current && result.error) {
         setError(result.error);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Google Sign-In failed.");
+      if (mountedRef.current) {
+        setError(err instanceof Error ? err.message : "Google Sign-In failed.");
+      }
     } finally {
-      setLoading(false);
+      if (mountedRef.current) setLoading(false);
     }
   };
 

@@ -1,10 +1,9 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import {
   Calendar as CalendarIcon,
   BarChart2,
 } from "lucide-react";
-import { autoTradeEngine, ManagedTrade } from "../lib/BinanceAutoTrade";
-import { paperTradingEngine } from "../lib/PaperTrading";
+import { tradeManager, type ClosedTrade } from "../lib/TradeManager";
 
 interface DayData {
   date: string;
@@ -25,19 +24,22 @@ interface DayData {
 export default function PnLCalendar() {
   const [selectedDay, setSelectedDay] = useState<DayData | null>(null);
   const [dataSource, setDataSource] = useState<"LIVE" | "PAPER">("LIVE");
+  const [history, setHistory] = useState<ClosedTrade[]>(() => tradeManager.getTradeHistory());
 
-  // Load trades from engine or paper engine
-  const closedTrades = useMemo(() => {
-    if (dataSource === "LIVE") {
-      // Live tab: only REAL (is_paper = false) trades.
-      return autoTradeEngine
-        .getAllTrades()
-        .filter((t) => t.status === "CLOSED" && t.executionMode === "REAL");
-    } else {
-      // Paper tab: only PAPER (is_paper = true) trades.
-      return paperTradingEngine.getClosedTrades();
-    }
-  }, [dataSource]);
+  useEffect(() => {
+    setHistory(tradeManager.getTradeHistory());
+    return tradeManager.subscribe(() => setHistory(tradeManager.getTradeHistory()));
+  }, []);
+
+  // The unified TradeManager ledger is the single source for both live and paper
+  // outcomes; the mode flag is the only filter.
+  const closedTrades = useMemo(
+    () =>
+      history.filter((t) =>
+        dataSource === "LIVE" ? t.mode === "REAL" : t.mode === "PAPER"
+      ),
+    [history, dataSource]
+  );
 
   // Aggregate past 30 days
   const { days, totalPnl, winRate, bestDay, worstDay } = useMemo(() => {
@@ -64,22 +66,22 @@ export default function PnLCalendar() {
       dayList.push(dayData);
     }
 
-    // Populate with closed trade PnL
+    // Bucket realized P&L by the day the position actually closed.
     for (const trade of closedTrades) {
-      const tradeTime = trade.openTime || Date.now();
+      const tradeTime = trade.closeTime || trade.openTime || Date.now();
       const dateKey = new Date(tradeTime).toISOString().slice(0, 10);
       const day = dayMap.get(dateKey);
       if (day) {
         const pnl = trade.realizedPnl ?? 0;
         day.tradesCount += 1;
         day.pnl = Number((day.pnl + pnl).toFixed(2));
-        if (pnl >= 0) day.winCount += 1;
+        if (pnl > 0) day.winCount += 1;
         else day.lossCount += 1;
         day.trades.push({
           symbol: trade.symbol,
           pnl,
           direction: trade.direction,
-          exitReason: (trade as ManagedTrade).closePrice ? "EXIT" : undefined,
+          exitReason: trade.exitReason,
         });
       }
     }
@@ -149,7 +151,10 @@ export default function PnLCalendar() {
 
         <div className="flex items-center gap-2 bg-[#090d16] p-1 rounded-xl border border-slate-800">
           <button
-            onClick={() => setDataSource("LIVE")}
+            onClick={() => {
+              setSelectedDay(null);
+              setDataSource("LIVE");
+            }}
             className={`px-3 py-1.5 rounded-lg text-xs font-bold transition ${
               dataSource === "LIVE"
                 ? "bg-cyan-500 text-slate-950 shadow-md"
@@ -159,7 +164,10 @@ export default function PnLCalendar() {
             Live Engine Trades
           </button>
           <button
-            onClick={() => setDataSource("PAPER")}
+            onClick={() => {
+              setSelectedDay(null);
+              setDataSource("PAPER");
+            }}
             className={`px-3 py-1.5 rounded-lg text-xs font-bold transition ${
               dataSource === "PAPER"
                 ? "bg-amber-500 text-slate-950 shadow-md"

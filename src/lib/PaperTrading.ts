@@ -55,6 +55,8 @@ const DEFAULT_PAPER_ACCOUNT: PaperAccount = {
 
 export class PaperTradingEngine {
   private account: PaperAccount;
+  private listeners: Set<() => void> = new Set();
+  private activeUserId: string | null = null;
 
   constructor() {
     this.account = this.loadAccount();
@@ -65,9 +67,15 @@ export class PaperTradingEngine {
     }
   }
 
+  private storageKey(): string {
+    return this.activeUserId
+      ? `${STORAGE_KEY_PAPER_ACCOUNT}_${this.activeUserId}`
+      : STORAGE_KEY_PAPER_ACCOUNT;
+  }
+
   private loadAccount(): PaperAccount {
     try {
-      const stored = localStorage.getItem(STORAGE_KEY_PAPER_ACCOUNT);
+      const stored = localStorage.getItem(this.storageKey());
       if (stored) {
         return { ...DEFAULT_PAPER_ACCOUNT, ...JSON.parse(stored) };
       }
@@ -78,7 +86,38 @@ export class PaperTradingEngine {
   }
 
   private saveAccount(): void {
-    localStorage.setItem(STORAGE_KEY_PAPER_ACCOUNT, JSON.stringify(this.account));
+    try {
+      localStorage.setItem(this.storageKey(), JSON.stringify(this.account));
+    } catch {
+      // Quota / private mode: keep the in-memory ledger authoritative.
+    }
+    this.notify();
+  }
+
+  /**
+   * Scopes the paper ledger to the signed-in user so one browser account can
+   * never inherit another account's virtual balance or open positions.
+   */
+  public setActiveUser(userId: string | null): void {
+    if (this.activeUserId === userId) return;
+    this.activeUserId = userId;
+    this.account = this.loadAccount();
+    this.notify();
+  }
+
+  public subscribe(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  private notify(): void {
+    this.listeners.forEach((listener) => {
+      try {
+        listener();
+      } catch {
+        // ignore listener failures
+      }
+    });
   }
 
   public getAccount(): PaperAccount {
@@ -124,9 +163,22 @@ export class PaperTradingEngine {
     atrStopMultiplier?: number;
     atrRiskRewardRatio?: number;
     currentPrice?: number;
+    /** Exact id/quantity/levels for callers that already sized the trade. */
+    customId?: string;
+    quantity?: number;
+    stopLossPrice?: number;
+    takeProfitPrice?: number;
+    /** Allows TradeManager to reserve for a position it has already validated. */
+    skipSymbolLock?: boolean;
   }): { success: boolean; trade?: PaperTrade; error?: string } {
+    if (params.customId && this.account.trades.some((t) => t.id === params.customId)) {
+      return { success: false, error: "Paper trade already exists in the ledger." };
+    }
+
     // Check if an active open trade already exists for this symbol (Execution Lock)
-    const existingOpen = this.account.trades.find((t) => t.symbol === params.symbol && t.status === "OPEN");
+    const existingOpen = params.skipSymbolLock
+      ? undefined
+      : this.account.trades.find((t) => t.symbol === params.symbol && t.status === "OPEN");
     if (existingOpen) {
       return {
         success: false,
@@ -147,13 +199,21 @@ export class PaperTradingEngine {
     }
 
     // Compute the stop first so the position is sized from risk, not from margin.
-    const { stopLossPrice, takeProfitPrice } = calculateAtrStopLoss(
+    const computedLevels = calculateAtrStopLoss(
       params.entryPrice,
       params.atrValue,
       direction,
       params.atrStopMultiplier,
       params.atrRiskRewardRatio
     );
+    const stopLossPrice =
+      typeof params.stopLossPrice === "number" && params.stopLossPrice > 0
+        ? params.stopLossPrice
+        : computedLevels.stopLossPrice;
+    const takeProfitPrice =
+      typeof params.takeProfitPrice === "number" && params.takeProfitPrice > 0
+        ? params.takeProfitPrice
+        : computedLevels.takeProfitPrice;
 
     // Validate bracket ordering.
     if (direction === "LONG") {
@@ -184,14 +244,22 @@ export class PaperTradingEngine {
       }
     }
 
-    // Check virtual margin
-    const sizing = calculatePositionSize(
-      riskPercent,
-      this.account.balance,
-      leverage,
-      params.entryPrice,
-      stopLossPrice
-    );
+    // Check virtual margin. Callers that already sized the trade pass the exact
+    // quantity so the ledger reserves the same collateral the UI displayed.
+    const sizing =
+      typeof params.quantity === "number" && Number.isFinite(params.quantity) && params.quantity > 0
+        ? {
+            quantity: params.quantity,
+            positionValue: params.entryPrice * params.quantity,
+            marginRequired: (params.entryPrice * params.quantity) / Math.max(1, leverage),
+          }
+        : calculatePositionSize(
+            riskPercent,
+            this.account.balance,
+            leverage,
+            params.entryPrice,
+            stopLossPrice
+          );
     if (sizing.quantity <= 0 || sizing.marginRequired > this.account.balance) {
       return {
         success: false,
@@ -200,7 +268,7 @@ export class PaperTradingEngine {
     }
 
     const trade: PaperTrade = {
-      id: `PAPER-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      id: params.customId || `PAPER-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
       symbol: params.symbol,
       marketType,
       direction,

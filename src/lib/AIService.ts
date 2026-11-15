@@ -115,8 +115,6 @@ const MODEL_LIST_TIMEOUT_MS = 20_000;
 const NON_VISION_GEMINI_PATTERN = /(embedding|aqa|imagen|veo|tts|audio|live|native-audio|image-generation)/i;
 /** Groq/DeepSeek ids that are not text-generation models. */
 const NON_TEXT_MODEL_PATTERN = /(whisper|tts|speech|audio|embed|moderation|guard)/i;
-/** Upstream wording used when a model id no longer exists. */
-const MODEL_NOT_FOUND_PATTERN = /model[^|]{0,80}(not found|not exist|does not exist|decommission|deprecat|unsupported|invalid)/i;
 
 interface GlobalSettingsRow {
   id?: string;
@@ -170,17 +168,6 @@ function providerKey(config: GlobalAIConfig, provider: AIProvider): string {
   return config.groqApiKey;
 }
 
-function providerModel(config: GlobalAIConfig, provider: AIProvider): string {
-  if (provider === "gemini") return config.geminiModel;
-  if (provider === "deepseek") return config.deepseekModel;
-  return config.groqModel;
-}
-
-/** A provider is usable only with BOTH a key and an admin-selected model. */
-function isProviderReady(config: GlobalAIConfig, provider: AIProvider): boolean {
-  return Boolean(providerKey(config, provider) && providerModel(config, provider));
-}
-
 /**
  * Gemini model ids that can accept images. Gemini's model list does not expose an
  * explicit modality flag, so media/embedding families are excluded by name.
@@ -213,10 +200,6 @@ function truncateError(value: unknown): string {
   return clean(message, MAX_ERROR_CHARS) || "Unknown provider error";
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 // ---------------------------------------------------------------------------
 // Global config persistence
 // ---------------------------------------------------------------------------
@@ -230,13 +213,9 @@ export async function fetchGlobalAIConfig(force = false): Promise<GlobalAIConfig
     return cachedConfig;
   }
 
-  const { data, error } = await supabase
-    .from("global_settings")
-    .select(
-      "id, active_provider, gemini_api_key, gemini_model, deepseek_api_key, deepseek_model, groq_api_key, groq_model"
-    )
-    .eq("id", GLOBAL_CONFIG_ID)
-    .maybeSingle();
+  // API keys are not directly SELECT-able by normal authenticated users. Admins
+  // read them through a SECURITY DEFINER RPC that re-checks the admin role.
+  const { data, error } = await supabase.rpc("get_global_ai_config");
 
   if (error) {
     throw new AIServiceError(`Could not load global AI configuration: ${truncateError(error.message)}`);
@@ -264,20 +243,15 @@ export async function saveGlobalAIConfig(config: GlobalAIConfig): Promise<Global
     groqModel: clean(config.groqModel, 120),
   };
 
-  const { error } = await supabase.from("global_settings").upsert(
-    {
-      id: GLOBAL_CONFIG_ID,
-      active_provider: next.activeProvider,
-      gemini_api_key: next.geminiApiKey,
-      gemini_model: next.geminiModel,
-      deepseek_api_key: next.deepseekApiKey,
-      deepseek_model: next.deepseekModel,
-      groq_api_key: next.groqApiKey,
-      groq_model: next.groqModel,
-      updated_at: new Date().toISOString(),
-    },
-    { onConflict: "id" }
-  );
+  const { data, error } = await supabase.rpc("save_global_ai_config", {
+    p_active_provider: next.activeProvider,
+    p_gemini_api_key: next.geminiApiKey,
+    p_gemini_model: next.geminiModel,
+    p_deepseek_api_key: next.deepseekApiKey,
+    p_deepseek_model: next.deepseekModel,
+    p_groq_api_key: next.groqApiKey,
+    p_groq_model: next.groqModel,
+  });
 
   if (error) {
     throw new AIServiceError(
@@ -286,9 +260,10 @@ export async function saveGlobalAIConfig(config: GlobalAIConfig): Promise<Global
     );
   }
 
-  cachedConfig = next;
+  const saved = rowToConfig((data ?? null) as GlobalSettingsRow | null);
+  cachedConfig = saved;
   cachedAt = Date.now();
-  return next;
+  return saved;
 }
 
 export function invalidateAIConfigCache(): void {
@@ -299,23 +274,6 @@ export function invalidateAIConfigCache(): void {
 // ---------------------------------------------------------------------------
 // Provider adapters
 // ---------------------------------------------------------------------------
-
-interface ProviderCallArgs {
-  apiKey: string;
-  model: string;
-  prompt: string;
-  systemPrompt: string;
-  imageBase64?: string;
-  imageMimeType: string;
-  options: Required<Pick<AIRequestOptions, "temperature" | "maxOutputTokens" | "json">> & {
-    timeoutMs: number;
-  };
-}
-
-interface ProviderCallResult {
-  text: string;
-  model: string;
-}
 
 async function requestJson(
   url: string,
@@ -389,94 +347,6 @@ function getJson(
   timeoutMs: number
 ): Promise<unknown> {
   return requestJson(url, { method: "GET", headers, timeoutMs });
-}
-
-/** Google Gemini `generateContent` REST call (text + optional inline image). */
-async function callGemini(args: ProviderCallArgs): Promise<ProviderCallResult> {
-  const parts: Array<Record<string, unknown>> = [];
-  if (args.imageBase64) {
-    parts.push({ inline_data: { mime_type: args.imageMimeType, data: args.imageBase64 } });
-  }
-  // Prompt first is irrelevant to the model; image-first matches the previous
-  // working edge-function payload ordering.
-  parts.push({ text: args.prompt });
-
-  const body: Record<string, unknown> = {
-    contents: [{ role: "user", parts }],
-    generationConfig: {
-      temperature: args.options.temperature,
-      maxOutputTokens: args.options.maxOutputTokens,
-      ...(args.options.json ? { responseMimeType: "application/json" } : {}),
-    },
-  };
-  if (args.systemPrompt) {
-    body.systemInstruction = { parts: [{ text: args.systemPrompt }] };
-  }
-
-  const data = (await postJson(
-    `${GEMINI_BASE_URL}/${encodeURIComponent(args.model)}:generateContent?key=${encodeURIComponent(args.apiKey)}`,
-    body,
-    {},
-    args.options.timeoutMs
-  )) as {
-    candidates?: Array<{
-      content?: { parts?: Array<{ text?: string }> };
-      finishReason?: string;
-    }>;
-    promptFeedback?: { blockReason?: string };
-  };
-
-  const blockReason = data?.promptFeedback?.blockReason;
-  if (blockReason) {
-    throw new AIServiceError(`Gemini blocked the prompt (${clean(blockReason, 60)}).`);
-  }
-
-  const candidate = data?.candidates?.[0];
-  const text = (candidate?.content?.parts ?? [])
-    .map((part) => (typeof part?.text === "string" ? part.text : ""))
-    .join("")
-    .trim();
-
-  if (!text) {
-    const finish = candidate?.finishReason ? ` (finishReason: ${clean(candidate.finishReason, 40)})` : "";
-    throw new AIServiceError(`Gemini returned an empty response${finish}.`);
-  }
-
-  return { text, model: args.model };
-}
-
-/** OpenAI-compatible chat completions (DeepSeek + Groq). */
-async function callOpenAICompatible(
-  url: string,
-  args: ProviderCallArgs
-): Promise<ProviderCallResult> {
-  const messages: Array<{ role: "system" | "user"; content: string }> = [];
-  if (args.systemPrompt) {
-    messages.push({ role: "system", content: args.systemPrompt });
-  }
-  messages.push({ role: "user", content: args.prompt });
-
-  const data = (await postJson(
-    url,
-    {
-      model: args.model,
-      messages,
-      temperature: args.options.temperature,
-      max_tokens: args.options.maxOutputTokens,
-      stream: false,
-      ...(args.options.json ? { response_format: { type: "json_object" } } : {}),
-    },
-    { Authorization: `Bearer ${args.apiKey}` },
-    args.options.timeoutMs
-  )) as { choices?: Array<{ message?: { content?: unknown } }> };
-
-  const content = data?.choices?.[0]?.message?.content;
-  const text = typeof content === "string" ? content.trim() : "";
-  if (!text) {
-    throw new AIServiceError("Provider returned an empty response.");
-  }
-
-  return { text, model: args.model };
 }
 
 function sortAndDedupeModels(options: AIModelOption[]): AIModelOption[] {
@@ -608,26 +478,6 @@ export async function testApiKey(
   }
 }
 
-/**
- * Ordered provider chain for this request: the active provider first (when it has a
- * key), then the remaining providers that have keys configured.
- */
-function buildProviderChain(config: GlobalAIConfig, requiresVision: boolean): AIProvider[] {
-  const ready = AI_PROVIDER_IDS.filter((provider) => isProviderReady(config, provider));
-
-  if (requiresVision) {
-    // DeepSeek/Groq are text-only — an uploaded image must go to Gemini.
-    return ready.includes("gemini") ? ["gemini"] : [];
-  }
-
-  const chain: AIProvider[] = [];
-  if (ready.includes(config.activeProvider)) chain.push(config.activeProvider);
-  for (const provider of ready) {
-    if (!chain.includes(provider)) chain.push(provider);
-  }
-  return chain;
-}
-
 // ---------------------------------------------------------------------------
 // Public API
 /**
@@ -665,34 +515,8 @@ export async function generateAIResponse(
     throw new AIServiceError("Unsupported image type. Use PNG, JPG, or WEBP.");
   }
 
-  const config = await fetchGlobalAIConfig();
-  const requiresVision = Boolean(image);
-
-  if (requiresVision) {
-    // Vision is Gemini-only, and the admin-selected Gemini model has to actually
-    // accept images — a text-only Gemini/DeepSeek/Groq model would fail upstream.
-    if (!config.geminiApiKey || !config.geminiModel) {
-      throw new AIServiceError(
-        "Vision AI requires a Gemini API key and a Gemini model. Ask an administrator to configure both in Settings → Global AI Config."
-      );
-    }
-    if (!geminiModelSupportsVision(config.geminiModel)) {
-      throw new AIServiceError(
-        `The selected Gemini model "${config.geminiModel}" does not support image input. Ask an administrator to pick a Gemini multimodal model (one labelled VISION in "Fetch Available Models") in Settings → Global AI Config.`
-      );
-    }
-  }
-
-  const chain = buildProviderChain(config, requiresVision);
-
-  if (chain.length === 0) {
-    throw new AIServiceError(
-      requiresVision
-        ? "Vision analysis requires a Gemini API key and model. Ask an administrator to configure them in Settings → Global AI Config."
-        : "No AI provider is fully configured. Ask an administrator to add an API key and select a model in Settings → Global AI Config."
-    );
-  }
-
+  // AI credentials stay server-side. The edge function owns provider selection,
+  // fallback, rate limits and the vision allow-list.
   const resolved = {
     temperature: options.temperature ?? 0.4,
     maxOutputTokens: options.maxOutputTokens ?? 800,
@@ -700,79 +524,42 @@ export async function generateAIResponse(
     timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
   };
 
-  const attempts: AIAttemptFailure[] = [];
+  const { data, error } = await supabase.functions.invoke("ai-chat", {
+    body: {
+      prompt: safePrompt,
+      systemPrompt: safeSystemPrompt,
+      imageBase64: image || undefined,
+      imageMimeType: normalizedMime,
+      options: resolved,
+    },
+  });
 
-  for (const provider of chain) {
-    const apiKey = providerKey(config, provider);
-    const model = providerModel(config, provider);
-    if (!apiKey || !model) continue;
-
-    try {
-      const result =
-        provider === "gemini"
-          ? await callGemini({
-              apiKey,
-              model,
-              prompt: safePrompt,
-              systemPrompt: safeSystemPrompt,
-              imageBase64: image || undefined,
-              imageMimeType: normalizedMime,
-              options: resolved,
-            })
-          : await callOpenAICompatible(provider === "deepseek" ? DEEPSEEK_URL : GROQ_URL, {
-              apiKey,
-              model,
-              prompt: safePrompt,
-              systemPrompt: safeSystemPrompt,
-              imageMimeType: normalizedMime,
-              options: resolved,
-            });
-
-      return {
-        text: result.text,
-        provider,
-        model: result.model,
-        attempts,
-      };
-    } catch (err) {
-      const failure: AIAttemptFailure = {
-        provider,
-        model,
-        error: truncateError(err),
-      };
-      attempts.push(failure);
-      console.warn(`[AIService] ${provider}/${model} failed: ${failure.error}`);
-
-      // A retired/renamed model is a configuration problem, not a transient
-      // outage: surface it to the admin instead of silently retrying providers.
-      const status = /^HTTP (\d{3})/.exec(failure.error)?.[1];
-      if (status === "404" || MODEL_NOT_FOUND_PATTERN.test(failure.error)) {
-        throw new AIServiceError(
-          `${AI_PROVIDER_META[provider].label} model "${model}" was not found upstream (${failure.error}). ` +
-            'Ask an administrator to select a current model in Settings → Global AI Config using "Fetch Available Models".',
-          attempts
-        );
-      }
-
-      // Rejected/forbidden key on this provider: try the next configured provider.
-      if (status && ["400", "401", "403"].includes(status)) continue;
-
-      // Tiny pause before the next provider to smooth over 429 bursts.
-      await delay(150);
-    }
+  if (error) {
+    throw new AIServiceError(`AI proxy request failed: ${truncateError(error.message)}`);
   }
 
-  const summary =
-    attempts.length > 0
-      ? attempts.map((a) => `${a.provider}/${a.model}: ${a.error}`).join(" | ")
-      : "No attempts were made.";
+  const payload = (data ?? {}) as {
+    ok?: boolean;
+    text?: string;
+    provider?: AIProvider;
+    model?: string;
+    attempts?: AIAttemptFailure[];
+    error?: string;
+  };
 
-  throw new AIServiceError(
-    requiresVision
-      ? `Gemini Vision is unavailable: ${summary}`
-      : `All configured AI providers failed: ${summary}`,
-    attempts
-  );
+  if (!payload.ok || !payload.text) {
+    throw new AIServiceError(payload.error || "AI proxy returned no response.", payload.attempts);
+  }
+
+  const provider: AIProvider =
+    payload.provider === "deepseek" || payload.provider === "groq" ? payload.provider : "gemini";
+
+  return {
+    text: payload.text,
+    provider,
+    model: payload.model || "ai-chat",
+    attempts: payload.attempts ?? [],
+  };
 }
 
 /**

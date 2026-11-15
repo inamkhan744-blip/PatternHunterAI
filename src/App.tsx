@@ -103,10 +103,10 @@ import {
   type TradingViewSignal as RealtimeTradingViewSignal,
 } from "./lib/useTradingViewSignals";
 import { isLiveTradingConfigured, refreshCredentialStatus } from "./lib/CredentialVault";
-import { WalletBalanceProvider } from "./lib/WalletBalanceContext";
+import { WalletBalanceProvider, useWalletBalance } from "./lib/WalletBalanceContext";
 import { ToastProvider } from "./lib/ToastContext";
 import { autoTradeEngine, MAX_SLIPPAGE_PCT } from "./lib/BinanceAutoTrade";
-import { getActiveExchange, getExchangeCredentials, setActiveExchange, SUPPORTED_EXCHANGES, type ExchangeId } from "./lib/MultiExchange";
+import { getActiveExchange, setActiveExchange, SUPPORTED_EXCHANGES, type ExchangeId } from "./lib/MultiExchange";
 import { liveWorkerLogStore } from "./lib/LiveWorkerLogStore";
 import { paperTradingEngine } from "./lib/PaperTrading";
 import { tradeManager } from "./lib/TradeManager";
@@ -233,16 +233,9 @@ export default function App() {
     const saved = localStorage.getItem("app_timeframe");
     return (saved as Timeframe) || "1h";
   });
-  const [walletBalance, setWalletBalance] = useState<number>(() =>
-    isLiveTradingConfigured() ? 0 : paperTradingEngine.getAccount().balance
-  );
-  const openTradeCount = tradeManager.getActiveTrades().length;
-  // Keep the header balance in sync with the paper engine on open/close.
-  useEffect(() => {
-    if (!isLiveTradingConfigured()) {
-      setWalletBalance(paperTradingEngine.getAccount().balance);
-    }
-  }, [openTradeCount]);
+  // Live global balance: the paper ledger pushes every open/close/reset directly
+  // into the Header and every other consumer.
+  const { balance: walletBalance, setBalance: setWalletBalance } = useWalletBalance();
   const [isOffline, setIsOffline] = useState<boolean>(() => (typeof navigator !== "undefined" ? !navigator.onLine : false));
   const prevUserRef = useRef(user);
   useEffect(() => {
@@ -271,7 +264,7 @@ export default function App() {
     } else {
       setWalletBalance(paperTradingEngine.getAccount().balance);
     }
-  }, []);
+  }, [setWalletBalance]);
 
   useEffect(() => {
     const handleOffline = () => setIsOffline(true);
@@ -584,6 +577,8 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    paperTradingEngine.setActiveUser(user?.id ?? null);
+    setWalletBalance(paperTradingEngine.getAccount().balance);
     if (user) {
       loadWatchlist();
       tradeManager.initializeUser(user.id);
@@ -592,7 +587,7 @@ export default function App() {
       setWatchlist([]);
       setWatchSymbols(new Set());
     }
-  }, [user, loadWatchlist]);
+  }, [user, loadWatchlist, setWalletBalance]);
 
   // Cross-device watchlist sync: another device's add/remove lands here within seconds.
   useEffect(() => {
@@ -971,7 +966,7 @@ export default function App() {
     });
 
     return () => unsub();
-  }, [user, lastPrice, selectedCoin.binanceSymbol, currentAtr, effectiveIsPro, isAdmin]);
+  }, [user, lastPrice, selectedCoin.binanceSymbol, currentAtr, effectiveIsPro, isAdmin, setWalletBalance]);
 
   /**
    * Counts distinct symbols with an open position in the active execution mode.
@@ -1242,7 +1237,7 @@ export default function App() {
         autoPilotInFlight.current.delete(inFlightKey);
       }
     },
-    [autoPilotOpenSymbolCount, serverAutoPilot]
+    [autoPilotOpenSymbolCount, serverAutoPilot, setWalletBalance]
   );
 
   // Multi-symbol scanner: Auto-Pilot is not limited to the chart currently on screen.
@@ -1933,6 +1928,27 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
     );
   }
 
+  const handleSignOut = async () => {
+    // Clear client state before the auth listener unmounts the dashboard. This
+    // prevents the logout white-screen caused by a render against a half-torn-down
+    // session, and stops one account's cached UI from flashing into the next.
+    try {
+      setIsDrawerOpen(false);
+      setSettingsOpen(false);
+      setWatchlist([]);
+      setWatchSymbols(new Set());
+      tradeManager.cleanupRealtime();
+      paperTradingEngine.setActiveUser(null);
+      setWalletBalance(paperTradingEngine.getAccount().balance);
+    } finally {
+      try {
+        await supabase.auth.signOut();
+      } catch (err) {
+        console.error("[Auth] sign-out failed:", err);
+      }
+    }
+  };
+
   if (!user) {
     return <AuthScreen />;
   }
@@ -1949,7 +1965,7 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
             other features are unavailable. Contact support if you believe this is a mistake.
           </p>
           <button
-            onClick={() => void supabase.auth.signOut()}
+            onClick={() => void handleSignOut()}
             className="w-full py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-bold uppercase tracking-wider"
           >
             Sign out
@@ -1986,12 +2002,13 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
 
   const handleOneClickTrade = async (
     card: SignalCard,
-    settings: ScannerExecutionSettings
+    settings: ScannerExecutionSettings,
+    orderType: "MARKET" | "LIMIT" | "STOP_MARKET" = "MARKET"
   ): Promise<{ success: boolean; error?: string }> => {
-    const exchange = getActiveExchange();
-    const creds = await getExchangeCredentials(exchange);
-    const isLive = Boolean(creds.apiKey?.trim() && creds.apiSecret?.trim());
-    const mode: "REAL" | "PAPER" = isLive ? "REAL" : "PAPER";
+    // Credentials live only in the server-side vault. Never infer live mode from
+    // localStorage, which is why the scanner used to always fall back to paper.
+    const vault = await refreshCredentialStatus("binance");
+    const mode: "REAL" | "PAPER" = vault.configured ? "REAL" : "PAPER";
     const cfg = autoTradeEngine.getConfig();
     try {
       // Pre-trade price validation: fetch live price and ensure it hasn't
@@ -2026,13 +2043,14 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
 
       const result = await autoTradeEngine.executeTrade({
         symbol: card.coin.binanceSymbol,
-        entryPrice: card.entryPrice,
+        entryPrice: livePrice,
+        currentPrice: livePrice,
         atrValue: card.atr && card.atr > 0 ? card.atr : card.entryPrice * 0.02,
         direction: card.direction,
         marketType: cfg.marketType,
         mode,
         accountBalance: mode === "PAPER" ? paperTradingEngine.getAccount().balance : undefined,
-        orderType: "MARKET",
+        orderType,
         signalPrice: card.entryPrice,
         stopLossPrice: card.stopLoss,
         takeProfitPrice: card.takeProfit,
@@ -2042,13 +2060,14 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
         manual: true,
       });
       if (result.success && result.trade) {
-        tradeManager.addTrade({
+        const added = tradeManager.addTrade({
           symbol: result.trade.symbol,
           entryPrice: result.trade.entryPrice,
-          currentPrice: card.price,
+          currentPrice: livePrice,
           quantity: result.trade.quantity,
           stopLossPrice: result.trade.stopLossPrice,
           takeProfitPrice: result.trade.takeProfitPrice,
+          atrAtEntry: card.atr,
           direction: result.trade.direction,
           marketType: result.trade.marketType,
           leverage: result.trade.leverage,
@@ -2056,6 +2075,14 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
           mode: result.trade.executionMode === "REAL" ? "REAL" : "PAPER",
           customId: result.trade.id,
         });
+        if (!added) {
+          autoTradeEngine.closeTrade(result.trade.id, livePrice, "MANUAL");
+          return {
+            success: false,
+            error:
+              "Trade cancelled: the paper ledger could not reserve the required margin (insufficient available balance).",
+          };
+        }
         if (mode === "PAPER") {
           setWalletBalance(paperTradingEngine.getAccount().balance);
         } else {
@@ -2093,9 +2120,6 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
     <ToastProvider>
       <WalletBalanceProvider initialBalance={walletBalance}>
         <div className="min-h-screen bg-slate-950 text-white flex flex-col lg:flex-row pb-16 lg:pb-0">
-          <div className="lg:hidden w-full bg-slate-900/90 border-b border-slate-700 px-3 py-1 text-[10px] font-mono text-cyan-300">
-            {isLiveTradingConfigured() ? "Live" : "Paper"} Bal: ${walletBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-          </div>
           {isOffline && (
             <div className="w-full bg-red-600/20 border-b border-red-500/40 px-3 py-1 text-[10px] font-mono text-red-300 text-center">
               Connection lost. Reconnecting...
@@ -2229,7 +2253,7 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
               </p>
             </div>
             <button
-              onClick={() => supabase.auth.signOut()}
+              onClick={() => void handleSignOut()}
               className="p-1.5 rounded-lg text-slate-400 hover:text-red-400 transition-colors"
               title="Sign out"
             >
@@ -2334,7 +2358,15 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
                 PatternHunter <span className="text-cyan-400">AI</span>
               </h1>
             </div>
-            <div className="flex items-center gap-1.5 flex-wrap justify-end py-0.5">
+            <div className="flex items-center gap-1.5 flex-wrap justify-end py-0.5 min-w-0">
+              {/* Balance lives inside the header flow so it can wrap instead of
+                  covering the Kill Switch / Settings controls. */}
+              <span
+                className="px-2 py-1.5 rounded-lg bg-slate-800/80 border border-slate-700 text-[10px] font-mono font-bold text-cyan-300 whitespace-nowrap shrink-0"
+                title="Available virtual balance"
+              >
+                {isLiveTradingConfigured() ? "Live" : "Paper"} ${walletBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </span>
               {/* Single Auto-Pilot Toggle on Mobile Header (hidden when disabled) */}
               {systemSettings.enableAutopilot && (
               <button

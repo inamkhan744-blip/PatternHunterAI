@@ -88,6 +88,8 @@ export default function CandlestickChart({
   const ma99SeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const srSeriesRef = useRef<ISeriesApi<"Line">[]>([]);
   const rsiSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  // Fit the viewport only when the instrument/timeframe changes, not on every tick.
+  const fittedViewportKeyRef = useRef<string>("");
 
   // HTF Trend state
   const [htfTrend, setHtfTrend] = useState<HTFTrendResult | null>(null);
@@ -890,13 +892,19 @@ export default function CandlestickChart({
       try { candleSeries.setMarkers([]); } catch { /* */ }
     }
 
+    const viewportKey = `${symbol ?? ""}|${timeframe}`;
+    const shouldFit = fittedViewportKeyRef.current !== viewportKey;
+    if (shouldFit) fittedViewportKeyRef.current = viewportKey;
+
     requestAnimationFrame(() => {
-      try { chart.timeScale().fitContent(); } catch { /* */ }
-      try { rsiChartRef.current?.timeScale().fitContent(); } catch { /* */ }
+      if (shouldFit) {
+        try { chart.timeScale().fitContent(); } catch { /* */ }
+        try { rsiChartRef.current?.timeScale().fitContent(); } catch { /* */ }
+      }
       try { chart.priceScale("right").applyOptions({ autoScale: true }); } catch { /* */ }
       drawSMCOverlay();
     });
-  }, [candles, pattern, showIndicators, chartType, drawSMCOverlay]);
+  }, [candles, pattern, showIndicators, chartType, drawSMCOverlay, symbol, timeframe]);
 
   useEffect(() => {
     updateChart();

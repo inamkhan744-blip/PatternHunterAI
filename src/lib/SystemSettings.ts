@@ -63,7 +63,9 @@ export async function fetchSystemSettings(force = false): Promise<SystemSettings
   try {
     const { data, error } = await supabase
       .from("global_settings")
-      .select("*")
+      .select(
+        "id, maintenance_mode, broadcast_message, enable_vision_ai, enable_autopilot, enable_telegram"
+      )
       .eq("id", GLOBAL_SETTINGS_ID)
       .maybeSingle();
 
@@ -109,7 +111,9 @@ export async function saveSystemSettings(
       },
       { onConflict: "id" }
     )
-    .select("*")
+    .select(
+      "id, maintenance_mode, broadcast_message, enable_vision_ai, enable_autopilot, enable_telegram"
+    )
     .single();
 
   if (error) {

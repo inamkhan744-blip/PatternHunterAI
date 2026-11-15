@@ -7,13 +7,13 @@ import type { ScannerExecutionSettings } from "./ScannerTradeSettings";
 interface Props {
   isOpen: boolean;
   onClose: () => void;
-  onConfirm: () => void | Promise<{ success: boolean; error?: string } | void>;
+  onConfirm: (orderType: "MARKET" | "LIMIT" | "STOP_MARKET") =>
+    | void
+    | Promise<{ success: boolean; error?: string } | void>;
   cardData: SignalCard;
   settings: ScannerExecutionSettings;
   onOpenScannerSettings?: () => void;
 }
-
-const DEFAULT_BALANCE = 1000;
 
 function formatPrice(value: number): string {
   if (!Number.isFinite(value) || value === 0) return "—";
@@ -40,7 +40,13 @@ export default function TradeConfirmModal({ isOpen, onClose, onConfirm, cardData
     positionValue = settings.fixedUsdAmount;
     quantity = entry > 0 ? settings.fixedUsdAmount / entry : 0;
   } else {
-    const sizing = calculatePositionSize(settings.riskPercent, availableBalance || DEFAULT_BALANCE, settings.leverage, entry, sl);
+    const sizing = calculatePositionSize(
+      settings.riskPercent,
+      Math.max(0, availableBalance),
+      settings.leverage,
+      entry,
+      sl
+    );
     quantity = sizing.quantity;
     positionValue = sizing.positionValue;
   }
@@ -51,7 +57,7 @@ export default function TradeConfirmModal({ isOpen, onClose, onConfirm, cardData
   const handleConfirm = async () => {
     setExecutionError(null);
     try {
-      const result = await onConfirm();
+      const result = await onConfirm(orderType);
       if (result && typeof result === "object" && "success" in result && !result.success) {
         setExecutionError(result.error || "Trade execution failed.");
         return;
@@ -88,12 +94,12 @@ export default function TradeConfirmModal({ isOpen, onClose, onConfirm, cardData
         <div className="rounded-lg bg-slate-800/60 border border-slate-700 p-3 text-xs">
           <div className="flex items-center justify-between">
             <span className="text-slate-400">Available Balance</span>
-            <span className="font-mono font-bold text-cyan-300">${(availableBalance || DEFAULT_BALANCE).toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+            <span className="font-mono font-bold text-cyan-300">${Math.max(0, availableBalance).toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
           </div>
           <div className="flex items-center justify-between mt-1">
             <span className="text-slate-400">Risk {settings.riskPercent}%</span>
             <span className="font-mono font-bold text-amber-300">
-              ${((availableBalance || DEFAULT_BALANCE) * (settings.riskPercent / 100)).toFixed(2)}
+              ${(Math.max(0, availableBalance) * (settings.riskPercent / 100)).toFixed(2)}
             </span>
           </div>
           <div className="flex items-center justify-between mt-1">

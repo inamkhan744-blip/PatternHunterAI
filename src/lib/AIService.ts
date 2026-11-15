@@ -200,6 +200,28 @@ function truncateError(value: unknown): string {
   return clean(message, MAX_ERROR_CHARS) || "Unknown provider error";
 }
 
+/**
+ * `functions.invoke` throws a FunctionsHttpError for non-2xx responses. The useful
+ * message is in its Response body, so surface the backend JSON instead of the
+ * generic "Edge Function returned a non-2xx status code".
+ */
+async function readFunctionError(error: unknown): Promise<string> {
+  const context = (error as { context?: Response } | null)?.context;
+  if (context) {
+    try {
+      const raw = await context.clone().text();
+      if (raw) {
+        const parsed = JSON.parse(raw) as { error?: unknown; message?: unknown };
+        const detail = parsed.error ?? parsed.message;
+        if (typeof detail === "string" && detail.trim()) return clean(detail, MAX_ERROR_CHARS);
+      }
+    } catch {
+      // Fall through to the generic SDK message.
+    }
+  }
+  return truncateError(error);
+}
+
 // ---------------------------------------------------------------------------
 // Global config persistence
 // ---------------------------------------------------------------------------
@@ -524,18 +546,24 @@ export async function generateAIResponse(
     timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
   };
 
+  // Keep this request body in lockstep with `supabase/functions/ai-chat`:
+  // `prompt` is the required field; the remaining keys are optional aliases the
+  // function reads only when present.
+  const requestBody: Record<string, unknown> = {
+    prompt: safePrompt,
+    systemPrompt: safeSystemPrompt,
+    imageMimeType: normalizedMime,
+    options: resolved,
+  };
+  if (image) requestBody.imageBase64 = image;
+
   const { data, error } = await supabase.functions.invoke("ai-chat", {
-    body: {
-      prompt: safePrompt,
-      systemPrompt: safeSystemPrompt,
-      imageBase64: image || undefined,
-      imageMimeType: normalizedMime,
-      options: resolved,
-    },
+    headers: { "Content-Type": "application/json" },
+    body: requestBody,
   });
 
   if (error) {
-    throw new AIServiceError(`AI proxy request failed: ${truncateError(error.message)}`);
+    throw new AIServiceError(`AI proxy request failed: ${await readFunctionError(error)}`);
   }
 
   const payload = (data ?? {}) as {

@@ -14,6 +14,7 @@ interface Props {
   pattern: string | null;
   fearGreed: number | null;
   onShowCoin: (symbol: string) => void;
+  isPro?: boolean;
   /** Epoch ms of the newest candle backing `price` / `rsi` / `pattern`. */
   dataTimestamp?: number | null;
 }
@@ -56,6 +57,7 @@ export default function AIChat({
   pattern,
   fearGreed,
   onShowCoin,
+  isPro = false,
   dataTimestamp,
 }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -82,6 +84,26 @@ export default function AIChat({
 
   const sendMessage = useCallback(async (text: string) => {
     if (!text.trim() || loading) return;
+    if (!isPro) {
+      const raw = localStorage.getItem("ai_chat_daily");
+      let count = 0;
+      if (raw) {
+        try {
+          const parsed = JSON.parse(raw);
+          if (parsed.date === new Date().toDateString()) count = parsed.count ?? 0;
+        } catch {
+          count = 0;
+        }
+      }
+      if (count >= 5) {
+        setMessages((prev) => [
+          ...prev,
+          { role: "assistant", content: "You've reached the free daily limit of 5 AI Chat messages. Upgrade to Pro for unlimited AI Chat.", timestamp: Date.now() },
+        ]);
+        return;
+      }
+      localStorage.setItem("ai_chat_daily", JSON.stringify({ date: new Date().toDateString(), count: count + 1 }));
+    }
 
     const userMsg: ChatMessage = { role: "user", content: text, timestamp: Date.now() };
     setMessages((prev) => [...prev, userMsg]);
@@ -249,7 +271,7 @@ Guidelines:
     } finally {
       setLoading(false);
     }
-  }, [loading, messages, coin, price, rsi, trend, pattern, onShowCoin, change24h, fearGreed, dataTimestamp]);
+  }, [loading, messages, coin, price, rsi, trend, pattern, onShowCoin, change24h, fearGreed, dataTimestamp, isPro]);
 
   const toggleVoice = useCallback(() => {
     const win = window as unknown as {

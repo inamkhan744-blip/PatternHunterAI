@@ -41,7 +41,12 @@ export default function Portfolio() {
         .from("portfolio_holdings")
         .select("*")
         .order("created_at", { ascending: false });
-      if (error) throw new Error(error.message);
+      if (error) {
+        const friendly = /portfolio_holdings|schema cache/i.test(error.message)
+          ? "Portfolio storage isn't set up yet. Run the portfolio_holdings migration in Supabase."
+          : error.message;
+        throw new Error(friendly);
+      }
       if (data) setHoldings(data as PortfolioHolding[]);
       setPortfolioError(null);
     } catch (err) {
@@ -220,6 +225,7 @@ export default function Portfolio() {
       const { data, error } = await supabase
         .from("portfolio_holdings")
         .insert({
+          user_id: user.id,
           coin: coin.binanceSymbol,
           quantity: qty,
           buy_price: bp,
@@ -235,9 +241,11 @@ export default function Portfolio() {
       setQuantity("");
       setBuyPrice("");
     } catch (err) {
-      setPortfolioError(
-        `Holding not saved: ${err instanceof Error ? err.message : "database write failed"}.`
-      );
+      const raw = err instanceof Error ? err.message : "database write failed";
+      const friendly = /portfolio_holdings|schema cache/i.test(raw)
+        ? "Portfolio storage isn't set up yet. Run the portfolio_holdings migration in Supabase."
+        : raw;
+      setPortfolioError(`Holding not saved: ${friendly}.`);
     }
   }, [user, coin, quantity, buyPrice]);
 

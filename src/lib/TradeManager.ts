@@ -173,7 +173,7 @@ export class TradeManager {
         const parsed = JSON.parse(activeRaw) as ActiveTrade[];
         if (Array.isArray(parsed)) {
           this.activeTrades = parsed
-            .filter((t) => t && typeof t.id === "string" && Number(t.entryPrice) > 0)
+            .filter((t) => t && typeof t.id === "string" && Number(t.entryPrice) > 0 && t.mode !== "REAL")
             .map((t) => ({
               ...t,
               mode: t.mode === "REAL" ? "REAL" : "PAPER",
@@ -191,7 +191,7 @@ export class TradeManager {
         const parsed = JSON.parse(historyRaw) as ClosedTrade[];
         if (Array.isArray(parsed)) {
           this.tradeHistory = parsed
-            .filter((t) => t && typeof t.id === "string")
+            .filter((t) => t && typeof t.id === "string" && t.mode !== "REAL")
             .map((t) => ({ ...t, mode: t.mode === "REAL" ? "REAL" : "PAPER" }));
         }
       }
@@ -332,7 +332,19 @@ export class TradeManager {
       }
       if (!data) return;
 
-      this.mergeRemoteTrades(data as SupabaseTradeRow[]);
+      // Purge any non-paper (live) trades that may have been stored without real API keys.
+      try {
+        await supabase
+          .from("trades")
+          .delete()
+          .eq("user_id", this.currentUserId)
+          .or("is_paper.is.null,is_paper.eq.false");
+      } catch {
+        // best-effort cleanup
+      }
+
+      const paperRows = (data as SupabaseTradeRow[]).filter((row) => row.is_paper !== false);
+      this.mergeRemoteTrades(paperRows);
     } catch (err) {
       console.warn("[TradeManager] Unexpected error syncing with Supabase:", err);
     } finally {

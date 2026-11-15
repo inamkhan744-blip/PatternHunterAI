@@ -882,9 +882,23 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
           <div className="col-span-2 rounded-lg bg-slate-950/70 border border-slate-800 p-2">
             <div className="text-slate-500">Size</div>
             <div className="font-mono font-bold text-slate-200">
-              ${calculatePositionSize(loadScannerExecutionSettings().riskPercent, walletBalance || 10000, 1, card.entryPrice, card.stopLoss).positionValue.toFixed(0)}
+              ${(() => {
+                const settings = loadScannerExecutionSettings();
+                const balance = walletBalance || 10000;
+                if (settings.sizingMode === "Fixed USD") {
+                  return settings.fixedUsdAmount.toFixed(0);
+                }
+                return calculatePositionSize(settings.riskPercent, balance, settings.leverage, card.entryPrice, card.stopLoss).positionValue.toFixed(0);
+              })()}
               {" "}
-              ({(((calculatePositionSize(loadScannerExecutionSettings().riskPercent, walletBalance || 10000, 1, card.entryPrice, card.stopLoss).positionValue) / (walletBalance || 10000)) * 100).toFixed(1)}% of Bal)
+              ({(() => {
+                const settings = loadScannerExecutionSettings();
+                const balance = walletBalance || 10000;
+                const value = settings.sizingMode === "Fixed USD"
+                  ? settings.fixedUsdAmount
+                  : calculatePositionSize(settings.riskPercent, balance, settings.leverage, card.entryPrice, card.stopLoss).positionValue;
+                return ((value / balance) * 100).toFixed(1);
+              })()}% of Bal)
             </div>
           </div>
         </div>

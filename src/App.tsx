@@ -264,7 +264,7 @@ export default function App() {
     } else {
       setWalletBalance(paperTradingEngine.getAccount().balance);
     }
-  }, []);
+  }, [setWalletBalance]);
 
   useEffect(() => {
     const handleOffline = () => setIsOffline(true);
@@ -966,7 +966,7 @@ export default function App() {
     });
 
     return () => unsub();
-  }, [user, lastPrice, selectedCoin.binanceSymbol, currentAtr, effectiveIsPro, isAdmin]);
+  }, [user, lastPrice, selectedCoin.binanceSymbol, currentAtr, effectiveIsPro, isAdmin, setWalletBalance]);
 
   /**
    * Counts distinct symbols with an open position in the active execution mode.
@@ -1237,7 +1237,7 @@ export default function App() {
         autoPilotInFlight.current.delete(inFlightKey);
       }
     },
-    [autoPilotOpenSymbolCount, serverAutoPilot]
+    [autoPilotOpenSymbolCount, serverAutoPilot, setWalletBalance]
   );
 
   // Multi-symbol scanner: Auto-Pilot is not limited to the chart currently on screen.

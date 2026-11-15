@@ -1670,15 +1670,18 @@ export class BinanceAutoTradeEngine {
     // Check stuck trade timeout before evaluating capacity
     this.checkStuckTrades();
 
-    // Max Open Trades limit (1-3)
-    const openTrades = this.getOpenTrades();
-    if (openTrades.length >= this.config.maxOpenTrades) {
-      const rejectMsg = `Trade rejected: Max open trades reached (${openTrades.length}/${this.config.maxOpenTrades})`;
-      liveWorkerLogStore.addLog(rejectMsg, "warn", { symbol: params.symbol });
-      return {
-        success: false,
-        error: `Max open trades reached (${openTrades.length}/${this.config.maxOpenTrades}). Wait for existing positions to close.`,
-      };
+    // Max Open Trades limit (1-3) — only enforced for Auto-Pilot background loops.
+    // Manual scanner trades use their own independent limit enforced by the caller.
+    if (!params.manual) {
+      const openTrades = this.getOpenTrades();
+      if (openTrades.length >= this.config.maxOpenTrades) {
+        const rejectMsg = `Trade rejected: Max open trades reached (${openTrades.length}/${this.config.maxOpenTrades})`;
+        liveWorkerLogStore.addLog(rejectMsg, "warn", { symbol: params.symbol });
+        return {
+          success: false,
+          error: `Max open trades reached (${openTrades.length}/${this.config.maxOpenTrades}). Wait for existing positions to close.`,
+        };
+      }
     }
 
     // ATR Stop Loss / Take Profit (computed before sizing so risk can be sized off the stop).

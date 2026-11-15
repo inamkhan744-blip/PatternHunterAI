@@ -10,6 +10,7 @@ export interface ScannerExecutionSettings {
   slippageTolerance: number;
   confirmBeforeTrade: boolean;
   soundOnExecution: boolean;
+  maxOpenScannerTrades: number;
 }
 
 export const DEFAULT_SCANNER_EXECUTION_SETTINGS: ScannerExecutionSettings = {
@@ -21,6 +22,7 @@ export const DEFAULT_SCANNER_EXECUTION_SETTINGS: ScannerExecutionSettings = {
   slippageTolerance: 0.2,
   confirmBeforeTrade: true,
   soundOnExecution: true,
+  maxOpenScannerTrades: 3,
 };
 
 const STORAGE_KEY = "scanner_execution_settings";
@@ -39,6 +41,7 @@ export function loadScannerExecutionSettings(): ScannerExecutionSettings {
       slippageTolerance: clamp(parsed.slippageTolerance ?? 0.2, 0, 5),
       confirmBeforeTrade: parsed.confirmBeforeTrade !== false,
       soundOnExecution: parsed.soundOnExecution !== false,
+      maxOpenScannerTrades: clamp(parsed.maxOpenScannerTrades ?? 3, 1, 10),
     };
   } catch {
     return { ...DEFAULT_SCANNER_EXECUTION_SETTINGS };
@@ -173,6 +176,21 @@ export default function ScannerTradeSettings({ open, onClose }: Props) {
               onChange={(e) => update("confirmBeforeTrade", e.target.checked)}
               className="w-4 h-4"
             />
+          </label>
+
+          <label className="block">
+            <span className="text-slate-400">Max Open Scanner Trades</span>
+            <select
+              value={settings.maxOpenScannerTrades}
+              onChange={(e) => update("maxOpenScannerTrades", Number(e.target.value))}
+              className="mt-1 w-full rounded-lg bg-slate-800 border border-slate-700 px-3 py-1.5 text-slate-200"
+            >
+              {[1, 2, 3, 5, 10].map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
           </label>
 
           <label className="flex items-center justify-between">

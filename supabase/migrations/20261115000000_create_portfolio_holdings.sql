@@ -3,20 +3,16 @@
 
 ## Overview
 Adds a `portfolio_holdings` table to persist user portfolio positions in Supabase.
-Each row belongs to a single user (auth.users) and stores the coin, quantity and
-buy price. Row-Level Security ensures users can only access their own rows.
+Each row belongs to a single user (auth.users). Row-Level Security ensures users
+can only manage their own rows.
 
 ## Table Structure
 - id: uuid primary key
 - user_id: uuid referencing auth.users(id) on delete cascade
-- coin: text NOT NULL (e.g. BTCUSDT)
-- quantity: numeric NOT NULL
-- buy_price: numeric NOT NULL
-- created_at: timestamptz DEFAULT now()
-
-## Security
-- Row-Level Security enabled
-- Authenticated user policies for SELECT, INSERT, UPDATE, DELETE matching auth.uid() = user_id
+- coin: text (coin/binance symbol)
+- quantity: numeric
+- buy_price: numeric
+- created_at: timestamptz
 */
 
 CREATE TABLE IF NOT EXISTS portfolio_holdings (

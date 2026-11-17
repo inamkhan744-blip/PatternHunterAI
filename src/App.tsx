@@ -899,6 +899,7 @@ export default function App() {
           marketType: config.marketType,
           leverage: config.leverage,
           riskPercent: config.riskPercent,
+          maxOpenTrades: config.maxOpenTrades,
           currentPrice,
         });
 
@@ -1194,6 +1195,7 @@ export default function App() {
             marketType: cfg.marketType,
             leverage: cfg.leverage,
             riskPercent: cfg.riskPercent,
+            maxOpenTrades: cfg.maxOpenTrades,
             atrStopMultiplier: rangeMode ? 1 : undefined,
             atrRiskRewardRatio: rangeMode ? 1.5 : undefined,
             currentPrice: livePrice,
@@ -2056,6 +2058,9 @@ Produce a JSON response strictly matching this schema with NO markdown code fenc
         takeProfitPrice: card.takeProfit,
         leverageOverride: settings.leverage,
         riskPercentOverride: settings.riskPercent,
+        positionValueOverride:
+          settings.sizingMode === "Fixed USD" ? settings.fixedUsdAmount : undefined,
+        maxConcurrentTrades: settings.maxOpenScannerTrades,
         maxSlippagePct: 1.0,
         manual: true,
       });

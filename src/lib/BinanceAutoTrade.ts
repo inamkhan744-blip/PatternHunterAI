@@ -220,7 +220,8 @@ export function calculatePositionSize(
   accountBalance: number,
   leverage: number = 1,
   entryPrice: number = 1,
-  stopLossPrice?: number
+  stopLossPrice?: number,
+  maxMarginRequired?: number
 ): { quantity: number; positionValue: number; marginRequired: number } {
   if (accountBalance <= 0 || riskPercent <= 0 || entryPrice <= 0) {
     return { quantity: 0, positionValue: 0, marginRequired: 0 };
@@ -228,6 +229,10 @@ export function calculatePositionSize(
 
   const effectiveLeverage = Math.max(1, Math.min(10, leverage));
   const clampedRisk = Math.max(0.1, Math.min(100, riskPercent));
+  const marginCap =
+    typeof maxMarginRequired === "number" && Number.isFinite(maxMarginRequired) && maxMarginRequired > 0
+      ? Math.min(accountBalance, maxMarginRequired)
+      : accountBalance;
 
   // Risk-based sizing: `riskPercent` is the maximum equity loss if the stop is hit,
   // so notional = riskAmount / stopDistance * entry. When no stop is supplied we
@@ -240,12 +245,12 @@ export function calculatePositionSize(
   if (stopDistance > 0 && stopDistance < entryPrice) {
     const riskAmount = accountBalance * (clampedRisk / 100);
     const riskBasedNotional = (riskAmount / stopDistance) * entryPrice;
-    // Never exceed the maximum notional the account can collateralise.
-    const maxNotional = accountBalance * effectiveLeverage;
+    // Never exceed the account's collateral or this trade's reserved share.
+    const maxNotional = marginCap * effectiveLeverage;
     positionValue = Math.min(riskBasedNotional, maxNotional);
     marginRequired = positionValue / effectiveLeverage;
   } else {
-    marginRequired = accountBalance * (clampedRisk / 100);
+    marginRequired = Math.min(accountBalance * (clampedRisk / 100), marginCap);
     positionValue = marginRequired * effectiveLeverage;
   }
 
@@ -1495,6 +1500,10 @@ export class BinanceAutoTradeEngine {
     takeProfitPrice?: number;
     leverageOverride?: number;
     riskPercentOverride?: number;
+    /** Exact notional for "Fixed USD" scanner sizing. */
+    positionValueOverride?: number;
+    /** Number of concurrent slots this entry must leave room for. */
+    maxConcurrentTrades?: number;
     maxSlippagePct?: number;
     marketType?: MarketType;
     accountBalance?: number;
@@ -1848,13 +1857,31 @@ export class BinanceAutoTradeEngine {
     const leverage =
       marketType === "Futures" ? (params.leverageOverride ?? this.config.leverage) : 1;
     const riskPercent = params.riskPercentOverride ?? this.config.riskPercent;
-    const sizing = calculatePositionSize(
-      riskPercent,
-      balance,
-      leverage,
-      params.entryPrice,
-      stopLossPrice
+    const concurrentSlots = Math.max(
+      1,
+      params.maxConcurrentTrades ?? (params.manual ? 1 : this.config.maxOpenTrades)
     );
+    const fixedPositionValue =
+      typeof params.positionValueOverride === "number" &&
+      Number.isFinite(params.positionValueOverride) &&
+      params.positionValueOverride > 0
+        ? params.positionValueOverride
+        : null;
+    const sizing =
+      fixedPositionValue !== null
+        ? {
+            quantity: fixedPositionValue / params.entryPrice,
+            positionValue: fixedPositionValue,
+            marginRequired: fixedPositionValue / leverage,
+          }
+        : calculatePositionSize(
+            riskPercent,
+            balance,
+            leverage,
+            params.entryPrice,
+            stopLossPrice,
+            balance / concurrentSlots
+          );
 
     if (!Number.isFinite(sizing.quantity) || sizing.quantity <= 0) {
       return {

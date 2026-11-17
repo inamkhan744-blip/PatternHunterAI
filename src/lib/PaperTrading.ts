@@ -170,6 +170,8 @@ export class PaperTradingEngine {
     takeProfitPrice?: number;
     /** Allows TradeManager to reserve for a position it has already validated. */
     skipSymbolLock?: boolean;
+    /** Reserve room for this many concurrent paper positions. */
+    maxOpenTrades?: number;
   }): { success: boolean; trade?: PaperTrade; error?: string } {
     if (params.customId && this.account.trades.some((t) => t.id === params.customId)) {
       return { success: false, error: "Paper trade already exists in the ledger." };
@@ -258,7 +260,10 @@ export class PaperTradingEngine {
             this.account.balance,
             leverage,
             params.entryPrice,
-            stopLossPrice
+            stopLossPrice,
+            params.maxOpenTrades && params.maxOpenTrades > 0
+              ? this.account.balance / Math.max(1, params.maxOpenTrades)
+              : undefined
           );
     if (sizing.quantity <= 0 || sizing.marginRequired > this.account.balance) {
       return {

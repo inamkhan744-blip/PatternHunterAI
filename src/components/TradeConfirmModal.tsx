@@ -45,7 +45,8 @@ export default function TradeConfirmModal({ isOpen, onClose, onConfirm, cardData
       Math.max(0, availableBalance),
       settings.leverage,
       entry,
-      sl
+      sl,
+      Math.max(0, availableBalance) / Math.max(1, settings.maxOpenScannerTrades)
     );
     quantity = sizing.quantity;
     positionValue = sizing.positionValue;

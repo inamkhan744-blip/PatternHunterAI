@@ -892,7 +892,14 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
                 if (settings.sizingMode === "Fixed USD") {
                   return settings.fixedUsdAmount.toFixed(0);
                 }
-                return calculatePositionSize(settings.riskPercent, balance, settings.leverage, card.entryPrice, card.stopLoss).positionValue.toFixed(0);
+                return calculatePositionSize(
+                  settings.riskPercent,
+                  balance,
+                  settings.leverage,
+                  card.entryPrice,
+                  card.stopLoss,
+                  balance / Math.max(1, settings.maxOpenScannerTrades)
+                ).positionValue.toFixed(0);
               })()}
               {" "}
               ({(() => {
@@ -900,7 +907,14 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
                 const balance = walletBalance || 10000;
                 const value = settings.sizingMode === "Fixed USD"
                   ? settings.fixedUsdAmount
-                  : calculatePositionSize(settings.riskPercent, balance, settings.leverage, card.entryPrice, card.stopLoss).positionValue;
+                  : calculatePositionSize(
+                      settings.riskPercent,
+                      balance,
+                      settings.leverage,
+                      card.entryPrice,
+                      card.stopLoss,
+                      balance / Math.max(1, settings.maxOpenScannerTrades)
+                    ).positionValue;
                 return ((value / balance) * 100).toFixed(1);
               })()}% of Bal)
             </div>

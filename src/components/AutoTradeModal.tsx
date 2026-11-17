@@ -339,6 +339,7 @@ export default function AutoTradeModal({
           marketType: config.marketType,
           leverage: config.leverage,
           riskPercent: config.riskPercent,
+          maxOpenTrades: config.maxOpenTrades,
           currentPrice,
         });
 
@@ -470,7 +471,8 @@ export default function AutoTradeModal({
       accountBalance,
       lev,
       currentPrice,
-      stopLossPrice
+      stopLossPrice,
+      accountBalance / Math.max(1, config.maxOpenTrades)
     );
   }, [
     config.riskPercent,
@@ -479,6 +481,7 @@ export default function AutoTradeModal({
     accountBalance,
     config.leverage,
     config.marketType,
+    config.maxOpenTrades,
     currentPrice,
     currentAtr,
   ]);

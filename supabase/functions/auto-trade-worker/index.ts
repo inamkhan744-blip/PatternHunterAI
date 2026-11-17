@@ -386,7 +386,9 @@ async function executeOnBinance(
 
   if (target === "futures") {
     const rawQty = riskAmount / stopDistance;
-    const maxNotionalQty = (balance * config.leverage) / price;
+    // Leave room for the other concurrent slots the user allowed.
+    const slotMargin = balance / Math.max(1, config.maxOpenTrades);
+    const maxNotionalQty = (slotMargin * config.leverage * 0.95) / price;
     const quantity = floorTo(Math.min(rawQty, maxNotionalQty), 6);
     if (!(quantity > 0)) return { ok: false, error: "Computed quantity is zero." };
 
@@ -483,8 +485,9 @@ async function executeOnBinance(
 
   // Spot: size from the same ATR risk distance as Futures, then protect with an
   // OCO (best effort — a failed OCO is reported but does not hide a filled entry).
+  const spotSlotBalance = balance / Math.max(1, config.maxOpenTrades);
   const spotQuantity = floorTo(
-    Math.min(riskAmount / stopDistance, (balance * 0.95) / price),
+    Math.min(riskAmount / stopDistance, (spotSlotBalance * 0.95) / price),
     6
   );
   const quoteAmount = floorTo(spotQuantity * price, 2);
@@ -1184,7 +1187,8 @@ async function runForUser(
         ? Math.min(2, Math.max(0.25, config.riskPercent * scoreRiskMultiplier(candidate.score, config.minScore)))
         : config.riskPercent;
       const riskAmount = (paperBalance * effectiveRiskPercent) / 100;
-      const maxNotional = paperBalance * leverage * 0.95;
+      const slotMargin = paperBalance / Math.max(1, config.maxOpenTrades);
+      const maxNotional = slotMargin * leverage * 0.95;
       const quantity = floorTo(
         Math.min(riskAmount / stopDistance, maxNotional / livePrice),
         6

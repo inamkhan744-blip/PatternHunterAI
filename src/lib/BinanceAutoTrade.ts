@@ -1394,26 +1394,43 @@ export class BinanceAutoTradeEngine {
       if (!res.ok) {
         throw new Error(`Binance API error: ${res.statusText}`);
       }
-      const data = await res.json();
 
-      if (type === "Futures") {
-        const usdtAsset = data.find((a: { asset: string }) => a.asset === "USDT");
-        const usdtBalance = usdtAsset ? parseFloat(usdtAsset.balance) : 0;
-        const freeBalance = usdtAsset ? parseFloat(usdtAsset.withdrawAvailable) : 0;
-        if (!Number.isFinite(usdtBalance) || !Number.isFinite(freeBalance)) {
-          return { usdtBalance: 0, freeBalance: 0, ok: false, simulated: false, error: "Malformed balance payload" };
-        }
-        return { usdtBalance, freeBalance, ok: true, simulated: false };
-      } else {
-        const balances = data.balances || [];
-        const usdtAsset = balances.find((b: { asset: string }) => b.asset === "USDT");
-        const freeBalance = usdtAsset ? parseFloat(usdtAsset.free) : 0;
-        const lockedBalance = usdtAsset ? parseFloat(usdtAsset.locked) : 0;
-        if (!Number.isFinite(freeBalance) || !Number.isFinite(lockedBalance)) {
-          return { usdtBalance: 0, freeBalance: 0, ok: false, simulated: false, error: "Malformed balance payload" };
-        }
-        return { usdtBalance: freeBalance + lockedBalance, freeBalance, ok: true, simulated: false };
+      // Binance has returned empty objects/arrays and alternate wrappers across
+      // account types. A readable-but-empty response means "no USDT", not a crash.
+      let data: unknown = null;
+      try {
+        data = await res.json();
+      } catch {
+        return { usdtBalance: 0, freeBalance: 0, ok: true, simulated: false };
       }
+
+      const rows: Array<Record<string, unknown>> = Array.isArray(data)
+        ? (data as Array<Record<string, unknown>>)
+        : data && typeof data === "object" && Array.isArray((data as { balances?: unknown }).balances)
+          ? ((data as { balances: Array<Record<string, unknown>> }).balances)
+          : data && typeof data === "object" && Array.isArray((data as { assets?: unknown }).assets)
+            ? ((data as { assets: Array<Record<string, unknown>> }).assets)
+            : [];
+      const usdtAsset = rows.find((asset) => asset?.asset === "USDT");
+
+      const toBalance = (value: unknown): number => {
+        const parsed = typeof value === "number" ? value : parseFloat(String(value ?? ""));
+        return Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
+      };
+
+      // Futures returns `balance`/`withdrawAvailable`; Spot returns free/locked.
+      // Missing USDT or missing numeric fields is a valid zero balance.
+      const freeBalance = toBalance(
+        type === "Futures"
+          ? (usdtAsset?.withdrawAvailable ?? usdtAsset?.availableBalance ?? usdtAsset?.free)
+          : usdtAsset?.free
+      );
+      const lockedBalance =
+        type === "Futures" ? 0 : toBalance(usdtAsset?.locked);
+      const usdtBalance =
+        type === "Futures" ? toBalance(usdtAsset?.balance) : freeBalance + lockedBalance;
+
+      return { usdtBalance, freeBalance, ok: true, simulated: false };
     } catch (e) {
       // Never invent a $10,000 balance: a failed balance read must block sizing.
       return {

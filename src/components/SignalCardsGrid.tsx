@@ -82,6 +82,7 @@ const DEFAULT_THRESHOLDS: Thresholds = {
   volumeDryUp: 0.5,
   tightness: 0.03,
 };
+const BTC_COUNTER_TREND_PENALTY = 15;
 
 function findCoin(symbol: string): Coin {
   return (
@@ -412,7 +413,7 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
     const nextNewsCards: SignalCard[] = [];
     try {
 
-    // Higher-timeframe (4H) BTC trend filter: only allow signals aligned with BTC.
+    // Higher-timeframe (4H) BTC trend: counter-trend signals stay visible but lose score.
     let btcBullish = true;
     try {
       const btcCandles = await fetchCandles("BTCUSDT", 60, "4h");
@@ -445,8 +446,7 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
         const atrSeries = atr(data, 14);
         const atrValue = atrSeries[atrSeries.length - 1] || price * 0.02;
         const direction: "LONG" | "SHORT" = event.negative ? "SHORT" : "LONG";
-        if (direction === "LONG" && !btcBullish) return null;
-        if (direction === "SHORT" && btcBullish) return null;
+        const btcAligned = direction === "LONG" ? btcBullish : !btcBullish;
 
         const volume24h = volumes24h[coin.symbol] || 0;
         if (volume24h < 10_000_000) return null;
@@ -463,7 +463,7 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
           coin,
           price,
           change,
-          score: 99,
+          score: Math.max(0, 99 - (btcAligned ? 0 : BTC_COUNTER_TREND_PENALTY)),
           direction,
           stopLoss: levels.stopLossPrice,
           takeProfit: levels.takeProfitPrice,
@@ -517,11 +517,18 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
         const volumes = data.map((candle) => candle.volume);
         const currentVolume = volumes[volumes.length - 1];
 
+        const setupBias = confluence?.setupBias;
+        if (
+          setupBias !== "Buy" &&
+          setupBias !== "Strong Buy" &&
+          setupBias !== "Sell" &&
+          setupBias !== "Strong Sell"
+        ) {
+          return null;
+        }
         const direction: "LONG" | "SHORT" =
-          confluence?.setupBias?.includes("Buy") ? "LONG" : "SHORT";
-
-        if (direction === "LONG" && !btcBullish) return null;
-        if (direction === "SHORT" && btcBullish) return null;
+          setupBias === "Buy" || setupBias === "Strong Buy" ? "LONG" : "SHORT";
+        const btcAligned = direction === "LONG" ? btcBullish : !btcBullish;
 
         const volume24h = volumes24h[coin.symbol] || 0;
         if (volume24h < 10_000_000) return null;
@@ -539,7 +546,10 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
           coin,
           price,
           change,
-          score: confluence?.score ?? 0,
+          score: Math.max(
+            0,
+            (confluence?.score ?? 0) - (btcAligned ? 0 : BTC_COUNTER_TREND_PENALTY)
+          ),
           direction,
           stopLoss: levels.stopLossPrice,
           takeProfit: levels.takeProfitPrice,

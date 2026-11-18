@@ -648,9 +648,10 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
   }, [filter, sort, selectedTimeframe, coins]);
 
   const handleDirectTrade = async (card: SignalCard) => {
+    let price = card.price;
     try {
       const live = await fetchTickerPrice(card.coin.binanceSymbol);
-      const price = live?.price ?? card.price;
+      price = live?.price ?? card.price;
       if (card.direction === "LONG") {
         if (price >= card.takeProfit) {
           showToast("Price has already hit Take Profit. Trade cancelled.");
@@ -673,7 +674,31 @@ export default function SignalCardsGrid({ timeframe: initialTimeframe, onSelectC
     } catch {
       // continue to modal if price fetch fails
     }
-    setConfirmCard(card);
+
+    // Squeeze cards wait for the breakout trigger. Entering at market before that
+    // leaves the stop beside the current price while the target stays at the
+    // pending entry, which produces a very poor real risk/reward.
+    if (!card.news) {
+      const triggered =
+        card.direction === "LONG" ? price >= card.entryPrice : price <= card.entryPrice;
+      if (!triggered) {
+        showToast(
+          `${card.direction} entry pending at ${formatPrice(card.entryPrice)}. Wait for the breakout before entering.`
+        );
+        return;
+      }
+    }
+
+    // Re-anchor both brackets to the price actually filled so the intended
+    // 2 ATR stop and 4 ATR target stay intact after signal drift.
+    const levels = calculateAtrStopLoss(price, card.atr, card.direction, 2.0, 2.0);
+    setConfirmCard({
+      ...card,
+      price,
+      entryPrice: price,
+      stopLoss: levels.stopLossPrice,
+      takeProfit: levels.takeProfitPrice,
+    });
   };
 
   const handleConfirmTrade = async (orderType: "MARKET" | "LIMIT" | "STOP_MARKET") => {

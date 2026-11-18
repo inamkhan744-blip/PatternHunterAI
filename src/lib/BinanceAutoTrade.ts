@@ -44,7 +44,7 @@ export interface AutoTradeConfig {
   paperTradingEnabled: boolean; // Paper mode virtual trading
   maxDailyLossPercent: number; // Max daily loss % (default 3%) before tripping circuit breaker
   allowAiFallback: boolean; // Allow trades if Gemini AI fails (local heuristic fallback)
-  minConfluenceScore: number; // Minimum Auto-Pilot confluence score (80-100)
+  minConfluenceScore: number; // Minimum Auto-Pilot confluence score (70-100)
   volatilityScaling: boolean; // Raise score threshold in high-ATR regimes
   adaptiveSizing: boolean; // Scale risk by confluence score
   minAdx: number; // Minimum ADX for trend regime

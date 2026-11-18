@@ -766,7 +766,7 @@ export default function AutoTradeModal({
                 onChange={(e) => handleConfigChange({ minConfluenceScore: Number(e.target.value) })}
                 className="bg-slate-950 border border-cyan-500/40 rounded-lg px-2.5 py-1 text-cyan-300 font-bold outline-none focus:border-cyan-400"
               >
-                {[80, 85, 90, 95, 100].map((score) => (
+                {[70, 75, 80, 85, 90, 95, 100].map((score) => (
                   <option key={score} value={score}>
                     {score}
                   </option>
